@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ko" class="dark">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>docket</title>
+		<script>
+			// 설정은 Rust 에서 늦게 온다. 그 전에 지난번 테마를 먼저 입힌다. 없으면 밝은 테마로 켤 때마다 어두운 화면이 한 번 번쩍인다. 키는 App.tsx 의 THEME_KEY.
+			try {
+				var t = localStorage.getItem("docket.theme");
+				document.documentElement.classList.toggle("dark", t === "light" ? false : t === "system" ? matchMedia("(prefers-color-scheme: dark)").matches : true);
+			} catch (e) {}
+		</script>
+	</head>
+	<body>
+		<div id="root"></div>
+		<script type="module" src="/src/main.tsx"></script>
+	</body>
+</html>

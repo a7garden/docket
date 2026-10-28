@@ -1,0 +1,39 @@
+[package]
+name = "docket"
+version = "0.1.0"
+description = "포스트잇처럼 적은 개발 이슈를 Claude 가 계획하고 구현하는 작업대"
+authors = ["a7garden"]
+license = "MIT"
+edition = "2024"
+
+[lib]
+# Windows 에서 bin 이름과 겹치지 않도록 _lib 를 붙인다 (cargo#8519).
+name = "docket_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+dirs = "6"
+thiserror = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# 앱이 끝나면 띄운 claude 를 함께 끄는 작업 개체(Job Object). 이미 의존성 트리에 있는 판을 쓴다.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

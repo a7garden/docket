@@ -1,0 +1,513 @@
+import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { FolderOpen, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { Empty, Label } from "@/components/bits";
+import { Markdown } from "@/components/Markdown";
+import { MarkdownEditor } from "@/components/MarkdownEditor";
+import {
+	AlertDialog,
+	AlertDialogAction,
+	AlertDialogCancel,
+	AlertDialogContent,
+	AlertDialogDescription,
+	AlertDialogFooter,
+	AlertDialogHeader,
+	AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { api, errorText } from "@/lib/api";
+import { joinPath, relTime } from "@/lib/format";
+import { qk, useAppInfo, useProjects, useResources } from "@/lib/queries";
+import { useUi } from "@/lib/store";
+import type { Resource, ResourceKind, TextFile } from "@/lib/types";
+import { cn } from "@/lib/utils";
+
+const KINDS: { kind: ResourceKind; label: string }[] = [
+	{ kind: "instructions", label: "지침" },
+	{ kind: "skill", label: "스킬" },
+	{ kind: "agent", label: "에이전트" },
+	{ kind: "command", label: "명령" },
+	{ kind: "rule", label: "규칙" },
+];
+const KIND_LABEL = Object.fromEntries(KINDS.map((k) => [k.kind, k.label])) as Record<ResourceKind, string>;
+
+type Scope = "global" | "project";
+
+export function ClaudeConfig() {
+	const qc = useQueryClient();
+	const claudeProjectId = useUi((s) => s.claudeProjectId);
+	const setClaudeProject = useUi((s) => s.setClaudeProject);
+	const { data: projects = [] } = useProjects();
+	// 목록에서 빠진 프로젝트를 가리키고 있으면 전역으로 본다. 그 id 로 조회하면 백엔드가 오류를 낸다.
+	const project = projects.find((p) => p.id === claudeProjectId);
+	const { data: info } = useAppInfo();
+	const scope: Scope = project ? "project" : "global";
+	const { data: all = [] } = useResources(project?.id ?? null);
+	const [query, setQuery] = useState("");
+	const [selected, setSelected] = useState<string | null>(null);
+	const [file, setFile] = useState<string | null>(null);
+	const [dirty, setDirty] = useState(false);
+	const [pending, setPending] = useState<(() => void) | null>(null);
+	const [creating, setCreating] = useState<ResourceKind | null>(null);
+
+	const items = useMemo(() => {
+		const q = query.trim().toLowerCase();
+		return all.filter((r) => r.scope === scope && (!q || r.name.toLowerCase().includes(q) || r.description.toLowerCase().includes(q)));
+	}, [all, scope, query]);
+
+	const current = all.find((r) => r.path === selected) ?? items[0];
+	const currentFile = file && current?.dir ? joinPath(current.dir, file) : current?.path;
+
+	/** 고친 것을 저장하지 않고 다른 곳으로 가려 하면 한 번 묻는다. */
+	const guard = (fn: () => void) => {
+		if (dirty) setPending(() => fn);
+		else fn();
+	};
+
+	/** 범위(전역 · 프로젝트)를 바꾼다. 다른 범위의 목록이 오므로 고른 것도 비운다. */
+	const pickScope = (id: string | null) =>
+		guard(() => {
+			setClaudeProject(id);
+			setSelected(null);
+			setFile(null);
+		});
+
+	const home = info?.claudeHome ?? "";
+	const short = (p: string) => (home && p.toLowerCase().startsWith(home.toLowerCase()) ? "~/.claude" + p.slice(home.length).replace(/\\/g, "/") : p);
+
+	return (
+		<div className="flex min-h-0 flex-1 gap-4">
+			<aside className="flex w-72 shrink-0 flex-col gap-3">
+				{/* 프로젝트를 여기서 바로 고른다. 사이드바로 가서 프로젝트를 누르면 보드로 넘어가 버려 다시 돌아와야 한다. */}
+				<div className="flex gap-0.5 rounded-lg bg-secondary p-0.5">
+					<button
+						type="button"
+						onClick={() => scope !== "global" && pickScope(null)}
+						className={cn(
+							"h-7 shrink-0 rounded-md px-3 text-[12.5px] font-medium text-muted-foreground transition-colors",
+							scope === "global" && "bg-hover text-foreground shadow-[inset_0_0_0_1px_var(--border-strong)]",
+						)}
+					>
+						전역
+					</button>
+					<Select value={project?.id ?? ""} onValueChange={(id) => pickScope(id)} disabled={projects.length === 0}>
+						<SelectTrigger
+							size="sm"
+							aria-label="프로젝트 고르기"
+							className={cn(
+								"h-7 min-w-0 flex-1 rounded-md border-0 bg-transparent px-3 text-[12.5px] font-medium text-muted-foreground shadow-none dark:bg-transparent dark:hover:bg-transparent data-placeholder:text-muted-foreground",
+								scope === "project" && "bg-hover text-foreground shadow-[inset_0_0_0_1px_var(--border-strong)] dark:bg-hover dark:hover:bg-hover",
+							)}
+						>
+							<SelectValue placeholder="프로젝트" />
+						</SelectTrigger>
+						<SelectContent className="pop" position="popper" align="end">
+							{projects.map((p) => (
+								<SelectItem key={p.id} value={p.id} title={p.path}>
+									{p.name}
+								</SelectItem>
+							))}
+						</SelectContent>
+					</Select>
+				</div>
+				<div className="flex gap-2">
+					<div className="relative flex-1">
+						<Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-subtle" />
+						<Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="이름 · 설명 찾기" className="h-8 pl-8 text-[13px]" />
+					</div>
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<Button size="icon" variant="outline" aria-label="새로 만들기">
+								<Plus />
+							</Button>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="end" className="pop">
+							{KINDS.filter((k) => k.kind !== "instructions").map((k) => (
+								<DropdownMenuItem key={k.kind} onSelect={() => setCreating(k.kind)}>
+									새 {k.label}
+								</DropdownMenuItem>
+							))}
+						</DropdownMenuContent>
+					</DropdownMenu>
+				</div>
+				<div className="-mr-1 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+					{KINDS.map(({ kind, label }) => {
+						const list = items.filter((r) => r.kind === kind);
+						if (list.length === 0) return null;
+						return (
+							<section key={kind} className="flex flex-col gap-0.5">
+								<Label className="flex items-center gap-1.5 px-2 pb-1">
+									{label}
+									<span className="tabular font-normal text-subtle">{list.length}</span>
+								</Label>
+								{list.map((r) => (
+									<button
+										key={r.path}
+										type="button"
+										onClick={() =>
+											guard(() => {
+												setSelected(r.path);
+												setFile(null);
+											})
+										}
+										className={cn(
+											"flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-hover",
+											current?.path === r.path && "bg-hover shadow-[inset_0_0_0_1px_var(--border-strong)]",
+										)}
+									>
+										<span className={cn("truncate text-[13px] font-medium", !r.exists && "text-subtle")}>{r.name}</span>
+										{r.description ? (
+											<span className="line-clamp-2 text-[12px] leading-snug break-keep text-subtle">{r.description}</span>
+										) : (
+											!r.exists && <span className="text-[12px] text-subtle">아직 없습니다. 저장하면 만듭니다.</span>
+										)}
+									</button>
+								))}
+							</section>
+						);
+					})}
+					{items.length === 0 && <Empty>찾는 것이 없습니다</Empty>}
+				</div>
+			</aside>
+
+			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
+				{current && currentFile ? (
+					<ResourceEditor
+						key={currentFile}
+						resource={current}
+						projectId={project?.id ?? null}
+						path={currentFile}
+						file={file}
+						onFile={(f) => guard(() => setFile(f))}
+						shortPath={short(currentFile)}
+						onDirty={setDirty}
+						onDeleted={() => {
+							setSelected(null);
+							setFile(null);
+							void qc.invalidateQueries({ queryKey: qk.resources(project?.id ?? null) });
+						}}
+					/>
+				) : (
+					<Empty className="py-24">왼쪽에서 고를 것을 누르세요</Empty>
+				)}
+			</div>
+
+			<AlertDialog open={!!pending} onOpenChange={(o) => !o && setPending(null)}>
+				<AlertDialogContent className="pop">
+					<AlertDialogHeader>
+						<AlertDialogTitle>저장하지 않은 변경이 있습니다</AlertDialogTitle>
+						<AlertDialogDescription>이대로 옮기면 고친 내용이 사라집니다.</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel>머무르기</AlertDialogCancel>
+						<AlertDialogAction
+							variant="destructive"
+							onClick={() => {
+								setDirty(false);
+								pending?.();
+								setPending(null);
+							}}
+						>
+							버리고 옮기기
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+
+			<CreateDialog
+				kind={creating}
+				scope={scope}
+				projectId={project?.id ?? null}
+				onClose={() => setCreating(null)}
+				onCreated={(path) => {
+					void qc.invalidateQueries({ queryKey: qk.resources(project?.id ?? null) });
+					setSelected(path);
+					setFile(null);
+				}}
+			/>
+		</div>
+	);
+}
+
+function ResourceEditor({
+	resource,
+	projectId,
+	path,
+	file,
+	onFile,
+	shortPath,
+	onDirty,
+	onDeleted,
+}: {
+	resource: Resource;
+	/** 저장 뒤 새로 고칠 목록의 프로젝트. 사이드바의 현재 프로젝트를 쓰면 다른 프로젝트의 목록만 새로 고쳐진다. */
+	projectId: string | null;
+	path: string;
+	file: string | null;
+	onFile: (f: string | null) => void;
+	shortPath: string;
+	onDirty: (d: boolean) => void;
+	onDeleted: () => void;
+}) {
+	const qc = useQueryClient();
+	const { data: text, error, refetch } = useQuery({ queryKey: ["text", path], queryFn: () => api.textRead(path), staleTime: 0 });
+	const [draft, setDraftState] = useState<string | null>(null);
+	const [preview, setPreview] = useState(false);
+	const [conflict, setConflict] = useState(false);
+	const [confirmDelete, setConfirmDelete] = useState(false);
+	const markdownFile = /\.md$/i.test(path);
+
+	const setDraft = (v: string | null) => {
+		setDraftState(v);
+		onDirty(v !== null);
+	};
+
+	const save = async (force = false) => {
+		if (!text || draft === null) return;
+		try {
+			const next: TextFile = await api.textWrite(text, draft, force);
+			qc.setQueryData(["text", path], next);
+			setDraft(null);
+			setConflict(false);
+			void qc.invalidateQueries({ queryKey: qk.resources(projectId) });
+			toast("저장했습니다");
+		} catch (e) {
+			if (errorText(e) === "conflict") setConflict(true);
+			else toast.error(errorText(e));
+		}
+	};
+
+	const others = resource.files.filter((f) => !/^skill\.md$/i.test(f));
+	const value = draft ?? text?.content ?? "";
+
+	return (
+		<div className="flex min-h-0 flex-1 flex-col gap-3">
+			<header className="flex items-start gap-3">
+				<div className="min-w-0 flex-1">
+					<div className="flex items-center gap-2">
+						<h2 className="truncate text-[17px] font-semibold tracking-[-0.015em]">{resource.name}</h2>
+						<span className="text-[12px] text-subtle">{KIND_LABEL[resource.kind]}</span>
+						{draft !== null && <span className="text-[12px] text-foreground">· 저장 안 됨</span>}
+					</div>
+					<button type="button" className="mono mt-0.5 block max-w-full truncate text-[12px] text-subtle hover:text-foreground" title="폴더에서 보기" onClick={() => void api.reveal(path).catch(() => {})}>
+						{shortPath}
+					</button>
+				</div>
+				{markdownFile && (
+					<div className="inline-flex shrink-0 rounded-lg bg-secondary p-0.5">
+						{[false, true].map((p) => (
+							<button
+								key={String(p)}
+								type="button"
+								onClick={() => setPreview(p)}
+								className={cn("h-7 rounded-md px-2.5 text-[12px] font-medium text-muted-foreground", preview === p && "bg-hover text-foreground shadow-[inset_0_0_0_1px_var(--border-strong)]")}
+							>
+								{p ? "미리보기" : "편집"}
+							</button>
+						))}
+					</div>
+				)}
+				{/* 고친 것이 없을 때는 노란색을 쓰지 않는다. 흐린 노란 단추가 결정할 일이 있는 것처럼 보인다. */}
+				<Button variant={draft === null ? "outline" : "default"} disabled={draft === null} onClick={() => void save()}>
+					저장
+				</Button>
+				{resource.kind !== "instructions" && (
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<Button size="icon" variant="ghost" aria-label="더 보기">
+								<MoreHorizontal />
+							</Button>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="end" className="pop w-48">
+							<DropdownMenuItem onSelect={() => void api.reveal(resource.dir || resource.path)}>
+								<FolderOpen />
+								폴더 열기
+							</DropdownMenuItem>
+							<DropdownMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>
+								<Trash2 />
+								지우기
+							</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
+				)}
+			</header>
+
+			{resource.kind === "skill" && others.length > 0 && (
+				<div className="flex flex-wrap gap-1">
+					{["SKILL.md", ...others].map((f) => {
+						const active = f === "SKILL.md" ? file === null : file === f;
+						return (
+							<button
+								key={f}
+								type="button"
+								onClick={() => onFile(f === "SKILL.md" ? null : f)}
+								className={cn(
+									"mono h-7 rounded-md px-2.5 text-[12px] text-muted-foreground transition-colors hover:bg-hover hover:text-foreground",
+									active && "bg-hover text-foreground shadow-[inset_0_0_0_1px_var(--border-strong)]",
+								)}
+							>
+								{f}
+							</button>
+						);
+					})}
+				</div>
+			)}
+
+			<div className="surface min-h-0 flex-1 overflow-y-auto rounded-xl px-5 py-4" data-scroll>
+				{error ? (
+					<p className="text-[13px] text-danger">{errorText(error)}</p>
+				) : !text ? null : preview && markdownFile ? (
+					<Markdown text={value} />
+				) : (
+					<MarkdownEditor
+						value={value}
+						onChange={(v) => setDraft(v === text.content ? null : v)}
+						onSave={() => void save()}
+						minHeight="100%"
+						plain={!markdownFile}
+						placeholder={resource.kind === "instructions" ? "모든 세션에 들어갈 지침을 적습니다" : ""}
+					/>
+				)}
+			</div>
+			{text && (
+				<footer className="flex items-center gap-3 text-[12px] text-subtle">
+					<span>{text.exists ? `${relTime(text.modified)} 고침` : "새 파일"}</span>
+					<span>{text.crlf ? "CRLF" : "LF"}</span>
+					{text.bom && <span>BOM</span>}
+					<span className="ml-auto">Ctrl S 로 저장</span>
+				</footer>
+			)}
+
+			<AlertDialog open={conflict} onOpenChange={setConflict}>
+				<AlertDialogContent className="pop">
+					<AlertDialogHeader>
+						<AlertDialogTitle>다른 곳에서 이 파일이 바뀌었습니다</AlertDialogTitle>
+						<AlertDialogDescription>
+							열어 둔 사이 다른 편집기나 Claude 세션이 고쳤습니다. 다시 불러오면 이쪽에서 고친 것이 사라지고, 덮어쓰면 그쪽에서 고친 것이 사라집니다.
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel
+							onClick={() => {
+								setDraft(null);
+								void refetch();
+							}}
+						>
+							다시 불러오기
+						</AlertDialogCancel>
+						<AlertDialogAction variant="destructive" onClick={() => void save(true)}>
+							덮어쓰기
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+
+			<AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+				<AlertDialogContent className="pop">
+					<AlertDialogHeader>
+						<AlertDialogTitle>
+							{KIND_LABEL[resource.kind]} 「{resource.name}」 를 지울까요?
+						</AlertDialogTitle>
+						<AlertDialogDescription>
+							{resource.kind === "skill" ? "스킬 폴더째" : "이 파일을"} 앱 데이터의 휴지통 폴더로 옮깁니다. 다음 Claude 세션부터 쓰이지 않습니다.
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel>취소</AlertDialogCancel>
+						<AlertDialogAction
+							variant="destructive"
+							onClick={() =>
+								void api
+									.resourceDelete(resource.path)
+									.then(() => {
+										onDirty(false);
+										onDeleted();
+									})
+									.catch((e) => toast.error(errorText(e)))
+							}
+						>
+							지우기
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+		</div>
+	);
+}
+
+function CreateDialog({
+	kind,
+	scope,
+	projectId,
+	onClose,
+	onCreated,
+}: {
+	kind: ResourceKind | null;
+	scope: Scope;
+	projectId: string | null;
+	onClose: () => void;
+	onCreated: (path: string) => void;
+}) {
+	const [name, setName] = useState("");
+	const [description, setDescription] = useState("");
+	const [busy, setBusy] = useState(false);
+	const valid = /^[A-Za-z0-9_-]+$/.test(name);
+	const where = scope === "global" ? "~/.claude" : "프로젝트의 .claude";
+
+	const submit = async () => {
+		if (!kind || !valid) return;
+		setBusy(true);
+		try {
+			const path = await api.resourceCreate(kind, scope, projectId, name, description);
+			onCreated(path);
+			onClose();
+			setName("");
+			setDescription("");
+		} catch (e) {
+			toast.error(errorText(e));
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	return (
+		<Dialog open={!!kind} onOpenChange={(o) => !o && onClose()}>
+			<DialogContent className="pop gap-4 p-6 sm:max-w-lg">
+				<DialogHeader>
+					<DialogTitle>새 {kind ? KIND_LABEL[kind] : ""}</DialogTitle>
+					<DialogDescription>{where} 아래에 만듭니다.</DialogDescription>
+				</DialogHeader>
+				<div className="flex flex-col gap-1.5">
+					<Label>이름</Label>
+					<Input value={name} onChange={(e) => setName(e.target.value)} placeholder="영문 · 숫자 · - · _" autoFocus aria-invalid={!!name && !valid} />
+					{name && !valid && <span className="text-[12px] text-danger">영문 · 숫자 · - · _ 만 씁니다</span>}
+				</div>
+				{kind !== "rule" && (
+					<div className="flex flex-col gap-1.5">
+						<Label>설명</Label>
+						<Textarea
+							value={description}
+							onChange={(e) => setDescription(e.target.value)}
+							placeholder={kind === "skill" ? "언제 이 스킬을 쓰는지. Claude 는 이 설명을 보고 스킬을 고릅니다." : "무엇을 하는지"}
+							className="min-h-20 resize-none bg-transparent text-[13.5px]"
+						/>
+					</div>
+				)}
+				<DialogFooter>
+					<Button variant="ghost" onClick={onClose}>
+						취소
+					</Button>
+					<Button disabled={!valid || busy} onClick={() => void submit()}>
+						만들기
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}

@@ -1,0 +1,265 @@
+import { useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { File, FileImage, FileSpreadsheet, FileText, FileType2, Loader2, Plus, Presentation, Upload } from "lucide-react";
+import { toast } from "sonner";
+import { Chip, Empty } from "@/components/bits";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { api, errorText } from "@/lib/api";
+import { useDropZone } from "@/lib/drop";
+import { bytes, extOf, relTime } from "@/lib/format";
+import { useDeliverables, useIssues } from "@/lib/queries";
+import { useLive, useUi } from "@/lib/store";
+import type { Deliverable, Project } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import { DeliverableSheet } from "./DeliverableSheet";
+
+export function FileIcon({ name, className }: { name: string; className?: string }) {
+	const ext = extOf(name);
+	const c = cn("size-4 shrink-0", className);
+	if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp"].includes(ext)) return <FileImage className={c} />;
+	if (["xlsx", "xls", "csv"].includes(ext)) return <FileSpreadsheet className={c} />;
+	if (["pptx", "ppt"].includes(ext)) return <Presentation className={c} />;
+	if (["md", "txt", "markdown"].includes(ext)) return <FileText className={c} />;
+	if (["pdf", "docx", "doc", "hwp", "hwpx"].includes(ext)) return <FileType2 className={c} />;
+	return <File className={c} />;
+}
+
+export const SOURCE_LABEL: Record<string, string> = { import: "가져옴", editor: "직접 씀", claude: "Claude 작성", issue: "이슈에서" };
+
+export function Deliverables({ project }: { project: Project }) {
+	const { data: list = [], isLoading } = useDeliverables(project.id);
+	const { data: issues = [] } = useIssues(project.id);
+	const openDeliverable = useUi((s) => s.openDeliverable);
+	const openIssue = useUi((s) => s.openIssue);
+	const setView = useUi((s) => s.setView);
+	const [creating, setCreating] = useState(false);
+
+	const importPaths = async (paths: string[]) => {
+		try {
+			const added = await api.deliverableImport(project.id, paths);
+			toast(`${added.length}개를 산출물로 가져왔습니다`);
+		} catch (e) {
+			toast.error(errorText(e));
+		}
+	};
+	const [dropRef, over] = useDropZone<HTMLDivElement>(importPaths);
+
+	return (
+		<div ref={dropRef} className="relative flex min-h-0 flex-1 flex-col gap-4">
+			<div className="flex items-center gap-2">
+				<Button onClick={() => setCreating(true)}>
+					<Plus />새 산출물
+				</Button>
+				<Button
+					variant="outline"
+					onClick={async () => {
+						const picked = await openDialog({ multiple: true, title: "산출물로 가져올 파일" });
+						if (Array.isArray(picked) && picked.length) await importPaths(picked);
+					}}
+				>
+					<Upload />
+					파일 가져오기
+				</Button>
+				<span className="ml-2 text-[12.5px] text-subtle">파일을 끌어다 놓아도 됩니다</span>
+				<div className="flex-1" />
+				<span className="mono truncate text-[12px] text-subtle" title="판 파일을 두는 폴더">
+					{project.deliverablesDir || "앱 데이터 폴더"}
+				</span>
+			</div>
+
+			<div className="min-h-0 flex-1 overflow-y-auto">
+				{!isLoading && list.length === 0 ? (
+					<Empty className="py-24 leading-relaxed">
+						이 프로젝트의 산출물이 아직 없습니다.
+						<br />
+						새 산출물을 만들고 템플릿 · 참고 자료를 넣으면 Claude 가 그 형식대로 씁니다.
+					</Empty>
+				) : (
+					<div className="surface overflow-hidden rounded-md">
+						<div className="grid grid-cols-[minmax(0,1fr)_72px_104px_88px] items-center gap-4 border-b border-border px-4 py-2 text-[12px] font-semibold text-subtle">
+							<span>이름</span>
+							<span>판</span>
+							<span>출처</span>
+							<span className="text-right">고친 때</span>
+						</div>
+						{list.map((d) => (
+							<Row
+								key={d.id}
+								d={d}
+								issueNumber={issues.find((i) => i.id === d.issueId)?.number}
+								onOpen={() => openDeliverable(d.id)}
+								onIssue={() => {
+									setView("board");
+									openIssue(d.issueId);
+								}}
+							/>
+						))}
+					</div>
+				)}
+			</div>
+
+			{over && (
+				<div className="pointer-events-none absolute inset-0 grid place-items-center rounded-md border-2 border-dashed border-foreground/40 bg-background/80 text-[14px] font-medium text-foreground">
+					놓으면 산출물로 가져옵니다
+				</div>
+			)}
+
+			<NewDialog
+				project={project}
+				open={creating}
+				onOpenChange={setCreating}
+				onCreated={(d) => {
+					setCreating(false);
+					openDeliverable(d.id);
+				}}
+			/>
+			<DeliverableSheet project={project} />
+		</div>
+	);
+}
+
+function Row({ d, issueNumber, onOpen, onIssue }: { d: Deliverable; issueNumber?: number; onOpen: () => void; onIssue: () => void }) {
+	const last = d.versions[d.versions.length - 1];
+	const activity = useLive((s) => (d.job ? s.byTarget[d.id]?.activity : undefined));
+	const sub = last ? [last.file, bytes(last.size)] : ["아직 판 없음"];
+	if (d.refs.length) sub.push(`템플릿 · 자료 ${d.refs.length}`);
+	return (
+		<div
+			role="button"
+			tabIndex={0}
+			onClick={onOpen}
+			onKeyDown={(e) => e.key === "Enter" && onOpen()}
+			className="grid grid-cols-[minmax(0,1fr)_72px_104px_88px] items-center gap-4 border-b border-border px-4 py-2.5 text-[13.5px] transition-colors outline-none last:border-b-0 hover:bg-hover focus-visible:bg-hover"
+		>
+			<div className="flex min-w-0 items-center gap-3">
+				<span className="text-subtle">{d.job ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : <FileIcon name={last?.file ?? ".md"} />}</span>
+				<div className="min-w-0">
+					<div className="truncate font-medium">{d.title || "작성 중인 문서"}</div>
+					<div className="truncate text-[12px] text-subtle">
+						{d.job ? (
+							<span className="text-foreground">{d.job.phase === "queued" ? "앞선 작업을 기다리는 중" : activity || "Claude 가 쓰는 중"}</span>
+						) : d.error ? (
+							<span className="text-danger">{d.error.split("\n")[0]}</span>
+						) : (
+							sub.join(" · ")
+						)}
+					</div>
+				</div>
+				{issueNumber !== undefined && (
+					<button
+						type="button"
+						className="mono shrink-0 rounded-md px-1.5 text-[12px] text-subtle hover:bg-hover hover:text-foreground"
+						title="이 산출물을 남긴 이슈 열기"
+						onClick={(e) => {
+							e.stopPropagation();
+							onIssue();
+						}}
+					>
+						#{issueNumber}
+					</button>
+				)}
+			</div>
+			<span className="tabular text-[12.5px] text-muted-foreground">{last ? `v${last.n}` : ""}</span>
+			<span>{last && <Chip>{SOURCE_LABEL[last.source] ?? last.source}</Chip>}</span>
+			<span className="text-right text-[12.5px] text-subtle">{relTime(d.updatedAt)}</span>
+		</div>
+	);
+}
+
+function NewDialog({ project, open, onOpenChange, onCreated }: { project: Project; open: boolean; onOpenChange: (o: boolean) => void; onCreated: (d: Deliverable) => void }) {
+	const [title, setTitle] = useState("");
+	const [busy, setBusy] = useState(false);
+	const create = async () => {
+		if (!title.trim()) return;
+		setBusy(true);
+		try {
+			onCreated(await api.deliverableCreate(project.id, title));
+			setTitle("");
+		} catch (e) {
+			toast.error(errorText(e));
+		} finally {
+			setBusy(false);
+		}
+	};
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="pop gap-4 p-6 sm:max-w-md">
+				<DialogHeader>
+					<DialogTitle>새 산출물</DialogTitle>
+					<DialogDescription className="leading-relaxed break-keep">만든 뒤 템플릿 · 참고 자료와 작성 지침을 넣고 Claude 에게 쓰게 합니다.</DialogDescription>
+				</DialogHeader>
+				<Input
+					autoFocus
+					value={title}
+					onChange={(e) => setTitle(e.target.value)}
+					onKeyDown={(e) => e.key === "Enter" && void create()}
+					placeholder="예: 테이블 정의서"
+					className="h-9"
+				/>
+				<DialogFooter>
+					<Button variant="ghost" onClick={() => onOpenChange(false)}>
+						취소
+					</Button>
+					<Button disabled={busy || !title.trim()} onClick={() => void create()}>
+						만들기
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+export function GenerateDialog({ project, open, onOpenChange, deliverable }: { project: Project; open: boolean; onOpenChange: (o: boolean) => void; deliverable: Deliverable }) {
+	const [request, setRequest] = useState("");
+	const [busy, setBusy] = useState(false);
+	const hasRecipe = !!deliverable.guide.trim() || deliverable.refs.length > 0;
+	const submit = async () => {
+		if (!request.trim() && !hasRecipe) return;
+		setBusy(true);
+		try {
+			await api.deliverableGenerate(project.id, request, deliverable.id);
+			onOpenChange(false);
+			setRequest("");
+		} catch (e) {
+			toast.error(errorText(e));
+		} finally {
+			setBusy(false);
+		}
+	};
+	const asFile = deliverable.mode === "file";
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="pop gap-4 p-6 sm:max-w-xl">
+				<DialogHeader>
+					<DialogTitle>{deliverable.versions.length ? `「${deliverable.title}」 새 판 쓰기` : `「${deliverable.title}」 쓰기`}</DialogTitle>
+					<DialogDescription className="leading-relaxed break-keep">
+						{asFile
+							? `템플릿 형식대로 파일을 만들어 ${deliverable.outputDir} 에 둡니다.`
+							: `Claude 가 코드와 템플릿을 읽고 마크다운으로 씁니다. 파일 이름은 ${deliverable.nextName} 입니다.`}
+					</DialogDescription>
+				</DialogHeader>
+				<Textarea
+					autoFocus
+					value={request}
+					onChange={(e) => setRequest(e.target.value)}
+					onKeyDown={(e) => {
+						if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) void submit();
+					}}
+					placeholder={hasRecipe ? "이번 판에 더할 요청. 비워 두면 작성 지침과 템플릿대로 씁니다." : "무엇을 쓸지. 예: 화면별 기능 설명. 화면마다 하는 일, 쓰는 API, 남은 일"}
+					className="min-h-28 resize-none bg-transparent text-[13.5px] leading-relaxed"
+				/>
+				<DialogFooter>
+					<Button variant="ghost" onClick={() => onOpenChange(false)}>
+						취소
+					</Button>
+					<Button disabled={busy || (!request.trim() && !hasRecipe)} onClick={() => void submit()}>
+						쓰게 하기
+					</Button>
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
