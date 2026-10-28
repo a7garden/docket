@@ -1,6 +1,7 @@
 name: release
 
 # v* 태그를 밀거나 Actions 에서 손으로 돌리면 Windows 설치 파일(NSIS)을 만들어 릴리즈에 올린다.
+# 설치된 앱은 릴리즈의 latest.json 을 보고 스스로 업데이트한다. 서명 키가 없으면 latest.json 이 안 생겨 업데이트가 끊긴다.
 on:
   push:
     tags: ["v*"]
@@ -31,9 +32,12 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: docket v__VERSION__
           releaseBody: Windows 설치 파일은 아래 `docket_*_x64-setup.exe` 를 받아 실행한다.
           releaseDraft: false
           prerelease: false
+          uploadUpdaterJson: true

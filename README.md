@@ -108,6 +108,14 @@ cd src-tauri && cargo check
   `DOCKET_TEST_PROJECT=<폴더> cargo test -- --ignored --nocapture`
 - 템플릿 글자 뽑기를 실제 오피스 파일로 볼 때: `DOCKET_SAMPLES="<파일1>;<파일2>" cargo test sample -- --ignored --nocapture`
 
+### 릴리즈 · 자동 업데이트
+
+- `package.json` · `src-tauri/Cargo.toml` · `src-tauri/tauri.conf.json` 의 버전을 함께 올리고 커밋한 뒤 `git tag v<버전> && git push origin v<버전>`.
+  `.github/workflows/release.yml` 이 Windows 설치 파일 · 서명 · `latest.json` 을 릴리즈에 올린다.
+- 설치된 앱은 켤 때 `releases/latest/download/latest.json` 을 보고, 새 판이면 알림의 「설치」로 받아 깔고 다시 켠다.
+- 업데이트 서명 키는 `~/.tauri/docket.key`(비밀번호 없음)이고, 저장소 비밀 `TAURI_SIGNING_PRIVATE_KEY` 에 같은 내용이 있다.
+  **키를 잃으면 이미 깔린 앱은 더는 업데이트를 받지 못한다** — 공개 키가 앱 안(`tauri.conf.json` 의 `plugins.updater.pubkey`)에 박혀 있다.
+
 ### 구조
 
 | 위치 | 맡은 일 |

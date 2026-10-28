@@ -13,6 +13,7 @@ import { IssueSheet } from "@/features/issue/IssueSheet";
 import { ProjectHeader } from "@/features/project/ProjectHeader";
 import { Settings } from "@/features/settings/Settings";
 import { useDocketEvents } from "@/lib/events";
+import { useUpdater } from "@/lib/updater";
 import { useAppInfo, useProjects, useSettings } from "@/lib/queries";
 import { useUi } from "@/lib/store";
 
@@ -50,6 +51,7 @@ function useTheme(theme: string | undefined): "dark" | "light" {
 
 export default function App() {
 	useDocketEvents();
+	useUpdater();
 	const { data: settings } = useSettings();
 	const theme = useTheme(settings?.theme);
 	const { data: projects, isLoading } = useProjects();
