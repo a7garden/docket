@@ -12,6 +12,7 @@ import { api, errorText } from "@/lib/api";
 import { qk, useAppInfo, usePlugins, useSettings } from "@/lib/queries";
 import type { PluginView, Settings as S } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { Updates } from "./Updates";
 
 export const MODELS = [
 	{ value: "default", label: "CLI 기본값" },
@@ -140,6 +141,8 @@ export function Settings() {
 					</Row>
 				</Group>
 
+				<Updates version={info?.version} />
+
 				<Group title="저장 위치">
 					<Row
 						label="앱 데이터"
@@ -152,7 +155,6 @@ export function Settings() {
 					</Row>
 				</Group>
 
-				<p className="text-[12px] text-subtle">docket {info?.version}</p>
 			</div>
 		</div>
 	);
@@ -229,7 +231,7 @@ function PathLine({ path }: { path?: string }) {
 	);
 }
 
-function Group({ title, children }: { title: string; children: ReactNode }) {
+export function Group({ title, children }: { title: string; children: ReactNode }) {
 	return (
 		<section className="flex flex-col gap-1">
 			<h2 className="px-1 pb-2 text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
@@ -238,7 +240,7 @@ function Group({ title, children }: { title: string; children: ReactNode }) {
 	);
 }
 
-function Row({ label, hint, inline, children }: { label: string; hint?: string; inline?: boolean; children: ReactNode }) {
+export function Row({ label, hint, inline, children }: { label: string; hint?: string; inline?: boolean; children: ReactNode }) {
 	return (
 		<div className={cn("flex gap-4 px-4 py-3.5", inline ? "items-center" : "flex-col gap-2")}>
 			<div className={cn("flex flex-col gap-0.5", inline && "flex-1")}>

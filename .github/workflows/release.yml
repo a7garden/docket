@@ -14,9 +14,9 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -29,6 +29,11 @@ jobs:
 
       - run: npm ci
 
+      # CHANGELOG.md 의 이번 판 구획이 릴리즈 노트가 되고, latest.json 을 거쳐 앱의 업데이트 알림 · 설정 화면에 보인다.
+      - name: 릴리즈 노트
+        id: notes
+        run: node .github/scripts/release-notes.mjs
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -37,7 +42,7 @@ jobs:
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
           releaseName: docket v__VERSION__
-          releaseBody: Windows 설치 파일은 아래 `docket_*_x64-setup.exe` 를 받아 실행한다.
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
