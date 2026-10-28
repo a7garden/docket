@@ -2,13 +2,21 @@ mod claude_files;
 mod commands;
 mod error;
 mod extract;
+mod kb;
 mod model;
 mod naming;
 mod plugins;
 mod runner;
 mod store;
+mod usage;
 
 use tauri::Manager;
+
+/// 앱이 스스로를 한 번 더 띄워 맡긴 일이면 그 일을 하고 종료 코드를 돌려준다. 지금은 PDF 글자 뽑기 하나다(extract::pdf_text).
+pub fn child_task() -> Option<i32> {
+	let args: Vec<String> = std::env::args().skip(1).collect();
+	(args.first().map(String::as_str) == Some(extract::PDF_FLAG)).then(|| extract::pdf_child(&args[1..]))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -36,13 +44,18 @@ pub fn run() {
 					let _ = w.set_background_color(Some(tauri::window::Color(247, 247, 247, 255)));
 				}
 			}
+			usage::init(app.handle().clone(), &store.root);
 			app.manage(store);
 			app.manage(runner::Runner::default());
+			app.manage(kb::Kb::default());
 			runner::spawn_auto_planner(app.handle().clone());
+			runner::spawn_titler(app.handle().clone());
+			kb::spawn_indexer(app.handle().clone());
 			Ok(())
 		})
 		.invoke_handler(tauri::generate_handler![
 			commands::app_info,
+			commands::usage_get,
 			commands::settings_get,
 			commands::settings_save,
 			commands::path_open,
@@ -58,8 +71,12 @@ pub fn run() {
 			commands::issues_list,
 			commands::issue_get,
 			commands::issue_create,
+			commands::talks_list,
+			commands::talk_create,
 			commands::issue_save_note,
+			commands::issue_set_title,
 			commands::issue_set_auto_plan,
+			commands::issue_set_model,
 			commands::issue_plan,
 			commands::issue_approve,
 			commands::issue_rework,
@@ -98,6 +115,14 @@ pub fn run() {
 			commands::deliverable_generate,
 			commands::deliverable_stop,
 			commands::deliverable_from_issue,
+			commands::kb_status,
+			commands::kb_save,
+			commands::kb_import,
+			commands::kb_inbox_delete,
+			commands::kb_reindex,
+			commands::kb_stop,
+			commands::kb_search,
+			commands::kb_cards,
 			commands::resources_list,
 			commands::text_read,
 			commands::text_write,

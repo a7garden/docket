@@ -10,8 +10,10 @@ import { Board } from "@/features/board/Board";
 import { ClaudeConfig } from "@/features/claude/ClaudeConfig";
 import { Deliverables } from "@/features/deliverables/Deliverables";
 import { IssueSheet } from "@/features/issue/IssueSheet";
+import { Knowledge } from "@/features/knowledge/Knowledge";
 import { ProjectHeader } from "@/features/project/ProjectHeader";
 import { Settings } from "@/features/settings/Settings";
+import { Talks } from "@/features/talk/Talks";
 import { useDocketEvents } from "@/lib/events";
 import { useUpdater } from "@/lib/updater";
 import { useAppInfo, useProjects, useSettings } from "@/lib/queries";
@@ -63,7 +65,7 @@ export default function App() {
 		if (projects && !project && projects.length) setProject(projects[0].id);
 	}, [projects, project, setProject]);
 
-	const projectView = view === "board" || view === "deliverables";
+	const projectView = view === "board" || view === "deliverables" || view === "talks" || view === "knowledge";
 	const title = view === "claude" ? "Claude 설정" : view === "settings" ? "설정" : null;
 
 	return (
@@ -82,7 +84,15 @@ export default function App() {
 					) : project && projectView ? (
 						<>
 							<ProjectHeader project={project} />
-							{view === "board" ? <Board project={project} /> : <Deliverables project={project} />}
+							{view === "board" ? (
+								<Board project={project} />
+							) : view === "talks" ? (
+								<Talks project={project} />
+							) : view === "knowledge" ? (
+								<Knowledge project={project} />
+							) : (
+								<Deliverables project={project} />
+							)}
 							<IssueSheet project={project} />
 						</>
 					) : null}

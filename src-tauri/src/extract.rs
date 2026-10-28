@@ -3,12 +3,24 @@
 //! Claude 의 Read 도구는 docx · xlsx · pptx · hwpx 를 읽지 못한다. 이 형식들은 zip 안의 XML 이라
 //! 글 조각(t) · 문단(p) · 칸(tc) · 행(row) 경계만 따라가면 본문이 나온다. 뽑은 글은 refs/.text/ 에 두고 Claude 가 그것을 읽는다.
 //! 서식(글꼴 · 칸 너비)은 따라오지 않는다. 구성과 문구를 따르게 하는 데에는 그만큼이면 된다.
+//!
+//! 지식베이스(kb.rs)도 여기서 글자를 얻는다(text_of). PDF 는 앱을 한 번 더 띄워 뽑는다(pdf_text).
 
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 const MAX_CHARS: usize = 300_000;
+
+/// 지식베이스에 넣는 형식. 화면의 「지원 형식」도 이 목록을 그대로 보인다.
+/// hwp(옛 한글) · doc · xls · ppt 는 zip 이 아니라 뽑지 못하고, 그림은 색인할 글자가 없어 넣지 않는다.
+pub const KB_EXTS: &[&str] = &[
+	"md", "markdown", "txt", "csv", "tsv", "json", "yaml", "yml", "xml", "html", "htm", "sql", "docx", "xlsx", "pptx", "hwpx", "pdf",
+];
+
+/// main 이 이 인자를 보면 창을 띄우지 않고 PDF 글자만 뽑고 끝난다 (pdf_child).
+pub const PDF_FLAG: &str = "--docket-pdf-text";
 
 pub fn ext_of(name: &str) -> String {
 	Path::new(name).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
@@ -244,6 +256,99 @@ pub fn extract(path: &Path) -> Result<String, String> {
 	Ok(tidy(text))
 }
 
+/// html 은 태그를 걷고 글만 남긴다. 태그 · 속성이 색인에 섞이면 찾기 점수가 흐려진다. script · style 안은 버린다.
+fn html_text(html: &str) -> String {
+	let mut out = String::new();
+	let mut skip = 0usize;
+	scan(html, |ev| match ev {
+		Ev::Open("script" | "style", _) => skip += 1,
+		Ev::Close("script" | "style") => skip = skip.saturating_sub(1),
+		Ev::Close("p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6") | Ev::Empty("br", _) => out.push('\n'),
+		Ev::Close("td" | "th") => out.push('\t'),
+		Ev::Text(s) if skip == 0 => out.push_str(&unescape(s)),
+		_ => {}
+	});
+	out
+}
+
+/// 지식베이스에 넣을 글자. 글 형식은 그대로 읽고, 오피스 문서는 extract, PDF 는 pdf_text 로 뽑는다.
+/// 글 파일은 UTF-8 로 읽는다. 다른 인코딩(CP949 등)은 깨진 글자를 바꿔 넣고 읽는다 — 인코딩 의존성을 들이지 않으려고 받아들였다.
+pub fn text_of(path: &Path) -> Result<String, String> {
+	let ext = ext_of(&path.to_string_lossy());
+	if !KB_EXTS.contains(&ext.as_str()) {
+		return Err("지원하지 않는 형식".into());
+	}
+	let text = match ext.as_str() {
+		"docx" | "xlsx" | "pptx" | "hwpx" => extract(path)?,
+		"pdf" => pdf_text(path)?,
+		_ => {
+			let raw = std::fs::read(path).map_err(|e| e.to_string())?;
+			let body = raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&raw[..]);
+			let s = String::from_utf8_lossy(body).into_owned();
+			tidy(if ext == "html" || ext == "htm" { html_text(&s) } else { s })
+		}
+	};
+	if text.trim().is_empty() {
+		return Err(if ext == "pdf" { "글자 없음 (스캔 PDF 일 수 있음)" } else { "글자 없음" }.into());
+	}
+	Ok(text)
+}
+
+/// PDF 는 앱을 한 번 더 띄워 뽑는다. pdf-extract 는 깨진 PDF 에서 패닉할 수 있는데, 릴리즈는 panic = "abort" 라
+/// 같은 프로세스에서 패닉하면 앱이 통째로 꺼진다. 따로 띄운 프로세스가 죽으면 그 파일만 건너뛴다.
+fn pdf_text(path: &Path) -> Result<String, String> {
+	let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+	let out = std::env::temp_dir().join(format!("docket-pdf-{}.txt", crate::model::short_id()));
+	let mut cmd = std::process::Command::new(exe);
+	cmd.arg(PDF_FLAG)
+		.arg(path)
+		.arg(&out)
+		.stdin(std::process::Stdio::null())
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::null());
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+	}
+	let mut child = cmd.spawn().map_err(|e| format!("PDF 를 뽑을 프로세스를 띄우지 못함: {e}"))?;
+	// 큰 PDF 가 색인을 붙잡지 않게 60초에서 끊는다.
+	let deadline = Instant::now() + Duration::from_secs(60);
+	let status = loop {
+		match child.try_wait() {
+			Ok(Some(s)) => break s,
+			Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+			_ => {
+				let _ = child.kill();
+				let _ = child.wait();
+				let _ = std::fs::remove_file(&out);
+				return Err("PDF 글자를 60초 안에 뽑지 못함".into());
+			}
+		}
+	};
+	let text = std::fs::read_to_string(&out).ok();
+	let _ = std::fs::remove_file(&out);
+	match (status.success(), text) {
+		(true, Some(t)) => Ok(tidy(t)),
+		_ => Err("PDF 글자를 뽑지 못함 (암호 · 깨진 파일일 수 있음)".into()),
+	}
+}
+
+/// 따로 띄운 프로세스 쪽. 인자는 <PDF 경로> <글자를 쓸 경로> 다. 종료 코드 0 이 성공이다.
+pub fn pdf_child(args: &[String]) -> i32 {
+	let (Some(src), Some(dst)) = (args.first(), args.get(1)) else { return 2 };
+	match pdf_extract::extract_text(src) {
+		Ok(t) => {
+			if std::fs::write(dst, t).is_ok() {
+				0
+			} else {
+				1
+			}
+		}
+		Err(_) => 1,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -252,6 +357,30 @@ mod tests {
 	fn flow_text_keeps_paragraphs_and_cells() {
 		let xml = r#"<w:body><w:p><w:r><w:t>제목 &amp; 개요</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:t>칸1</w:t></w:p></w:tc><w:tc><w:p><w:t>칸2</w:t></w:p></w:tc></w:tr></w:tbl><w:p><w:t xml:space="preserve">끝</w:t><w:br/><w:t>줄</w:t></w:p></w:body>"#;
 		assert_eq!(flow_text(xml), "제목 & 개요\n칸1 \t칸2 \t\n끝\n줄\n");
+	}
+
+	/// html 은 태그와 script 를 걷고 글만 남긴다.
+	#[test]
+	fn html_text_drops_tags_and_scripts() {
+		let t = html_text("<html><script>var a = 1;</script><h1>판정 &amp; 기준</h1><p>본문</p></html>");
+		assert_eq!(t.trim(), "판정 & 기준\n본문");
+	}
+
+	/// 글 파일은 BOM 을 떼고 읽고, 지원하지 않는 형식 · 빈 파일은 까닭을 돌려준다.
+	#[test]
+	fn text_of_reads_text_and_explains_skips() {
+		let dir = std::env::temp_dir().join(format!("docket-extract-{}", crate::model::short_id()));
+		std::fs::create_dir_all(&dir).unwrap();
+		let md = dir.join("a.md");
+		std::fs::write(&md, b"\xEF\xBB\xBF# \xEC\xA0\x9C\xEB\xAA\xA9\n").unwrap();
+		assert_eq!(text_of(&md).unwrap(), "# 제목\n");
+		let hwp = dir.join("b.hwp");
+		std::fs::write(&hwp, b"x").unwrap();
+		assert_eq!(text_of(&hwp).unwrap_err(), "지원하지 않는 형식");
+		let empty = dir.join("c.txt");
+		std::fs::write(&empty, b"  \n").unwrap();
+		assert_eq!(text_of(&empty).unwrap_err(), "글자 없음");
+		let _ = std::fs::remove_dir_all(&dir);
 	}
 }
 

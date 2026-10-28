@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
-import { ChevronRight, ExternalLink } from "lucide-react";
+import { ChevronRight, Copy, ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import { api, errorText } from "@/lib/api";
 import type { FileChange, Hunk } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { type ActionList, ContextActions, copy, fileActions } from "./ActionMenu";
 import { Button } from "./ui/button";
 import { Diffstat } from "./bits";
 
@@ -51,28 +52,37 @@ function FileDiff({ rel, list }: { rel: string; list: FileChange[] }) {
 	const total = hunks.reduce((n, h) => n + h.lines.length, 0);
 
 	let shown = 0;
+	// 머리 줄에만 건다. 변경분 본문은 글을 골라 복사하는 자리라 기본 메뉴를 그대로 둔다.
+	const menu: ActionList = [
+		...fileActions(list[0].path),
+		{ label: "저장소 기준 경로 복사", icon: <Copy />, onSelect: () => void copy(rel, "경로") },
+		"sep",
+		{ label: open ? "접기" : "펼치기", icon: <ChevronRight />, onSelect: () => setOpen((v) => !v) },
+	];
 	return (
 		<div className="surface overflow-hidden rounded-lg">
-			<div className="flex h-9 items-center gap-2 pr-1.5 pl-2">
-				<button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" onClick={() => setOpen((v) => !v)}>
-					<ChevronRight className={cn("size-3.5 shrink-0 text-subtle transition-transform", open && "rotate-90")} />
-					<span className="mono min-w-0 truncate text-[12.5px]" title={list[0].path}>
-						{rel}
-					</span>
-					{created && <span className="shrink-0 text-[11px] text-ok">새 파일</span>}
-					{list.length > 1 && <span className="shrink-0 text-[11px] text-subtle">{list.length}번 고침</span>}
-				</button>
-				<Diffstat added={added} removed={removed} />
-				<Button
-					size="icon-xs"
-					variant="ghost"
-					aria-label="파일 열기"
-					title="기본 프로그램으로 열기"
-					onClick={() => api.open(list[0].path).catch((e) => toast.error(errorText(e)))}
-				>
-					<ExternalLink />
-				</Button>
-			</div>
+			<ContextActions items={menu}>
+				<div className="flex h-9 items-center gap-2 pr-1.5 pl-2">
+					<button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" onClick={() => setOpen((v) => !v)}>
+						<ChevronRight className={cn("size-3.5 shrink-0 text-subtle transition-transform", open && "rotate-90")} />
+						<span className="mono min-w-0 truncate text-[12.5px]" title={list[0].path}>
+							{rel}
+						</span>
+						{created && <span className="shrink-0 text-[11px] text-ok">새 파일</span>}
+						{list.length > 1 && <span className="shrink-0 text-[11px] text-subtle">{list.length}번 고침</span>}
+					</button>
+					<Diffstat added={added} removed={removed} />
+					<Button
+						size="icon-xs"
+						variant="ghost"
+						aria-label="파일 열기"
+						title="기본 프로그램으로 열기"
+						onClick={() => api.open(list[0].path).catch((e) => toast.error(errorText(e)))}
+					>
+						<ExternalLink />
+					</Button>
+				</div>
+			</ContextActions>
 			{open && (
 				<div className="mono overflow-x-auto border-t border-border text-[12px] leading-[1.6] selectable">
 					{hunks.map((h, i) => {

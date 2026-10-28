@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { BookMarked, Check, ChevronRight, FolderOpen, MoreHorizontal, Plus, Settings2, Unlink } from "lucide-react";
+import { BookMarked, Check, ChevronRight, Copy, FileStack, FolderOpen, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink } from "lucide-react";
 import { toast } from "sonner";
+import { type ActionList, attempt, copy, DropdownActions } from "@/components/ActionMenu";
 import { Label } from "@/components/bits";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
@@ -16,14 +16,48 @@ import { qk } from "@/lib/queries";
 import { useUi, type View } from "@/lib/store";
 import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { MODELS } from "../settings/Settings";
+
+/** 프로젝트를 고르고(이미 보던 것이면 연 이슈를 닫지 않는다) 그 프로젝트의 화면으로 간다. */
+function goProject(id: string, view?: View) {
+	const ui = useUi.getState();
+	if (ui.projectId !== id) ui.setProject(id);
+	// 프로젝트 머리는 보드 · 대화 · 산출물 · 지식베이스에만 있다. Claude 설정 · 설정 화면에서 불렀으면 보드로 간다.
+	const next = view ?? (ui.view === "talks" || ui.view === "deliverables" || ui.view === "knowledge" ? ui.view : "board");
+	if (ui.view !== next) ui.setView(next);
+}
+
+/**
+ * 프로젝트 메뉴. 머리의 「프로젝트 메뉴」와 사이드바 우클릭이 같이 쓴다.
+ * `nav` 는 사이드바에서만 켠다 — 머리에는 보드 · 대화 · 산출물 · 지식베이스 칸이 이미 있다.
+ */
+export function projectActions(project: Project, nav = false): ActionList {
+	const ui = () => useUi.getState();
+	return [
+		nav && { label: "보드", icon: <LayoutGrid />, onSelect: () => goProject(project.id, "board") },
+		nav && { label: "대화", icon: <MessagesSquare />, onSelect: () => goProject(project.id, "talks") },
+		nav && { label: "산출물", icon: <FileStack />, onSelect: () => goProject(project.id, "deliverables") },
+		nav && { label: "지식베이스", icon: <Library />, onSelect: () => goProject(project.id, "knowledge") },
+		"sep",
+		{
+			label: "프로젝트 설정",
+			icon: <Settings2 />,
+			onSelect: () => {
+				goProject(project.id);
+				ui().editProject(project.id);
+			},
+		},
+		{ label: "Claude 설정", icon: <BookMarked />, onSelect: () => ui().openClaude(project.id) },
+		"sep",
+		{ label: "프로젝트 폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.open(project.path)) },
+		{ label: "경로 복사", icon: <Copy />, onSelect: () => void copy(project.path, "경로") },
+	];
+}
 
 export function ProjectHeader({ project }: { project: Project }) {
 	const view = useUi((s) => s.view);
 	const setView = useUi((s) => s.setView);
-	const openClaude = useUi((s) => s.openClaude);
-	// 개발 빌드에서만 ?projectSettings 로 설정 창을 열어 둔 채 시작한다. 화면을 하나씩 확인할 때 쓴다.
-	const [editing, setEditing] = useState(() => import.meta.env.DEV && new URLSearchParams(location.search).has("projectSettings"));
+	const editing = useUi((s) => s.editingProjectId === project.id);
+	const editProject = useUi((s) => s.editProject);
 	return (
 		<header className="flex items-center gap-4">
 			<div className="min-w-0">
@@ -42,7 +76,9 @@ export function ProjectHeader({ project }: { project: Project }) {
 				{(
 					[
 						["board", "보드"],
+						["talks", "대화"],
 						["deliverables", "산출물"],
+						["knowledge", "지식베이스"],
 					] as [View, string][]
 				).map(([v, label]) => (
 					<button
@@ -62,21 +98,10 @@ export function ProjectHeader({ project }: { project: Project }) {
 					</Button>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="end" className="pop w-52">
-					<DropdownMenuItem onSelect={() => setEditing(true)}>
-						<Settings2 />
-						프로젝트 설정
-					</DropdownMenuItem>
-					<DropdownMenuItem onSelect={() => openClaude(project.id)}>
-						<BookMarked />
-						Claude 설정
-					</DropdownMenuItem>
-					<DropdownMenuItem onSelect={() => void api.open(project.path)}>
-						<FolderOpen />
-						프로젝트 폴더 열기
-					</DropdownMenuItem>
+					<DropdownActions items={projectActions(project)} />
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<ProjectSettings project={project} open={editing} onOpenChange={setEditing} />
+			<ProjectSettings project={project} open={editing} onOpenChange={(o) => editProject(o ? project.id : null)} />
 		</header>
 	);
 }
@@ -158,22 +183,6 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 						<div className="flex flex-col gap-1.5">
 							<Label>이름</Label>
 							<Input value={p.name} onChange={(e) => setP({ ...p, name: e.target.value })} />
-						</div>
-						<div className="flex flex-col gap-1.5">
-							<Label>모델</Label>
-							<Select value={p.model || "inherit"} onValueChange={(v) => setP({ ...p, model: v === "inherit" ? "" : v === "default" ? "" : v })}>
-								<SelectTrigger className="w-48">
-									<SelectValue />
-								</SelectTrigger>
-								<SelectContent className="pop">
-									<SelectItem value="inherit">전역 설정 따름</SelectItem>
-									{MODELS.filter((m) => m.value !== "default").map((m) => (
-										<SelectItem key={m.value} value={m.value}>
-											{m.label}
-										</SelectItem>
-									))}
-								</SelectContent>
-							</Select>
 						</div>
 						<div className="flex flex-col gap-2">
 							<Label>구현 때 권한</Label>

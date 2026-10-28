@@ -22,6 +22,23 @@ export const MODELS = [
 	{ value: "haiku", label: "Haiku" },
 ];
 
+/** 메모마다 고르는 모델. 「설정 따름」이면 실행 종류에 맞는 설정 모델을 쓴다. 작성칸과 상세 창이 같은 목록을 쓴다. */
+export const MEMO_MODELS = [{ value: "default", label: "설정 따름" }, ...MODELS.filter((m) => m.value !== "default")];
+
+/** 제목은 한 줄이라 가벼운 모델이면 된다. 비싼 모델은 목록에 두지 않는다. */
+const TITLE_MODELS = [
+	{ value: "off", label: "끄기 (첫 줄)" },
+	{ value: "haiku", label: "Haiku" },
+	{ value: "sonnet", label: "Sonnet" },
+];
+
+/** 색인 카드는 파일마다 부르는 호출이라 가벼운 모델만 둔다. */
+const KB_MODELS = [
+	{ value: "default", label: "제목 모델 따름" },
+	{ value: "haiku", label: "Haiku" },
+	{ value: "sonnet", label: "Sonnet" },
+];
+
 export function Settings() {
 	const qc = useQueryClient();
 	const { data: settings } = useSettings();
@@ -75,13 +92,35 @@ export function Settings() {
 							</Button>
 						</div>
 					</Row>
-					<Row label="모델" hint="프로젝트 설정에서 프로젝트마다 바꿀 수 있습니다.">
-						<Select value={s.model || "default"} onValueChange={(v) => void save({ model: v === "default" ? "" : v })}>
+					{(
+						[
+							["planModel", "계획 모델", "메모를 읽고 계획을 세울 때 씁니다. 메모에서 고른 모델이 이보다 앞섭니다."],
+							["implModel", "구현 모델", "승인한 계획대로 고치고 되돌릴 때, 산출물을 쓸 때 씁니다. 메모에서 고른 모델이 이보다 앞섭니다."],
+							["chatModel", "대화 모델", "이슈와 프로젝트 대화에서 씁니다. 메모에서 고른 모델이 이보다 앞섭니다."],
+						] as const
+					).map(([key, label, hint]) => (
+						<Row key={key} label={label} hint={hint}>
+							<Select value={s[key] || "default"} onValueChange={(v) => void save({ [key]: v === "default" ? "" : v } as Partial<S>)}>
+								<SelectTrigger className="w-48">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent className="pop">
+									{MODELS.map((m) => (
+										<SelectItem key={m.value} value={m.value}>
+											{m.label}
+										</SelectItem>
+									))}
+								</SelectContent>
+							</Select>
+						</Row>
+					))}
+					<Row label="제목 모델" hint="새 메모의 제목을 이 모델이 지어 붙입니다. 메모를 고치면 몇 초 뒤 다시 짓습니다. 끄면 첫 줄이 제목입니다.">
+						<Select value={s.titleModel || "off"} onValueChange={(v) => void save({ titleModel: v === "off" ? "" : v })}>
 							<SelectTrigger className="w-48">
 								<SelectValue />
 							</SelectTrigger>
 							<SelectContent className="pop">
-								{MODELS.map((m) => (
+								{TITLE_MODELS.map((m) => (
 									<SelectItem key={m.value} value={m.value}>
 										{m.label}
 									</SelectItem>
@@ -113,6 +152,26 @@ export function Settings() {
 							/>
 							<span className="text-[13px] text-muted-foreground">초</span>
 						</div>
+					</Row>
+				</Group>
+
+				<Group title="지식베이스">
+					<Row
+						label="카드 모델"
+						hint="프로젝트마다 켠 지식베이스의 문서를 이 모델이 읽고 구획마다 색인 카드를 적습니다. 산출물 자동 갱신의 판정에도 씁니다. 파일마다 부르니 가벼운 모델을 권합니다. 「제목 모델 따름」은 제목 모델이 꺼져 있으면 Haiku 입니다."
+					>
+						<Select value={s.kbCardModel || "default"} onValueChange={(v) => void save({ kbCardModel: v === "default" ? "" : v })}>
+							<SelectTrigger className="w-48">
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent className="pop">
+								{KB_MODELS.map((m) => (
+									<SelectItem key={m.value} value={m.value}>
+										{m.label}
+									</SelectItem>
+								))}
+							</SelectContent>
+						</Select>
 					</Row>
 				</Group>
 

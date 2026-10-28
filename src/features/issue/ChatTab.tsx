@@ -1,8 +1,9 @@
 import { type ClipboardEvent, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, ChevronRight, Copy, History, ImagePlus, SquareTerminal, X } from "lucide-react";
+import { Check, ChevronRight, Copy, History, ImagePlus, SquareTerminal, StickyNote, X } from "lucide-react";
 import { toast } from "sonner";
+import { copy } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
 import { RunEvents, RunLog } from "@/components/RunLog";
 import { Button } from "@/components/ui/button";
@@ -13,10 +14,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
 import { attachmentPath, clock, cost, duration, fileUrl, isImage, relTime } from "@/lib/format";
-import { useTerminalPlugin } from "@/lib/queries";
+import { useIssues, useTerminalPlugin } from "@/lib/queries";
 import { RUN_KIND_LABEL } from "@/lib/status";
-import { useLive } from "@/lib/store";
-import type { Issue, RunRecord, Turn } from "@/lib/types";
+import { useLive, useUi } from "@/lib/store";
+import type { HistoryEntry, Issue, RunRecord, Turn } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** 쓰다 만 질문은 탭을 오가도 남는다. 그래서 상태를 상세 창이 들고 있다. */
@@ -30,19 +31,14 @@ export interface Draft {
 
 export const NO_DRAFT: Draft = { text: "", edit: true, images: [] };
 
+/** 프로젝트 대화는 구조를 묻는 데서 시작하므로 읽기 전용이 기본이다. 구현과 줄을 서지 않아 바로 답한다. */
+export const NO_TALK_DRAFT: Draft = { text: "", edit: false, images: [] };
+
 /** 작은따옴표로 감싸면 PowerShell · bash 어느 쪽에 붙여도 경로의 $ · 빈칸이 풀리지 않는다. */
 function resumeCommand(path: string, sessionId: string) {
 	return `cd '${path.replace(/'/g, "''")}'; claude --resume ${sessionId}`;
 }
 
-async function copy(text: string, what: string) {
-	try {
-		await navigator.clipboard.writeText(text);
-		toast(`${what}를 복사했습니다`);
-	} catch (e) {
-		toast.error(errorText(e));
-	}
-}
 
 /**
  * 터미널에서 이어 간 차례. 읽으면서 그 차례들이 고친 파일을 이슈의 변경에 담는다.
@@ -79,7 +75,12 @@ export function ChatTab({ issue, projectPath }: { issue: Issue; projectPath: str
 
 	return (
 		<div ref={box} className="flex flex-col gap-5">
-			{items.length === 0 && (
+			{items.length === 0 && issue.talk && (
+				<p className="text-[13px] leading-relaxed break-keep text-subtle">
+					이 저장소에 대해 무엇이든 물어보세요. Claude 가 코드를 읽고 답합니다. 묻다가 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다.
+				</p>
+			)}
+			{items.length === 0 && !issue.talk && (
 				<p className="text-[13px] leading-relaxed text-subtle">
 					아직 Claude 와 나눈 말이 없습니다. 아래에 적으면 메모{issue.plan ? " · 계획" : ""}을 읽고 새 세션을 엽니다. 묻기만 할 수도, 바로 고치게 할 수도 있고 고친 파일은 변경 탭에
 					쌓입니다.
@@ -89,7 +90,7 @@ export function ChatTab({ issue, projectPath }: { issue: Issue; projectPath: str
 				"turn" in x ? (
 					<TerminalTurn key={`t${x.at}`} issue={issue} root={projectPath} turn={x.turn} />
 				) : x.run.kind === "chat" ? (
-					<ChatTurn key={x.run.id} issue={issue} root={projectPath} run={x.run} />
+					<ChatTurn key={x.run.id} issue={issue} root={projectPath} run={x.run} memos={memosOf(issue, x.run)} />
 				) : (
 					<StepTurn key={x.run.id} issue={issue} root={projectPath} run={x.run} />
 				),
@@ -250,7 +251,16 @@ function SessionPicker({ issue }: { issue: Issue }) {
 	);
 }
 
-function ChatTurn({ issue, root, run }: { issue: Issue; root: string; run: RunRecord }) {
+/**
+ * 그 차례가 보드에 등록한 메모. 앱은 실행이 끝난 뒤에 메모를 만들므로 기록 시각이 실행 끝보다 늦다.
+ * 그래서 이 차례의 시작부터 다음 실행의 시작 전까지를 이 차례 것으로 본다.
+ */
+function memosOf(issue: Issue, run: RunRecord): HistoryEntry[] {
+	const next = Math.min(...issue.runs.filter((r) => r.startedAt > run.startedAt).map((r) => r.startedAt), Number.POSITIVE_INFINITY);
+	return issue.history.filter((h) => h.kind === "memo" && h.at >= run.startedAt && h.at < next);
+}
+
+function ChatTurn({ issue, root, run, memos }: { issue: Issue; root: string; run: RunRecord; memos: HistoryEntry[] }) {
 	const live = run.status === "running";
 	return (
 		<div className="flex flex-col gap-2">
@@ -262,7 +272,40 @@ function ChatTurn({ issue, root, run }: { issue: Issue; root: string; run: RunRe
 					<div className="mt-1 text-[12px] whitespace-pre-wrap text-danger/90 selectable">{run.error}</div>
 				)}
 				{run.status === "stopped" && <div className="mt-1 text-[12px] text-subtle">중지했습니다</div>}
+				{memos.map((m) => (
+					<MemoLine key={m.at + m.text} projectId={issue.projectId} entry={m} />
+				))}
 			</div>
+		</div>
+	);
+}
+
+/** 대화가 보드에 만든 메모 한 건. 기록 글은 `#번호 제목`, 실패했으면 `실패 · 까닭` 이다. */
+function MemoLine({ projectId, entry }: { projectId: string; entry: HistoryEntry }) {
+	const { data: issues = [] } = useIssues(projectId);
+	const n = /^#(\d+)\s/.exec(entry.text)?.[1];
+	if (!n) return <div className="mt-2 text-[12.5px] break-keep text-danger/90 selectable">메모를 등록하지 못했습니다 · {entry.text.replace(/^실패 · /, "")}</div>;
+	const target = issues.find((i) => i.number === Number(n));
+	return (
+		<div className="mt-2 flex items-center gap-2 rounded-md border border-border px-3 py-2 text-[12.5px]">
+			<StickyNote className="size-3.5 shrink-0 text-subtle" />
+			<span className="min-w-0 flex-1 truncate">
+				<span className="text-subtle">보드에 메모를 등록했습니다 · </span>
+				<span className="font-medium text-foreground">{entry.text}</span>
+			</span>
+			{target && (
+				<Button
+					size="xs"
+					variant="outline"
+					onClick={() => {
+						const ui = useUi.getState();
+						ui.setView("board");
+						ui.openIssue(target.id);
+					}}
+				>
+					열기
+				</Button>
+			)}
 		</div>
 	);
 }
@@ -353,7 +396,11 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 				}}
 				placeholder={
 					(draft.edit ? "묻거나 고칠 것" : "물을 것 (읽기 전용)") +
-					(issue.sessionId ? " · 이미지는 붙여 넣거나 끌어 놓습니다" : " · 메모를 읽고 새 세션을 엽니다")
+					(issue.sessionId
+						? " · 이미지는 붙여 넣거나 끌어 놓습니다"
+						: issue.talk
+							? " · 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다"
+							: " · 메모를 읽고 새 세션을 엽니다")
 				}
 				className="max-h-48 min-h-20 resize-none bg-transparent text-[13.5px] leading-relaxed"
 			/>

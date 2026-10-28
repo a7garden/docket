@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { File, FileImage, FileSpreadsheet, FileText, FileType2, Loader2, Plus, Presentation, Upload } from "lucide-react";
+import { ExternalLink, File, FileImage, FileSpreadsheet, FileText, FileType2, Loader2, PanelRight, Plus, Presentation, StickyNote, Upload } from "lucide-react";
 import { toast } from "sonner";
+import { type ActionList, attempt, ContextActions } from "@/components/ActionMenu";
 import { Chip, Empty } from "@/components/bits";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -14,7 +15,7 @@ import { useDeliverables, useIssues } from "@/lib/queries";
 import { useLive, useUi } from "@/lib/store";
 import type { Deliverable, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { DeliverableSheet } from "./DeliverableSheet";
+import { DeliverableSheet, useDeliverableActions, versionPath } from "./DeliverableSheet";
 
 export function FileIcon({ name, className }: { name: string; className?: string }) {
 	const ext = extOf(name);
@@ -88,6 +89,7 @@ export function Deliverables({ project }: { project: Project }) {
 						{list.map((d) => (
 							<Row
 								key={d.id}
+								project={project}
 								d={d}
 								issueNumber={issues.find((i) => i.id === d.issueId)?.number}
 								onOpen={() => openDeliverable(d.id)}
@@ -121,12 +123,21 @@ export function Deliverables({ project }: { project: Project }) {
 	);
 }
 
-function Row({ d, issueNumber, onOpen, onIssue }: { d: Deliverable; issueNumber?: number; onOpen: () => void; onIssue: () => void }) {
+function Row({ project, d, issueNumber, onOpen, onIssue }: { project: Project; d: Deliverable; issueNumber?: number; onOpen: () => void; onIssue: () => void }) {
 	const last = d.versions[d.versions.length - 1];
 	const activity = useLive((s) => (d.job ? s.byTarget[d.id]?.activity : undefined));
 	const sub = last ? [last.file, bytes(last.size)] : ["아직 판 없음"];
 	if (d.refs.length) sub.push(`템플릿 · 자료 ${d.refs.length}`);
-	return (
+	if (d.autoUpdate) sub.push(d.autoLast ? `자동 갱신 ${d.autoLast}` : "자동 갱신");
+	const { items, dialogs } = useDeliverableActions(project, d);
+	const menu: ActionList = [
+		{ label: "열기", icon: <PanelRight />, onSelect: onOpen },
+		last && { label: `마지막 판(v${last.n}) 열기`, icon: <ExternalLink />, onSelect: () => void attempt(() => api.open(versionPath(d, last))) },
+		issueNumber !== undefined && { label: `이슈 #${issueNumber} 열기`, icon: <StickyNote />, onSelect: onIssue },
+		"sep",
+		...items,
+	];
+	const row = (
 		<div
 			role="button"
 			tabIndex={0}
@@ -166,6 +177,13 @@ function Row({ d, issueNumber, onOpen, onIssue }: { d: Deliverable; issueNumber?
 			<span>{last && <Chip>{SOURCE_LABEL[last.source] ?? last.source}</Chip>}</span>
 			<span className="text-right text-[12.5px] text-subtle">{relTime(d.updatedAt)}</span>
 		</div>
+	);
+	// 확인 창은 줄 밖에 둔다. 줄 안에 두면 창의 단추를 누른 것이 줄의 onClick 까지 올라가 상세 창이 열린다.
+	return (
+		<>
+			<ContextActions items={menu}>{row}</ContextActions>
+			{dialogs}
+		</>
 	);
 }
 

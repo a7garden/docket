@@ -4,8 +4,12 @@ import type {
 	Deliverable,
 	DeliverablePatch,
 	Issue,
+	KbHit,
+	KbSection,
+	KbView,
 	PluginList,
 	Project,
+	ProjectKb,
 	Resource,
 	ResourceKind,
 	RuleSet,
@@ -15,11 +19,13 @@ import type {
 	Suggestion,
 	TextFile,
 	Turn,
+	Usage,
 } from "./types";
 
 // Rust 명령 이름과 인자를 한 곳에 모은다. 화면 코드는 invoke 를 직접 부르지 않는다.
 export const api = {
 	appInfo: () => invoke<AppInfo>("app_info"),
+	usage: () => invoke<Usage | null>("usage_get"),
 	settingsGet: () => invoke<Settings>("settings_get"),
 	settingsSave: (settings: Settings) => invoke<Settings>("settings_save", { settings }),
 	open: (path: string) => invoke<void>("path_open", { path }),
@@ -39,12 +45,22 @@ export const api = {
 
 	issues: (projectId: string) => invoke<Issue[]>("issues_list", { projectId }),
 	issue: (projectId: string, issueId: string) => invoke<Issue>("issue_get", { projectId, issueId }),
-	issueCreate: (projectId: string, issueId: string, note: string, autoPlan: boolean) =>
-		invoke<Issue>("issue_create", { projectId, issueId, note, autoPlan }),
-	issueSaveNote: (projectId: string, issueId: string, note: string) =>
+	/** model 을 비우면 설정의 실행별 모델을 따른다. */
+	issueCreate: (projectId: string, issueId: string, note: string, autoPlan: boolean, model: string) =>
+		invoke<Issue>("issue_create", { projectId, issueId, note, autoPlan, model }),
+	/** 프로젝트 대화. 보내기 · 중지 · 터미널 · 첨부 · 지우기는 issue* 를 그대로 쓴다. */
+	talks: (projectId: string) => invoke<Issue[]>("talks_list", { projectId }),
+	talkCreate: (projectId: string, talkId: string) => invoke<Issue>("talk_create", { projectId, talkId }),
+	issueSaveNote:(projectId: string, issueId: string, note: string) =>
 		invoke<Issue>("issue_save_note", { projectId, issueId, note }),
+	/** 비우면 다시 제목 모델에 맡긴다. */
+	issueSetTitle: (projectId: string, issueId: string, title: string) =>
+		invoke<Issue>("issue_set_title", { projectId, issueId, title }),
 	issueSetAutoPlan: (projectId: string, issueId: string, on: boolean) =>
 		invoke<Issue>("issue_set_auto_plan", { projectId, issueId, on }),
+	/** 비우면 설정의 실행별 모델을 따른다. 다음 실행부터 쓰인다. */
+	issueSetModel: (projectId: string, issueId: string, model: string) =>
+		invoke<Issue>("issue_set_model", { projectId, issueId, model }),
 	issuePlan: (projectId: string, issueId: string, feedback?: string) =>
 		invoke<Issue>("issue_plan", { projectId, issueId, feedback: feedback || null }),
 	issueApprove: (projectId: string, issueId: string, instruction?: string, allowAll = false) =>
@@ -108,6 +124,16 @@ export const api = {
 		invoke<void>("deliverable_stop", { projectId, deliverableId }),
 	deliverableFromIssue: (projectId: string, issueId: string) =>
 		invoke<Deliverable>("deliverable_from_issue", { projectId, issueId }),
+
+	kbStatus: (projectId: string) => invoke<KbView>("kb_status", { projectId }),
+	kbSave: (projectId: string, kb: ProjectKb) => invoke<KbView>("kb_save", { projectId, kb }),
+	/** 파일 · 폴더를 앱 데이터의 kb/inbox/ 로 복사한다. */
+	kbImport: (projectId: string, paths: string[]) => invoke<KbView>("kb_import", { projectId, paths }),
+	kbInboxDelete: (projectId: string, path: string) => invoke<KbView>("kb_inbox_delete", { projectId, path }),
+	kbReindex: (projectId: string) => invoke<void>("kb_reindex", { projectId }),
+	kbStop: (projectId: string) => invoke<boolean>("kb_stop", { projectId }),
+	kbSearch: (projectId: string, query: string) => invoke<KbHit[]>("kb_search", { projectId, query }),
+	kbCards: (projectId: string, path: string) => invoke<KbSection[]>("kb_cards", { projectId, path }),
 
 	resources: (projectId?: string | null) => invoke<Resource[]>("resources_list", { projectId: projectId ?? null }),
 	textRead: (path: string) => invoke<TextFile>("text_read", { path }),

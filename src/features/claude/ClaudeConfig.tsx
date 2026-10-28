@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
+import { Copy, FolderOpen, MoreHorizontal, PanelRight, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { type ActionList, attempt, ContextActions, copy, DropdownActions } from "@/components/ActionMenu";
 import { Empty, Label } from "@/components/bits";
 import { Markdown } from "@/components/Markdown";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
@@ -55,6 +56,8 @@ export function ClaudeConfig() {
 	const [dirty, setDirty] = useState(false);
 	const [pending, setPending] = useState<(() => void) | null>(null);
 	const [creating, setCreating] = useState<ResourceKind | null>(null);
+	/** 목록 우클릭에서 지우려는 것. 편집 화면의 「더 보기」는 편집 화면이 따로 묻는다. */
+	const [deleting, setDeleting] = useState<Resource | null>(null);
 
 	const items = useMemo(() => {
 		const q = query.trim().toLowerCase();
@@ -146,29 +149,32 @@ export function ClaudeConfig() {
 									{label}
 									<span className="tabular font-normal text-subtle">{list.length}</span>
 								</Label>
-								{list.map((r) => (
-									<button
-										key={r.path}
-										type="button"
-										onClick={() =>
-											guard(() => {
-												setSelected(r.path);
-												setFile(null);
-											})
-										}
-										className={cn(
-											"flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-hover",
-											current?.path === r.path && "bg-hover shadow-[inset_0_0_0_1px_var(--border-strong)]",
-										)}
-									>
-										<span className={cn("truncate text-[13px] font-medium", !r.exists && "text-subtle")}>{r.name}</span>
-										{r.description ? (
-											<span className="line-clamp-2 text-[12px] leading-snug break-keep text-subtle">{r.description}</span>
-										) : (
-											!r.exists && <span className="text-[12px] text-subtle">아직 없습니다. 저장하면 만듭니다.</span>
-										)}
-									</button>
-								))}
+								{list.map((r) => {
+									const pick = () =>
+										guard(() => {
+											setSelected(r.path);
+											setFile(null);
+										});
+									return (
+										<ContextActions key={r.path} items={resourceActions(r, () => setDeleting(r), pick)}>
+											<button
+												type="button"
+												onClick={pick}
+												className={cn(
+													"flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-hover",
+													current?.path === r.path && "bg-hover shadow-[inset_0_0_0_1px_var(--border-strong)]",
+												)}
+											>
+												<span className={cn("truncate text-[13px] font-medium", !r.exists && "text-subtle")}>{r.name}</span>
+												{r.description ? (
+													<span className="line-clamp-2 text-[12px] leading-snug break-keep text-subtle">{r.description}</span>
+												) : (
+													!r.exists && <span className="text-[12px] text-subtle">아직 없습니다. 저장하면 만듭니다.</span>
+												)}
+											</button>
+										</ContextActions>
+									);
+								})}
 							</section>
 						);
 					})}
@@ -219,6 +225,20 @@ export function ClaudeConfig() {
 					</AlertDialogFooter>
 				</AlertDialogContent>
 			</AlertDialog>
+
+			<DeleteConfirm
+				resource={deleting}
+				onClose={() => setDeleting(null)}
+				onDeleted={() => {
+					// 편집 중인 것을 지웠으면 고친 내용도 함께 버린다. 파일이 없으니 저장할 곳이 없다.
+					if (deleting?.path === current?.path) {
+						setDirty(false);
+						setSelected(null);
+						setFile(null);
+					}
+					void qc.invalidateQueries({ queryKey: qk.resources(project?.id ?? null) });
+				}}
+			/>
 
 			<CreateDialog
 				kind={creating}
@@ -325,14 +345,7 @@ function ResourceEditor({
 							</Button>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end" className="pop w-48">
-							<DropdownMenuItem onSelect={() => void api.reveal(resource.dir || resource.path)}>
-								<FolderOpen />
-								폴더 열기
-							</DropdownMenuItem>
-							<DropdownMenuItem variant="destructive" onSelect={() => setConfirmDelete(true)}>
-								<Trash2 />
-								지우기
-							</DropdownMenuItem>
+							<DropdownActions items={resourceActions(resource, () => setConfirmDelete(true))} />
 						</DropdownMenuContent>
 					</DropdownMenu>
 				)}
@@ -408,36 +421,60 @@ function ResourceEditor({
 				</AlertDialogContent>
 			</AlertDialog>
 
-			<AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
-				<AlertDialogContent className="pop">
-					<AlertDialogHeader>
-						<AlertDialogTitle>
-							{KIND_LABEL[resource.kind]} 「{resource.name}」 를 지울까요?
-						</AlertDialogTitle>
-						<AlertDialogDescription>
-							{resource.kind === "skill" ? "스킬 폴더째" : "이 파일을"} 앱 데이터의 휴지통 폴더로 옮깁니다. 다음 Claude 세션부터 쓰이지 않습니다.
-						</AlertDialogDescription>
-					</AlertDialogHeader>
-					<AlertDialogFooter>
-						<AlertDialogCancel>취소</AlertDialogCancel>
-						<AlertDialogAction
-							variant="destructive"
-							onClick={() =>
-								void api
-									.resourceDelete(resource.path)
-									.then(() => {
-										onDirty(false);
-										onDeleted();
-									})
-									.catch((e) => toast.error(errorText(e)))
-							}
-						>
-							지우기
-						</AlertDialogAction>
-					</AlertDialogFooter>
-				</AlertDialogContent>
-			</AlertDialog>
+			<DeleteConfirm
+				resource={confirmDelete ? resource : null}
+				onClose={() => setConfirmDelete(false)}
+				onDeleted={() => {
+					onDirty(false);
+					onDeleted();
+				}}
+			/>
 		</div>
+	);
+}
+
+/** 편집 화면의 「더 보기」와 목록 우클릭이 같이 쓴다. 목록에서만 `onOpen` 을 준다. 지침은 지우지 않는다. */
+function resourceActions(r: Resource, onDelete: () => void, onOpen?: () => void): ActionList {
+	const removable = r.kind !== "instructions" && r.exists;
+	return [
+		onOpen && { label: "열기", icon: <PanelRight />, onSelect: onOpen },
+		"sep",
+		r.exists && { label: "폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.reveal(r.dir || r.path)) },
+		{ label: "경로 복사", icon: <Copy />, onSelect: () => void copy(r.path, "경로") },
+		"sep",
+		removable && { label: "지우기", icon: <Trash2 />, destructive: true, onSelect: onDelete },
+	];
+}
+
+/** 편집 화면의 「더 보기」와 목록 우클릭이 같이 쓴다. `resource` 가 있으면 열린다. */
+function DeleteConfirm({ resource, onClose, onDeleted }: { resource: Resource | null; onClose: () => void; onDeleted: () => void }) {
+	// 닫히는 동안에도 글이 남아 있게 마지막으로 연 것을 쥐고 있는다. 바로 비우면 빈 창이 줄어들며 사라진다.
+	const last = useRef(resource);
+	if (resource) last.current = resource;
+	const r = last.current;
+	return (
+		<AlertDialog open={!!resource} onOpenChange={(o) => !o && onClose()}>
+			<AlertDialogContent className="pop">
+				{r && (
+					<>
+						<AlertDialogHeader>
+							<AlertDialogTitle>
+								{KIND_LABEL[r.kind]} 「{r.name}」 를 지울까요?
+							</AlertDialogTitle>
+							<AlertDialogDescription>
+								{r.kind === "skill" ? "스킬 폴더째" : "이 파일을"} 앱 데이터의 휴지통 폴더로 옮깁니다. 다음 Claude 세션부터 쓰이지 않습니다.
+							</AlertDialogDescription>
+						</AlertDialogHeader>
+						<AlertDialogFooter>
+							<AlertDialogCancel>취소</AlertDialogCancel>
+							<AlertDialogAction variant="destructive" onClick={() => void api.resourceDelete(r.path).then(onDeleted).catch((e) => toast.error(errorText(e)))}>
+								지우기
+							</AlertDialogAction>
+						</AlertDialogFooter>
+					</>
+				)}
+			</AlertDialogContent>
+		</AlertDialog>
 	);
 }
 

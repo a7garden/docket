@@ -13,9 +13,9 @@ use tauri_plugin_opener::OpenerExt;
 use crate::claude_files::{self, Resource, TextFile};
 use crate::error::{Error, Result, msg};
 use crate::model::*;
-use crate::plugins;
+use crate::{kb, plugins, usage};
 use crate::runner::{self, RunEvent, emit_deliverable, emit_issue};
-use crate::store::{Store, settle};
+use crate::store::{Store, settle, title_of};
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +65,12 @@ pub async fn app_info(app: AppHandle) -> Result<AppInfo> {
 		claude_version,
 		version: app.package_info().version.to_string(),
 	})
+}
+
+/// 마지막으로 받은 구독 사용률. 한 번도 받지 않았으면(API 키로 쓰는 경우 등) 없다.
+#[tauri::command]
+pub fn usage_get() -> Option<usage::Usage> {
+	usage::get()
 }
 
 #[tauri::command]
@@ -151,7 +157,7 @@ pub fn naming_preview(store: State<Store>, project_id: String, pattern: String, 
 
 #[tauri::command]
 pub fn project_remove(store: State<Store>, id: String, delete_data: bool) -> Result<()> {
-	let busy = store.list_issues(&id)?.iter().any(|v| v.issue.run.is_some())
+	let busy = store.list_issues(&id)?.iter().chain(store.list_talks(&id)?.iter()).any(|v| v.issue.run.is_some())
 		|| store.list_deliverables(&id)?.iter().any(|v| v.deliverable.job.is_some());
 	if busy {
 		return msg("실행 중인 작업이 있어 뺄 수 없습니다. 먼저 중지하세요.");
@@ -189,16 +195,53 @@ pub fn issue_get(store: State<Store>, project_id: String, issue_id: String) -> R
 }
 
 #[tauri::command]
-pub fn issue_create(app: AppHandle, project_id: String, issue_id: Option<String>, note: String, auto_plan: Option<bool>) -> Result<IssueView> {
+pub fn issue_create(app: AppHandle, project_id: String, issue_id: Option<String>, note: String, auto_plan: Option<bool>, model: Option<String>) -> Result<IssueView> {
 	let store = app.state::<Store>();
 	if note.trim().is_empty() {
 		return msg("메모가 비어 있습니다");
 	}
-	let auto = match auto_plan {
-		Some(a) => a,
-		None => store.settings()?.auto_plan,
-	};
-	let v = store.create_issue(&project_id, issue_id.as_deref(), &note, auto)?;
+	let settings = store.settings()?;
+	let auto = auto_plan.unwrap_or(settings.auto_plan);
+	let v = store.create_issue(&project_id, issue_id.as_deref(), &note, auto, runner::new_title_mode(&settings), model.as_deref().unwrap_or(""))?;
+	emit_issue(&app, &v);
+	Ok(v)
+}
+
+/// 제목을 손으로 고친다. 고친 제목은 메모를 바꿔도 덮지 않는다. 비우면 다시 제목 모델에 맡긴다(모델을 껐으면 첫 줄).
+#[tauri::command]
+pub fn issue_set_title(app: AppHandle, project_id: String, issue_id: String, title: String) -> Result<IssueView> {
+	let store = app.state::<Store>();
+	let note = store.get_issue(&project_id, &issue_id)?.note;
+	let mode = runner::new_title_mode(&store.settings()?);
+	let title: String = title.trim().chars().take(80).collect();
+	change(&app, &project_id, &issue_id, |i| {
+		if i.talk {
+			return msg("대화에는 제목을 달지 않습니다");
+		}
+		if title.is_empty() {
+			i.title = title_of(&note);
+			i.title_mode = mode;
+			i.titled_at = 0;
+		} else {
+			i.title = title;
+			i.title_mode = TitleMode::Manual;
+		}
+		Ok(())
+	})
+}
+
+/* ---------- 프로젝트 대화 ---------- */
+//
+// 대화는 보드에 나오지 않는 이슈다. 보내기 · 중지 · 터미널 · 첨부 · 지우기는 issue_* 명령을 그대로 쓴다.
+
+#[tauri::command]
+pub fn talks_list(store: State<Store>, project_id: String) -> Result<Vec<IssueView>> {
+	store.list_talks(&project_id)
+}
+
+#[tauri::command]
+pub fn talk_create(app: AppHandle, project_id: String, talk_id: String) -> Result<IssueView> {
+	let v = app.state::<Store>().create_talk(&project_id, &talk_id)?;
 	emit_issue(&app, &v);
 	Ok(v)
 }
@@ -223,6 +266,15 @@ pub fn issue_set_auto_plan(app: AppHandle, project_id: String, issue_id: String,
 		if on {
 			i.error.clear();
 		}
+		Ok(())
+	})
+}
+
+/// 이 메모에 쓸 모델을 바꾼다. 비우면 설정의 실행별 모델을 따른다. 돌고 있는 실행에는 들지 않고 다음 실행부터 쓰인다.
+#[tauri::command]
+pub fn issue_set_model(app: AppHandle, project_id: String, issue_id: String, model: String) -> Result<IssueView> {
+	change(&app, &project_id, &issue_id, |i| {
+		i.model = model.trim().to_string();
 		Ok(())
 	})
 }
@@ -343,16 +395,20 @@ pub fn issue_set_session(app: AppHandle, project_id: String, issue_id: String, s
 	})
 }
 
+/// 완료하면 「자동 갱신」을 켠 산출물 가운데 이 변경과 관련 있는 것을 가려 새 판을 쓴다(kb::after_complete).
+/// 판정은 기다리지 않는다 — 완료 단추가 Claude 호출을 기다리며 멈추지 않게.
 #[tauri::command]
 pub fn issue_complete(app: AppHandle, project_id: String, issue_id: String) -> Result<IssueView> {
-	change(&app, &project_id, &issue_id, |i| {
+	let v = change(&app, &project_id, &issue_id, |i| {
 		if i.status != Status::Review {
 			return msg("결과를 확인하는 단계에서만 완료할 수 있습니다");
 		}
 		i.status = Status::Done;
 		i.log("done", "");
 		Ok(())
-	})
+	})?;
+	tauri::async_runtime::spawn(kb::after_complete(app.clone(), project_id, issue_id));
+	Ok(v)
 }
 
 #[tauri::command]
@@ -486,6 +542,7 @@ pub fn deliverable_import(app: AppHandle, project_id: String, paths: Vec<String>
 	if out.is_empty() {
 		return msg("가져올 파일이 없습니다. 폴더는 가져오지 않습니다.");
 	}
+	kb::touch(&app, &project_id);
 	Ok(out)
 }
 
@@ -496,6 +553,7 @@ pub fn deliverable_create_doc(app: AppHandle, project_id: String, title: String,
 	let d = store.create_deliverable(&project_id, &title, "")?;
 	let v = store.add_version_text(&project_id, &d.id, &content, "editor", "")?;
 	emit_deliverable(&app, &v);
+	kb::touch(&app, &project_id);
 	Ok(v)
 }
 
@@ -518,6 +576,7 @@ pub fn deliverable_save_doc(app: AppHandle, project_id: String, deliverable_id: 
 		store.overwrite_latest_text(&project_id, &deliverable_id, &content)?
 	};
 	emit_deliverable(&app, &v);
+	kb::touch(&app, &project_id);
 	Ok(v)
 }
 
@@ -544,6 +603,9 @@ pub struct DeliverablePatch {
 	naming: String,
 	subdir: String,
 	mode: String,
+	/// 이 칸이 생기기 전의 화면이 보낸 패치에는 없다. 그때는 지금 값을 그대로 둔다.
+	#[serde(default)]
+	auto_update: Option<bool>,
 }
 
 #[tauri::command]
@@ -557,6 +619,9 @@ pub fn deliverable_update(app: AppHandle, project_id: String, deliverable_id: St
 		d.naming = patch.naming.trim().to_string();
 		d.subdir = patch.subdir.trim().trim_matches(['/', '\\']).to_string();
 		d.mode = if patch.mode == "file" { "file".into() } else { "md".into() };
+		if let Some(on) = patch.auto_update {
+			d.auto_update = on;
+		}
 		Ok(())
 	})?;
 	emit_deliverable(&app, &v);
@@ -685,7 +750,69 @@ pub fn deliverable_from_issue(app: AppHandle, project_id: String, issue_id: Stri
 		}
 	}
 	emit_deliverable(&app, &out);
+	kb::touch(&app, &project_id);
 	Ok(out)
+}
+
+/* ---------- 지식베이스 ---------- */
+
+#[tauri::command]
+pub fn kb_status(app: AppHandle, project_id: String) -> Result<kb::KbView> {
+	kb::status(&app, &project_id)
+}
+
+/// 켜기 · 참조 폴더 · 산출물 포함 · 붙일 수 · 다듬기를 바꾼다. 켜 두었으면 바로 다시 훑는다.
+#[tauri::command]
+pub fn kb_save(app: AppHandle, project_id: String, kb: ProjectKb) -> Result<kb::KbView> {
+	let p = app.state::<Store>().save_kb(&project_id, &kb)?;
+	if p.kb.enabled {
+		app.state::<kb::Kb>().request(&project_id);
+	} else {
+		app.state::<kb::Kb>().stop(&project_id);
+	}
+	kb::status(&app, &project_id)
+}
+
+/// 끌어 놓은 파일 · 폴더를 넣는다. 끈 프로젝트에도 넣어 둘 수 있다 — 켜면 그때 훑는다.
+#[tauri::command]
+pub fn kb_import(app: AppHandle, project_id: String, paths: Vec<String>) -> Result<kb::KbView> {
+	app.state::<Store>().kb_import(&project_id, &paths)?;
+	kb::touch(&app, &project_id);
+	kb::status(&app, &project_id)
+}
+
+#[tauri::command]
+pub fn kb_inbox_delete(app: AppHandle, project_id: String, path: String) -> Result<kb::KbView> {
+	app.state::<Store>().kb_inbox_delete(&project_id, &path)?;
+	kb::touch(&app, &project_id);
+	kb::status(&app, &project_id)
+}
+
+#[tauri::command]
+pub fn kb_reindex(app: AppHandle, project_id: String) -> Result<()> {
+	if !app.state::<Store>().project(&project_id)?.kb.enabled {
+		return msg("지식베이스를 켜야 색인합니다");
+	}
+	app.state::<kb::Kb>().request(&project_id);
+	Ok(())
+}
+
+#[tauri::command]
+pub fn kb_stop(app: AppHandle, project_id: String) -> bool {
+	app.state::<kb::Kb>().stop(&project_id)
+}
+
+/// 화면의 찾아보기. 실행 때와 같은 로컬 찾기이고, 다듬기 호출은 하지 않는다.
+#[tauri::command]
+pub async fn kb_search(app: AppHandle, project_id: String, query: String) -> Result<Vec<KbHit>> {
+	let dir = app.state::<Store>().kb_dir(&project_id);
+	let k = app.state::<Store>().project(&project_id)?.kb.top_k.max(1) as usize;
+	tokio::task::spawn_blocking(move || kb::search_local(&dir, &query, k, "")).await.map_err(|e| Error::Msg(e.to_string()))
+}
+
+#[tauri::command]
+pub fn kb_cards(app: AppHandle, project_id: String, path: String) -> Result<Vec<kb::SectionView>> {
+	kb::cards_of(&app, &project_id, &path)
 }
 
 /* ---------- Claude 설정 ---------- */

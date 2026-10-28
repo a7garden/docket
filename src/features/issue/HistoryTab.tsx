@@ -47,6 +47,38 @@ export function HistoryTab({ issue }: { issue: Issue }) {
 	);
 }
 
+/** 이 실행의 프롬프트에 지식베이스가 붙인 구획. 무엇을 근거로 줬는지 나중에 확인한다. */
+export function KbHits({ run }: { run: RunRecord }) {
+	const [open, setOpen] = useState(false);
+	const hits = run.kbHits ?? [];
+	if (hits.length === 0) return null;
+	return (
+		<div className="mb-2 border-b border-border pb-2 text-[12px]">
+			<button type="button" onClick={() => setOpen((v) => !v)} className="flex items-center gap-1.5 text-subtle hover:text-foreground">
+				<ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
+				지식베이스 자료 {hits.length}
+			</button>
+			{open && (
+				<ul className="mt-1.5 flex flex-col gap-1.5 pl-4.5">
+					{hits.map((h, i) => (
+						<li key={i} className="min-w-0">
+							<div className="truncate text-muted-foreground selectable" title={h.path}>
+								{h.label ? `산출물 「${h.label}」` : baseName(h.path)}
+								{h.section && <span className="text-subtle"> › {h.section}</span>}
+							</div>
+							{h.why && <div className="truncate text-subtle">{h.why}</div>}
+						</li>
+					))}
+				</ul>
+			)}
+		</div>
+	);
+}
+
+function baseName(path: string) {
+	return path.split(/[\\/]/).pop() || path;
+}
+
 /**
  * 이 실행이 그때 어떤 권한으로 돌았는지. 프로젝트 설정은 나중에 바뀌므로 실행마다 남긴 값을 보인다.
  * 전역 · 저장소 설정의 규칙은 여기 없다 — CLI 가 실행 때 읽어 합친다. 프로젝트 설정의 「실제로 걸리는 규칙」에서 본다.
@@ -100,6 +132,7 @@ function RunRow({ issue, run, defaultOpen }: { issue: Issue; run: RunRecord; def
 			{open && (
 				<div className="border-t border-border px-3 py-2">
 					{run.mode && <RunPerms run={run} />}
+					<KbHits run={run} />
 					<RunEvents projectId={issue.projectId} target="issue" targetId={issue.id} runId={run.id} live={live} />
 				</div>
 			)}

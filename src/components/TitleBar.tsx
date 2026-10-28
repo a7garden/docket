@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueries } from "@tanstack/react-query";
-import { Square } from "lucide-react";
+import { PanelRight, Square } from "lucide-react";
 import { toast } from "sonner";
 import { api, errorText } from "@/lib/api";
 import { qk, useProjects } from "@/lib/queries";
 import { RUN_KIND_LABEL } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
 import type { Project } from "@/lib/types";
+import { type ActionList, ContextActions } from "./ActionMenu";
 import { RunDot } from "./bits";
 import {
 	AlertDialog,
@@ -21,6 +22,7 @@ import {
 } from "./ui/alert-dialog";
 import { Button } from "./ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { UsageMeter } from "./UsageMeter";
 
 const win = getCurrentWindow();
 
@@ -60,6 +62,7 @@ export function TitleBar() {
 				</span>
 			</div>
 			<div data-tauri-drag-region className="flex-1 self-stretch" />
+			<UsageMeter />
 			{jobs.length > 0 && (
 				<Popover>
 					<PopoverTrigger asChild>
@@ -144,6 +147,8 @@ interface Job {
 	label: string;
 	what: string;
 	phase: "running" | "queued";
+	/** 프로젝트 대화. 누르면 보드가 아니라 대화 화면으로 간다. */
+	talk?: boolean;
 }
 
 /** 모든 프로젝트에서 실행 · 대기 중인 이슈와 산출물 작성. 사건으로 캐시가 고쳐지므로 따로 다시 묻지 않는다. */
@@ -151,8 +156,13 @@ function useJobs(): Job[] {
 	const { data: projects = [] } = useProjects();
 	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id) })) });
 	const docs = useQueries({ queries: projects.map((p) => ({ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id) })) });
+	const talks = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id) })) });
 	const out: Job[] = [];
 	projects.forEach((project, n) => {
+		// 대화는 번호가 없다. #0 대신 「대화 · 제목」으로 부른다.
+		for (const t of talks[n]?.data ?? [])
+			if (t.run)
+				out.push({ key: `t:${t.id}`, project, target: "issue", id: t.id, label: `대화 · ${t.title || "새 대화"}`, what: RUN_KIND_LABEL[t.run.kind] ?? t.run.kind, phase: t.run.phase, talk: true });
 		for (const i of issues[n]?.data ?? [])
 			if (i.run)
 				out.push({
@@ -214,7 +224,10 @@ function JobRow({ job, onStop }: { job: Job; onStop: () => void }) {
 	const go = () => {
 		const ui = useUi.getState();
 		if (ui.projectId !== job.project.id) ui.setProject(job.project.id);
-		if (job.target === "issue") {
+		if (job.talk) {
+			ui.setView("talks");
+			useUi.getState().openTalk(job.id);
+		} else if (job.target === "issue") {
 			ui.setView("board");
 			useUi.getState().openIssue(job.id);
 		} else {
@@ -222,23 +235,30 @@ function JobRow({ job, onStop }: { job: Job; onStop: () => void }) {
 			useUi.getState().openDeliverable(job.id);
 		}
 	};
+	const menu: ActionList = [
+		{ label: job.talk ? "대화 열기" : job.target === "issue" ? "이슈 열기" : "산출물 열기", icon: <PanelRight />, onSelect: go },
+		"sep",
+		{ label: job.phase === "queued" ? "줄에서 빼기" : "중지", icon: <Square className="fill-current" />, destructive: true, onSelect: onStop },
+	];
 	return (
-		<li className="group flex items-center gap-2 px-3 py-1.5 hover:bg-hover">
-			<RunDot className={job.phase === "queued" ? "bg-subtle [animation:none]" : undefined} />
-			<button type="button" onClick={go} className="flex min-w-0 flex-1 flex-col text-left outline-none focus-visible:underline">
-				<span className="flex items-baseline gap-2">
-					<span className="min-w-0 truncate text-[13px] font-medium">{job.label}</span>
-					<span className="shrink-0 text-[11.5px] text-subtle">
-						{job.what}
-						{job.phase === "queued" && " · 대기"}
+		<ContextActions items={menu} className="w-44">
+			<li className="group flex items-center gap-2 px-3 py-1.5 hover:bg-hover">
+				<RunDot className={job.phase === "queued" ? "bg-subtle [animation:none]" : undefined} />
+				<button type="button" onClick={go} className="flex min-w-0 flex-1 flex-col text-left outline-none focus-visible:underline">
+					<span className="flex items-baseline gap-2">
+						<span className="min-w-0 truncate text-[13px] font-medium">{job.label}</span>
+						<span className="shrink-0 text-[11.5px] text-subtle">
+							{job.what}
+							{job.phase === "queued" && " · 대기"}
+						</span>
 					</span>
-				</span>
-				<span className="truncate text-[11.5px] text-subtle">{activity || job.project.name}</span>
-			</button>
-			<Button size="icon-sm" variant="ghost" aria-label={`${job.label} 중지`} title="중지" className="text-muted-foreground hover:text-danger" onClick={onStop}>
-				<Square className="size-3 fill-current" />
-			</Button>
-		</li>
+					<span className="truncate text-[11.5px] text-subtle">{activity || job.project.name}</span>
+				</button>
+				<Button size="icon-sm" variant="ghost" aria-label={`${job.label} 중지`} title="중지" className="text-muted-foreground hover:text-danger" onClick={onStop}>
+					<Square className="size-3 fill-current" />
+				</Button>
+			</li>
+		</ContextActions>
 	);
 }
 

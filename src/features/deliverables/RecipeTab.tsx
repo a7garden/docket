@@ -1,10 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ExternalLink, FolderOpen, Plus, X } from "lucide-react";
+import { ExternalLink, FileText, FolderOpen, Plus, X } from "lucide-react";
 import { toast } from "sonner";
+import { attempt, ContextActions, fileActions } from "@/components/ActionMenu";
 import { SectionTitle } from "@/components/bits";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
@@ -43,7 +45,7 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 	}, [naming, d.title, nextN, project.id, project.naming]);
 
 	const save = (patch: Partial<DeliverablePatch>) => {
-		const full: DeliverablePatch = { title: d.title, note: d.note, guide, naming, subdir, mode: d.mode, ...patch };
+		const full: DeliverablePatch = { title: d.title, note: d.note, guide, naming, subdir, mode: d.mode, autoUpdate: d.autoUpdate, ...patch };
 		api.deliverableUpdate(project.id, d.id, full).catch((e) => toast.error(errorText(e)));
 	};
 
@@ -86,25 +88,36 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 					) : (
 						<ul className="surface divide-y divide-border overflow-hidden rounded-md">
 							{d.refs.map((r) => (
-								<li key={r.name} className="flex h-10 items-center gap-3 px-3 text-[13px]">
-									<FileIcon name={r.name} className="text-subtle" />
-									<span className="min-w-0 flex-1 truncate">{r.name}</span>
-									<span className="tabular text-[12px] text-subtle">{bytes(r.size)}</span>
-									<span className={cn("w-28 text-right text-[12px]", r.kind === "none" || (r.kind === "extract" && !r.textPath) ? "text-danger" : "text-subtle")}>
-										{REF_STATE[r.kind](r)}
-									</span>
-									<Button size="icon-xs" variant="ghost" aria-label={`${r.name} 열기`} onClick={() => void api.open(joinPath(d.dir, "refs", r.name)).catch((e) => toast.error(errorText(e)))}>
-										<ExternalLink />
-									</Button>
-									<Button
-										size="icon-xs"
-										variant="ghost"
-										aria-label={`${r.name} 빼기`}
-										onClick={() => void api.deliverableRefDelete(project.id, d.id, r.name).catch((e) => toast.error(errorText(e)))}
-									>
-										<X />
-									</Button>
-								</li>
+								<ContextActions
+									key={r.name}
+									items={[
+										...fileActions(joinPath(d.dir, "refs", r.name)),
+										// 뽑은 글자는 Claude 가 실제로 읽는 쪽이다. 템플릿을 어떻게 읽었는지 볼 때 연다.
+										!!r.textPath && { label: "뽑은 글자 열기", icon: <FileText />, onSelect: () => void attempt(() => api.open(r.textPath)) },
+										"sep",
+										{ label: "빼기", icon: <X />, destructive: true, onSelect: () => void attempt(() => api.deliverableRefDelete(project.id, d.id, r.name)) },
+									]}
+								>
+									<li className="flex h-10 items-center gap-3 px-3 text-[13px]">
+										<FileIcon name={r.name} className="text-subtle" />
+										<span className="min-w-0 flex-1 truncate">{r.name}</span>
+										<span className="tabular text-[12px] text-subtle">{bytes(r.size)}</span>
+										<span className={cn("w-28 text-right text-[12px]", r.kind === "none" || (r.kind === "extract" && !r.textPath) ? "text-danger" : "text-subtle")}>
+											{REF_STATE[r.kind](r)}
+										</span>
+										<Button size="icon-xs" variant="ghost" aria-label={`${r.name} 열기`} onClick={() => void api.open(joinPath(d.dir, "refs", r.name)).catch((e) => toast.error(errorText(e)))}>
+											<ExternalLink />
+										</Button>
+										<Button
+											size="icon-xs"
+											variant="ghost"
+											aria-label={`${r.name} 빼기`}
+											onClick={() => void api.deliverableRefDelete(project.id, d.id, r.name).catch((e) => toast.error(errorText(e)))}
+										>
+											<X />
+										</Button>
+									</li>
+								</ContextActions>
 							))}
 						</ul>
 					)}
@@ -130,6 +143,19 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 						템플릿 형식(hwpx · docx · xlsx · pptx)으로 만듭니다. 문서 스킬을 돌리느라 명령 실행을 허용합니다. 저장소 안 편집은 막지만 명령으로 쓰는 것까지 막지는 못합니다.
 					</Choice>
 				</div>
+			</Block>
+
+			<Block title="코드가 바뀌면 자동 갱신" action={<Switch checked={d.autoUpdate} onCheckedChange={(on) => save({ autoUpdate: on })} aria-label="자동 갱신" />}>
+				<p className="text-[12.5px] leading-relaxed break-keep text-subtle">
+					이슈를 완료하면 그 코드 변경이 이 산출물에 반영되어야 하는지 Claude 가 가리고, 반영할 것이 있으면 새 판을 씁니다. 고칠 것이 없으면 판을 만들지 않습니다.
+					판이 하나는 있어야 돕니다. 결과는 그 이슈의 흐름에 남습니다.
+				</p>
+				{d.autoLast && (
+					<p className="text-[13px]">
+						<span className="text-subtle">마지막 자동 갱신 </span>
+						{d.autoLast}
+					</p>
+				)}
 			</Block>
 
 			<Block title="파일 이름">

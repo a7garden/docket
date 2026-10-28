@@ -1,19 +1,11 @@
-import { useEffect, useState } from "react";
-import { Archive, FileStack, FolderOpen, MoreHorizontal, RotateCcw, Trash2, Undo2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { MoreHorizontal, RotateCcw, Undo2, X } from "lucide-react";
 import { toast } from "sonner";
+import { DropdownActions } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
-import {
-	AlertDialog,
-	AlertDialogAction,
-	AlertDialogCancel,
-	AlertDialogContent,
-	AlertDialogDescription,
-	AlertDialogFooter,
-	AlertDialogHeader,
-	AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { Kbd } from "@/components/ui/kbd";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
@@ -25,10 +17,12 @@ import { useIssues, useProjects } from "@/lib/queries";
 import { stateOf } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
 import type { Issue, Project } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { totals } from "../board/IssueCard";
 import { ChangesTab } from "./ChangesTab";
 import { ChatComposer, ChatTab, type Draft, NO_DRAFT, SessionBar, useTranscript } from "./ChatTab";
 import { HistoryTab } from "./HistoryTab";
+import { RevertConfirm, useIssueActions } from "./issueActions";
 import { NoteTab } from "./NoteTab";
 import { PlanTab } from "./PlanTab";
 import { type Answers, NO_ANSWERS, answeredCount, answersText } from "./Questions";
@@ -67,6 +61,67 @@ export function IssueSheet({ project }: { project: Project }) {
 	);
 }
 
+const TITLE_CLASS = "text-[19px] leading-snug font-semibold tracking-[-0.02em] break-keep";
+
+/** 누르면 입력칸이 된다. 고친 제목은 메모를 바꿔도 남고, 비우면 다시 Claude 가 짓는다. */
+function IssueTitle({ issue }: { issue: Issue }) {
+	const [edit, setEdit] = useState<string | null>(null);
+	const cancelled = useRef(false);
+	const naming = issue.titleMode === "auto" && issue.titledAt < issue.noteUpdatedAt;
+
+	const save = async () => {
+		if (edit === null) return;
+		const next = edit.trim();
+		setEdit(null);
+		if (cancelled.current || next === issue.title) return;
+		try {
+			await api.issueSetTitle(issue.projectId, issue.id, next);
+		} catch (e) {
+			toast.error(errorText(e));
+		}
+	};
+
+	if (edit !== null) {
+		return (
+			<>
+				<SheetTitle className="sr-only">{issue.title || "제목 없는 메모"}</SheetTitle>
+				<Input
+					autoFocus
+					value={edit}
+					onChange={(e) => setEdit(e.target.value)}
+					onBlur={() => void save()}
+					onKeyDown={(e) => {
+						if (e.key === "Enter") e.currentTarget.blur();
+						if (e.key === "Escape") {
+							cancelled.current = true;
+							setEdit(null);
+						}
+					}}
+					placeholder="비우면 Claude 가 다시 짓습니다"
+					aria-label="제목"
+					className={cn("h-auto px-2 py-1 md:text-[19px]", TITLE_CLASS)}
+				/>
+			</>
+		);
+	}
+	return (
+		<SheetTitle className={TITLE_CLASS}>
+			<button
+				type="button"
+				title="눌러서 제목 고치기"
+				onClick={() => {
+					cancelled.current = false;
+					setEdit(issue.title);
+				}}
+				className="rounded-sm text-left hover:text-muted-foreground"
+			>
+				{issue.title || "제목 없는 메모"}
+			</button>
+			{naming && <span className="ml-2 align-middle text-[12px] font-normal tracking-normal text-subtle">제목 짓는 중</span>}
+		</SheetTitle>
+	);
+}
+
 function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPath: string; onClose: () => void }) {
 	const [tab, setTab] = useState<Tab>(() => tabFor(issue));
 	// 단계가 넘어가면 그 단계에서 볼 탭으로 옮긴다. 계획이 나오면 계획 탭, 구현이 끝나면 변경 탭.
@@ -91,12 +146,12 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 					{state && <Chip tone={state.tone}>{state.label}</Chip>}
 					<span title={clock(issue.updatedAt)}>{relTime(issue.updatedAt)}</span>
 					<div className="flex-1" />
-					<IssueMenu issue={issue} onDeleted={onClose} />
+					<IssueMenu issue={issue} />
 					<Button size="icon-sm" variant="ghost" aria-label="닫기" onClick={onClose}>
 						<X />
 					</Button>
 				</div>
-				<SheetTitle className="text-[19px] leading-snug font-semibold tracking-[-0.02em] break-keep">{issue.title || "제목 없는 메모"}</SheetTitle>
+				<IssueTitle issue={issue} />
 				<SheetDescription className="sr-only">이슈 상세</SheetDescription>
 			</header>
 
@@ -358,29 +413,6 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 	}
 }
 
-/** 되돌리기는 저장소를 고치므로 한 번 묻는다. 무엇이 어떻게 되는지를 그 자리에서 알려 준다. */
-function RevertConfirm({ issue, open, onOpenChange }: { issue: Issue; open: boolean; onOpenChange: (o: boolean) => void }) {
-	const files = new Set(issue.changes.map((c) => c.rel)).size;
-	const created = new Set(issue.changes.filter((c) => c.kind === "create").map((c) => c.rel)).size;
-	return (
-		<AlertDialog open={open} onOpenChange={onOpenChange}>
-			<AlertDialogContent className="pop">
-				<AlertDialogHeader>
-					<AlertDialogTitle>#{issue.number} 의 구현을 되돌릴까요?</AlertDialogTitle>
-					<AlertDialogDescription>
-						Claude 가 이 이슈에서 바꾼 파일 {files}개를 기록한 변경분대로 거꾸로 고칩니다. 그 뒤에 직접 고친 줄은 지키라고 지시합니다.
-						{created > 0 && ` 새로 만든 파일 ${created}개는 앱 데이터의 휴지통 폴더로 옮깁니다.`} 끝나면 계획 단계로 돌아가 다시 승인하거나 다시 계획할 수 있습니다.
-					</AlertDialogDescription>
-				</AlertDialogHeader>
-				<AlertDialogFooter>
-					<AlertDialogCancel>취소</AlertDialogCancel>
-					<AlertDialogAction onClick={() => void run(() => api.issueRevert(issue.projectId, issue.id))}>되돌리기</AlertDialogAction>
-				</AlertDialogFooter>
-			</AlertDialogContent>
-		</AlertDialog>
-	);
-}
-
 function RevertButton({ issue, disabled }: { issue: Issue; disabled: boolean }) {
 	const [open, setOpen] = useState(false);
 	return (
@@ -394,12 +426,9 @@ function RevertButton({ issue, disabled }: { issue: Issue; disabled: boolean }) 
 	);
 }
 
-function IssueMenu({ issue, onDeleted }: { issue: Issue; onDeleted: () => void }) {
-	const [confirm, setConfirm] = useState(false);
-	const [revert, setRevert] = useState(false);
-	const setView = useUi((s) => s.setView);
-	const openDeliverable = useUi((s) => s.openDeliverable);
-	const { projectId: p, id } = issue;
+/** 항목과 확인 창은 보드 카드의 우클릭 메뉴와 같이 쓴다. 지우면 훅이 이 창을 닫는다. */
+function IssueMenu({ issue }: { issue: Issue }) {
+	const { items, dialogs } = useIssueActions(issue);
 	return (
 		<>
 			<DropdownMenu>
@@ -409,72 +438,10 @@ function IssueMenu({ issue, onDeleted }: { issue: Issue; onDeleted: () => void }
 					</Button>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="end" className="pop w-52">
-					<DropdownMenuItem
-						onSelect={() =>
-							void run(async () => {
-								const d = await api.deliverableFromIssue(p, id);
-								toast(`산출물 「${d.title}」 로 남겼습니다`, {
-									action: {
-										label: "보기",
-										onClick: () => {
-											setView("deliverables");
-											openDeliverable(d.id);
-										},
-									},
-								});
-							})
-						}
-					>
-						<FileStack />
-						산출물로 남기기
-					</DropdownMenuItem>
-					<DropdownMenuItem onSelect={() => void run(() => api.reveal(issue.dir))}>
-						<FolderOpen />
-						이슈 폴더 열기
-					</DropdownMenuItem>
-					{!issue.run && issue.status !== "dropped" && issue.status !== "done" && (
-						<DropdownMenuItem onSelect={() => void run(() => api.issueDrop(p, id))}>
-							<Archive />
-							보류
-						</DropdownMenuItem>
-					)}
-					{/* 결과 확인 · 완료 단계는 아래 칸에도 단추가 있다. 승인 대기 중 대화로 고친 것처럼 그 밖의 단계는 여기서만 되돌린다. */}
-					{!issue.run && issue.changes.length > 0 && (
-						<DropdownMenuItem onSelect={() => setRevert(true)}>
-							<Undo2 />
-							구현 되돌리기
-						</DropdownMenuItem>
-					)}
-					<DropdownMenuSeparator />
-					<DropdownMenuItem variant="destructive" disabled={!!issue.run} onSelect={() => setConfirm(true)}>
-						<Trash2 />
-						지우기
-					</DropdownMenuItem>
+					<DropdownActions items={items} />
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<RevertConfirm issue={issue} open={revert} onOpenChange={setRevert} />
-			<AlertDialog open={confirm} onOpenChange={setConfirm}>
-				<AlertDialogContent className="pop">
-					<AlertDialogHeader>
-						<AlertDialogTitle>#{issue.number} 를 지울까요?</AlertDialogTitle>
-						<AlertDialogDescription>메모 · 계획 · 첨부 · 실행 기록을 앱 데이터의 휴지통 폴더로 옮깁니다. 이미 고친 코드는 그대로 남습니다.</AlertDialogDescription>
-					</AlertDialogHeader>
-					<AlertDialogFooter>
-						<AlertDialogCancel>취소</AlertDialogCancel>
-						<AlertDialogAction
-							variant="destructive"
-							onClick={() =>
-								void run(async () => {
-									await api.issueDelete(p, id);
-									onDeleted();
-								})
-							}
-						>
-							지우기
-						</AlertDialogAction>
-					</AlertDialogFooter>
-				</AlertDialogContent>
-			</AlertDialog>
+			{dialogs}
 		</>
 	);
 }

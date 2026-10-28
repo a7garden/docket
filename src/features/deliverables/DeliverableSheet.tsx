@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ExternalLink, FolderOpen, MoreHorizontal, PenLine, Trash2, Upload, Wand2, X } from "lucide-react";
+import { ExternalLink, Eye, FolderOpen, MoreHorizontal, PenLine, Trash2, Upload, Wand2, X } from "lucide-react";
 import { toast } from "sonner";
+import { type ActionList, ContextActions, DropdownActions, fileActions } from "@/components/ActionMenu";
 import { Chip, SectionTitle } from "@/components/bits";
 import { Markdown } from "@/components/Markdown";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
@@ -18,7 +19,7 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -81,7 +82,7 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 
 	const saveMeta = () => {
 		if (title === d.title && note === d.note) return;
-		api.deliverableUpdate(project.id, d.id, { title, note, guide: d.guide, naming: d.naming, subdir: d.subdir, mode: d.mode }).catch((e) => toast.error(errorText(e)));
+		api.deliverableUpdate(project.id, d.id, { title, note, guide: d.guide, naming: d.naming, subdir: d.subdir, mode: d.mode, autoUpdate: d.autoUpdate }).catch((e) => toast.error(errorText(e)));
 	};
 
 	return (
@@ -90,7 +91,7 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 				<div className="flex min-h-7 items-center gap-2 text-[12px] text-subtle">
 					{d.job && <Chip tone="run">{d.job.phase === "queued" ? "대기 중" : "Claude 가 쓰는 중"}</Chip>}
 					<div className="flex-1" />
-					<Menu project={project} d={d} onDeleted={onClose} />
+					<Menu project={project} d={d} />
 					<Button size="icon-sm" variant="ghost" aria-label="닫기" onClick={onClose}>
 						<X />
 					</Button>
@@ -163,17 +164,19 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 								<ul className="surface divide-y divide-border overflow-hidden rounded-md">
 									{[...d.versions].reverse().map((x) => (
 										<li key={x.n}>
-											<button
-												type="button"
-												onClick={() => setSelected(x.n)}
-												className={cn("flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] hover:bg-hover", x.n === v?.n && "bg-hover")}
-											>
-												<span className="tabular w-8 font-medium">v{x.n}</span>
-												<FileIcon name={x.file} className="text-subtle" />
-												<span className="min-w-0 flex-1 truncate">{x.file}</span>
-												<Chip>{SOURCE_LABEL[x.source] ?? x.source}</Chip>
-												<span className="tabular w-24 text-right text-[12px] text-subtle">{clock(x.addedAt)}</span>
-											</button>
+											<ContextActions items={[{ label: "이 판 보기", icon: <Eye />, onSelect: () => setSelected(x.n) }, "sep", ...fileActions(versionPath(d, x))]}>
+												<button
+													type="button"
+													onClick={() => setSelected(x.n)}
+													className={cn("flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] hover:bg-hover", x.n === v?.n && "bg-hover")}
+												>
+													<span className="tabular w-8 font-medium">v{x.n}</span>
+													<FileIcon name={x.file} className="text-subtle" />
+													<span className="min-w-0 flex-1 truncate">{x.file}</span>
+													<Chip>{SOURCE_LABEL[x.source] ?? x.source}</Chip>
+													<span className="tabular w-24 text-right text-[12px] text-subtle">{clock(x.addedAt)}</span>
+												</button>
+											</ContextActions>
 										</li>
 									))}
 								</ul>
@@ -343,8 +346,58 @@ function VersionView({ project, d, v, isLatest }: { project: Project; d: Deliver
 	);
 }
 
-function Menu({ project, d, onDeleted }: { project: Project; d: Deliverable; onDeleted: () => void }) {
+/** 새 판 올리기 · 저장 폴더 · 지우기와 그 확인 창. 상세 창의 「더 보기」와 목록 줄의 우클릭이 같이 쓴다. */
+export function useDeliverableActions(project: Project, d: Deliverable): { items: ActionList; dialogs: ReactNode } {
 	const [confirm, setConfirm] = useState(false);
+	const items: ActionList = [
+		{
+			label: "새 판 파일 올리기",
+			icon: <Upload />,
+			onSelect: async () => {
+				const picked = await openDialog({ multiple: false, title: "새 판으로 올릴 파일" });
+				if (typeof picked === "string") await api.deliverableImport(project.id, [picked], d.id).catch((e) => toast.error(errorText(e)));
+			},
+		},
+		{ label: "저장 폴더 열기", icon: <FolderOpen />, onSelect: () => void api.open(d.outputDir).catch((e) => toast.error(errorText(e))) },
+		"sep",
+		{ label: "지우기", icon: <Trash2 />, destructive: true, disabled: !!d.job, onSelect: () => setConfirm(true) },
+	];
+	const dialogs = (
+		<AlertDialog open={confirm} onOpenChange={setConfirm}>
+			<AlertDialogContent className="pop">
+				<AlertDialogHeader>
+					<AlertDialogTitle>「{d.title}」 를 지울까요?</AlertDialogTitle>
+					<AlertDialogDescription className="leading-relaxed break-keep">
+						정보 · 템플릿 · 작성 기록을 앱 데이터의 휴지통 폴더로 옮깁니다.
+						{project.deliverablesDir ? " 산출물 폴더에 둔 판 파일은 그대로 둡니다." : " 앱 데이터에 둔 판 파일도 함께 옮깁니다."}
+					</AlertDialogDescription>
+				</AlertDialogHeader>
+				<AlertDialogFooter>
+					<AlertDialogCancel>취소</AlertDialogCancel>
+					<AlertDialogAction
+						variant="destructive"
+						onClick={() =>
+							void api
+								.deliverableDelete(project.id, d.id)
+								.then(() => {
+									// 목록에서 지웠어도 그 산출물의 상세 창이 열려 있으면 닫는다.
+									const ui = useUi.getState();
+									if (ui.deliverableId === d.id) ui.openDeliverable(null);
+								})
+								.catch((e) => toast.error(errorText(e)))
+						}
+					>
+						지우기
+					</AlertDialogAction>
+				</AlertDialogFooter>
+			</AlertDialogContent>
+		</AlertDialog>
+	);
+	return { items, dialogs };
+}
+
+function Menu({ project, d }: { project: Project; d: Deliverable }) {
+	const { items, dialogs } = useDeliverableActions(project, d);
 	return (
 		<>
 			<DropdownMenu>
@@ -354,51 +407,10 @@ function Menu({ project, d, onDeleted }: { project: Project; d: Deliverable; onD
 					</Button>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="end" className="pop w-52">
-					<DropdownMenuItem
-						onSelect={async () => {
-							const picked = await openDialog({ multiple: false, title: "새 판으로 올릴 파일" });
-							if (typeof picked === "string") await api.deliverableImport(project.id, [picked], d.id).catch((e) => toast.error(errorText(e)));
-						}}
-					>
-						<Upload />
-						새 판 파일 올리기
-					</DropdownMenuItem>
-					<DropdownMenuItem onSelect={() => void api.open(d.outputDir).catch((e) => toast.error(errorText(e)))}>
-						<FolderOpen />
-						저장 폴더 열기
-					</DropdownMenuItem>
-					<DropdownMenuSeparator />
-					<DropdownMenuItem variant="destructive" disabled={!!d.job} onSelect={() => setConfirm(true)}>
-						<Trash2 />
-						지우기
-					</DropdownMenuItem>
+					<DropdownActions items={items} />
 				</DropdownMenuContent>
 			</DropdownMenu>
-			<AlertDialog open={confirm} onOpenChange={setConfirm}>
-				<AlertDialogContent className="pop">
-					<AlertDialogHeader>
-						<AlertDialogTitle>「{d.title}」 를 지울까요?</AlertDialogTitle>
-						<AlertDialogDescription className="leading-relaxed break-keep">
-							정보 · 템플릿 · 작성 기록을 앱 데이터의 휴지통 폴더로 옮깁니다.
-							{project.deliverablesDir ? " 산출물 폴더에 둔 판 파일은 그대로 둡니다." : " 앱 데이터에 둔 판 파일도 함께 옮깁니다."}
-						</AlertDialogDescription>
-					</AlertDialogHeader>
-					<AlertDialogFooter>
-						<AlertDialogCancel>취소</AlertDialogCancel>
-						<AlertDialogAction
-							variant="destructive"
-							onClick={() =>
-								void api
-									.deliverableDelete(project.id, d.id)
-									.then(onDeleted)
-									.catch((e) => toast.error(errorText(e)))
-							}
-						>
-							지우기
-						</AlertDialogAction>
-					</AlertDialogFooter>
-				</AlertDialogContent>
-			</AlertDialog>
+			{dialogs}
 		</>
 	);
 }

@@ -17,30 +17,49 @@ pub fn short_id() -> String {
 pub struct Settings {
 	/// 비우면 PATH 와 npm 전역 폴더에서 찾는다
 	pub claude_path: String,
-	/// 비우면 CLI 기본 모델
-	pub model: String,
+	/// 계획 · 구현 · 대화에 쓸 모델. 비우면 CLI 기본 모델이다. 메모에서 고른 모델이 이보다 앞선다.
+	/// 산출물 작성은 메모가 없고 결과물을 만들어 쓰는 일이라 구현 모델을 쓴다.
+	pub plan_model: String,
+	pub impl_model: String,
+	pub chat_model: String,
+	/// 2026-10-28 전에는 모델이 하나였다. 읽기만 하고 Store::settings 가 세 칸으로 옮긴다. 쓰던 모델을 잃지 않게 하려는 것이다.
+	#[serde(rename = "model", skip_serializing)]
+	pub legacy_model: String,
 	/// 새 메모에 자동 계획을 켤지
 	pub auto_plan: bool,
 	/// 메모를 마지막으로 고친 뒤 이만큼 지나면 계획을 시작한다. 쓰다 만 메모로 계획이 돌지 않게 하는 여유다.
 	pub auto_plan_delay_sec: u64,
+	/// 새 메모의 제목을 지을 모델. 계획 · 구현 모델과 따로 둬 제목에 비싼 모델이 쓰이지 않게 한다. 비우면 첫 줄을 제목으로 쓴다.
+	pub title_model: String,
+	/// 메모를 마지막으로 고친 뒤 이만큼 지나야 제목을 짓는다. 쓰는 도중에 부르지 않게 하는 여유다.
+	pub title_delay_sec: u64,
 	/// 끄면 --strict-mcp-config 로 MCP 서버를 하나도 띄우지 않는다. 외부 문서 도구가 몰래 쓰이는 것을 막는다.
 	pub use_mcp: bool,
 	/// system · dark · light
 	pub theme: String,
 	/// 켠 플러그인의 id. 정의는 plugins/*.json 에 있고, 켜고 끄는 것만 여기 둔다. 사용자가 쓴 정의 파일을 앱이 고쳐 쓰지 않게 하려는 것이다.
 	pub enabled_plugins: Vec<String>,
+	/// 지식베이스의 색인 카드 · 고르기 다듬기 · 자동 갱신 판정에 쓸 모델. 비우면 제목 모델, 그것도 비면 haiku 다.
+	/// 파일마다 부르는 호출이라 가벼운 모델을 둔다.
+	pub kb_card_model: String,
 }
 
 impl Default for Settings {
 	fn default() -> Self {
 		Self {
 			claude_path: String::new(),
-			model: String::new(),
+			plan_model: String::new(),
+			impl_model: String::new(),
+			chat_model: String::new(),
+			legacy_model: String::new(),
 			auto_plan: true,
 			auto_plan_delay_sec: 60,
+			title_model: "haiku".into(),
+			title_delay_sec: 5,
 			use_mcp: false,
 			theme: "dark".into(),
 			enabled_plugins: Vec::new(),
+			kb_card_model: String::new(),
 		}
 	}
 }
@@ -55,8 +74,6 @@ pub struct Project {
 	pub path: String,
 	pub created_at: i64,
 	pub next_number: u32,
-	/// 비우면 전역 설정을 따른다
-	pub model: String,
 	/// acceptEdits: 편집만 자동 승인하고 명령은 allowed_tools 에 있는 것만 · bypassPermissions: 명령 · 웹 · 스킬까지 모두 허용.
 	/// 이름은 옛 값 그대로지만 2026-10-28 부터 「모두 허용」도 --dangerously-skip-permissions 를 쓰지 않는다. 거부 목록이 늘 앞선다.
 	pub impl_mode: String,
@@ -74,6 +91,48 @@ pub struct Project {
 	pub naming_underscore: bool,
 	/// 새 판이 생기면 지난 판 파일을 옮길 하위 폴더 (예: 이전판). 비우면 옮기지 않는다.
 	pub archive_dir: String,
+	/// 지식베이스. save_project 는 이 칸을 덮지 않는다 — 설정 화면이 들고 있던 옛 값으로 지식베이스 화면의 변경을 지우지 않게 한다.
+	pub kb: ProjectKb,
+}
+
+/// 프로젝트 지식베이스 설정. 끈 채로 시작한다 — 카드를 만들 때 문서를 Claude 에 보내고 호출 비용이 들어서다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProjectKb {
+	pub enabled: bool,
+	/// 복사하지 않고 그 자리를 훑는 폴더(전체 경로). 끌어 놓은 파일은 앱 데이터의 kb/inbox/ 에 들어가 여기 적지 않는다.
+	pub folders: Vec<String>,
+	/// 산출물의 최신 판도 넣는다. 지난 판은 넣지 않는다 — 낡은 문구가 함께 찾아진다.
+	pub include_deliverables: bool,
+	/// 프롬프트에 붙일 구획 수
+	pub top_k: u32,
+	/// 로컬로 고른 후보를 Claude 에 한 번 더 넘겨 다시 고른다. 실행마다 호출이 하나 붙는다.
+	pub rerank: bool,
+}
+
+impl Default for ProjectKb {
+	fn default() -> Self {
+		Self { enabled: false, folders: Vec::new(), include_deliverables: true, top_k: 8, rerank: false }
+	}
+}
+
+/// 지식베이스에서 찾아 붙인 구획 하나. 실행 기록에는 excerpt 를 비워 남긴다(issue.json 이 커지지 않게).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct KbHit {
+	/// 원본 파일
+	pub path: String,
+	/// 뽑아 둔 글자 사본. Claude 는 이것을 Read 로 연다.
+	pub text_path: String,
+	/// folder · inbox · deliverable
+	pub source: String,
+	/// 산출물이면 그 제목
+	pub label: String,
+	pub section: String,
+	/// 카드 요약. 카드가 없으면 비어 있다.
+	pub why: String,
+	pub excerpt: String,
+	pub score: f64,
 }
 
 impl Default for Project {
@@ -84,7 +143,6 @@ impl Default for Project {
 			path: String::new(),
 			created_at: 0,
 			next_number: 1,
-			model: String::new(),
 			impl_mode: "acceptEdits".into(),
 			allowed_tools: Vec::new(),
 			denied_tools: DEFAULT_DENY.iter().map(|s| s.to_string()).collect(),
@@ -93,6 +151,7 @@ impl Default for Project {
 			naming: String::new(),
 			naming_underscore: true,
 			archive_dir: String::new(),
+			kb: ProjectKb::default(),
 		}
 	}
 }
@@ -122,6 +181,19 @@ pub enum Status {
 	Review,
 	Done,
 	Dropped,
+}
+
+/// 이슈 제목을 정하는 방식.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum TitleMode {
+	/// 메모 첫 줄. 옛 이슈와 제목 모델을 끈 때다.
+	#[default]
+	FirstLine,
+	/// 제목 모델이 메모를 읽고 짓는다. 지어 오기 전에는 첫 줄을 임시로 쓴다.
+	Auto,
+	/// 사용자가 손으로 고쳤다. 메모를 바꿔도 덮지 않는다.
+	Manual,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,7 +351,9 @@ pub struct FileChange {
 #[serde(rename_all = "camelCase", default)]
 pub struct HistoryEntry {
 	pub at: i64,
-	/// created · plan · planned · approve · implemented · rework · chat · session · revert · reverted · done · drop · reopen · stop · error
+	/// created · plan · planned · approve · implemented · rework · chat · session · revert · reverted · done · drop · reopen · stop · error · memo
+	/// memo 는 프로젝트 대화가 보드에 메모를 등록했을 때다. text 는 `#번호 제목`, 등록에 실패했으면 `실패 · 까닭` 이다.
+	/// deliverable 은 완료한 뒤 자동 갱신이 산출물을 고친 결과다. text 는 `제목 · v판 갱신` · `제목 · 건너뜀 · 까닭` · `판정 · …` 이다.
 	pub kind: String,
 	pub text: String,
 }
@@ -309,6 +383,8 @@ pub struct RunRecord {
 	/// Claude 가 실행하려 한 명령(Bash · PowerShell). 막힌 것도 들어 있다.
 	pub commands: Vec<String>,
 	pub denials: Vec<Denial>,
+	/// 지식베이스에서 찾아 프롬프트에 붙인 구획. 무엇을 근거로 줬는지 나중에 볼 수 있게 남긴다.
+	pub kb_hits: Vec<KbHit>,
 }
 
 /// 권한 때문에 막힌 도구 호출 한 건.
@@ -332,7 +408,13 @@ pub struct Issue {
 	pub number: u32,
 	pub status: Status,
 	pub auto_plan: bool,
+	/// 이 메모의 계획 · 구현 · 대화에 쓸 모델. 비우면 설정의 실행별 모델을 따른다.
+	pub model: String,
 	pub title: String,
+	/// 제목을 누가 정하는지. 이 칸이 생기기(2026-10-28) 전의 이슈는 기본값 first_line 으로 읽혀 지금처럼 첫 줄을 따른다.
+	pub title_mode: TitleMode,
+	/// 제목을 지을 때 읽은 메모의 note_updated_at. 이보다 메모가 새로우면 다시 짓는다.
+	pub titled_at: i64,
 	pub created_at: i64,
 	pub updated_at: i64,
 	pub note_updated_at: i64,
@@ -345,6 +427,9 @@ pub struct Issue {
 	pub runs: Vec<RunRecord>,
 	pub history: Vec<HistoryEntry>,
 	pub error: String,
+	/// 메모 없이 프로젝트에서 바로 연 대화. 보드에 나오지 않고 번호(0)도 받지 않는다.
+	/// 세션 잇기 · 첨부 · 터미널 · 바뀐 파일 기록을 이슈 대화와 함께 쓰려고 같은 모델에 둔다.
+	pub talk: bool,
 }
 
 impl Issue {
@@ -387,6 +472,9 @@ pub struct DocJob {
 	pub phase: Phase,
 	pub request: String,
 	pub queued_at: i64,
+	/// 이슈를 완료해 자동 갱신으로 시작했으면 그 이슈. 끝난 결과를 그 이슈의 흐름에 남긴다.
+	#[serde(default)]
+	pub issue_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -411,6 +499,10 @@ pub struct Deliverable {
 	pub subdir: String,
 	/// md: 마크다운으로 받아 앱이 저장 · file: Claude 가 템플릿 형식대로 파일을 만든다
 	pub mode: String,
+	/// 이슈를 완료하면 그 코드 변경과 관련 있는지 가려, 있으면 새 판을 쓴다.
+	pub auto_update: bool,
+	/// 마지막 자동 갱신 결과 한 줄 (`#번호 · v판 갱신` · `#번호 · 건너뜀 · 까닭` …). 목록에 보인다.
+	pub auto_last: String,
 }
 
 /// 템플릿 · 참고 자료 한 건. kind 는 extract::kind 의 값이다.

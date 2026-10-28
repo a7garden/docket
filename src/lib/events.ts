@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { qk, upsert } from "./queries";
 import { useLive, useUi } from "./store";
-import type { Deliverable, Issue, RunEnvelope } from "./types";
+import type { Deliverable, Issue, KbProgress, KbView, RunEnvelope, Usage } from "./types";
 
 /**
  * Rust 가 보내는 사건을 받아 캐시를 고친다. 목록을 다시 불러오지 않고 바뀐 한 건만 끼운다.
@@ -18,6 +18,12 @@ export function useDocketEvents() {
 
 		pending.push(
 			listen<Issue>("docket://issue", ({ payload }) => {
+				// 프로젝트 대화는 같은 사건으로 오지만 보드 목록에 끼우지 않는다. 끼우면 메모 열에 「제목 없는 메모」로 보인다.
+				// 대화 화면은 열어 두고 보는 것이라 끝났다는 알림도 띄우지 않는다.
+				if (payload.talk) {
+					qc.setQueryData<Issue[]>(qk.talks(payload.projectId), (old) => upsert(old, payload));
+					return;
+				}
 				const key = qk.issues(payload.projectId);
 				const prev = qc.getQueryData<Issue[]>(key)?.find((x) => x.id === payload.id);
 				qc.setQueryData<Issue[]>(key, (old) => upsert(old, payload));
@@ -43,6 +49,7 @@ export function useDocketEvents() {
 		pending.push(
 			listen<{ projectId: string; id: string }>("docket://issue-removed", ({ payload }) => {
 				qc.setQueryData<Issue[]>(qk.issues(payload.projectId), (old) => old?.filter((x) => x.id !== payload.id));
+				qc.setQueryData<Issue[]>(qk.talks(payload.projectId), (old) => old?.filter((x) => x.id !== payload.id));
 			}),
 		);
 		pending.push(
@@ -62,6 +69,16 @@ export function useDocketEvents() {
 			}),
 		);
 		pending.push(listen<RunEnvelope>("docket://run", ({ payload }) => useLive.getState().push(payload)));
+		pending.push(listen<Usage>("docket://usage", ({ payload }) => qc.setQueryData(qk.usage, payload)));
+		// 색인 진행은 자주 온다. 진행 칸만 바로 고치고, 한 단계가 끝날 때 목록을 다시 읽는다.
+		pending.push(
+			listen<{ projectId: string; progress: KbProgress }>("docket://kb", ({ payload }) => {
+				const key = qk.kb(payload.projectId);
+				const prev = qc.getQueryData<KbView>(key);
+				qc.setQueryData<KbView>(key, (old) => (old ? { ...old, progress: payload.progress } : old));
+				if (!payload.progress.running || prev?.progress.stage !== payload.progress.stage) void qc.invalidateQueries({ queryKey: key });
+			}),
+		);
 
 		return () => {
 			for (const p of pending) void p.then((un) => un());

@@ -55,6 +55,7 @@ export function needsDecision(i: Issue) {
 
 export const HISTORY_LABEL: Record<string, string> = {
 	created: "메모를 붙임",
+	titled: "제목 지음",
 	plan: "계획 요청",
 	replan: "다시 계획 요청",
 	planned: "계획 나옴",
@@ -70,6 +71,8 @@ export const HISTORY_LABEL: Record<string, string> = {
 	reopen: "다시 엶",
 	stop: "중지",
 	error: "실패",
+	memo: "메모 등록",
+	deliverable: "산출물 자동 갱신",
 };
 
 export const RUN_KIND_LABEL: Record<string, string> = {

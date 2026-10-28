@@ -1,5 +1,5 @@
 // 미리보기 전용 가짜 데이터. 배포 빌드에는 들어가지 않는다 (preview.html 은 vite build 입력이 아니다).
-import type { AppInfo, Deliverable, Issue, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Turn } from "@/lib/types";
+import type { AppInfo, Deliverable, Issue, KbHit, KbSection, KbView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Turn, Usage } from "@/lib/types";
 
 const now = Date.now();
 const min = 60_000;
@@ -15,7 +15,19 @@ export const info: AppInfo = {
 	version: "0.1.0",
 };
 
-export const settings: Settings = { claudePath: "", model: "", autoPlan: true, autoPlanDelaySec: 60, useMcp: false, theme: "dark", enabledPlugins: ["herdr"] };
+export const usage: Usage = {
+	windows: [
+		{ key: "five_hour", utilization: 0.09, resetsAt: Math.round((now + 130 * min) / 1000), status: "allowed" },
+		{ key: "seven_day", utilization: 0.83, resetsAt: Math.round((now + 3 * 1440 * min) / 1000), status: "allowed" },
+	],
+	status: "allowed",
+	overage: false,
+	seenAt: now - 4 * min,
+};
+
+export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr"], kbCardModel: "" };
+
+const KB_OFF = { enabled: false, folders: [], includeDeliverables: true, topK: 8, rerank: false };
 
 export const plugins: PluginList = {
 	dir: "C:\\Users\\me\\AppData\\Roaming\\docket\\plugins",
@@ -40,9 +52,9 @@ export const plugins: PluginList = {
 };
 
 export const projects: Project[] = [
-	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, model: "", implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true },
-	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, model: "", implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true },
-	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, model: "", implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true },
+	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"] } },
+	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, kb: KB_OFF },
+	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, kb: KB_OFF },
 ];
 
 const base = (id: string, number: number, extra: Partial<Issue>): Issue => {
@@ -54,7 +66,10 @@ const base = (id: string, number: number, extra: Partial<Issue>): Issue => {
 		number,
 		status: "inbox",
 		autoPlan: false,
+		model: "",
 		title: note.split("\n")[0].replace(/^#+\s*/, ""),
+		titleMode: "auto",
+		titledAt: t,
 		createdAt: t - 30 * min,
 		updatedAt: t,
 		noteUpdatedAt: t,
@@ -255,6 +270,44 @@ export const issues: Issue[] = [
 	base("i0000000001", 1, { status: "dropped", note: "명령줄 도구로 감싸기", updatedAt: now - 86400_000 }),
 ];
 
+const talkRun = (id: string, at: number, prompt: string) => ({
+	id,
+	kind: "chat" as const,
+	startedAt: at,
+	endedAt: at + 40_000,
+	status: "ok" as const,
+	costUsd: 0.06,
+	durationMs: 40_000,
+	numTurns: 4,
+	model: "claude-opus-5-5",
+	error: "",
+	prompt,
+	mode: "읽기 · 이력 조회",
+	allowed: [],
+	deniedRules: [],
+	commands: [],
+	denials: [],
+});
+
+/** 프로젝트 대화. 둘째 차례에서 보드에 메모 #11 을 등록했다. */
+export const talks: Issue[] = [
+	base("t0000000002", 0, {
+		talk: true,
+		title: "로그는 어디서 찍나요?",
+		sessionId: "5c1f7e2a-talk-0002",
+		runs: [talkRun("r-talk-1", now - 22 * min, "로그는 어디서 찍나요?"), talkRun("r-talk-2", now - 20 * min, "레벨을 환경 변수로 바꾸는 것을 작업 메모로 등록해 줘")],
+		history: [
+			{ at: now - 23 * min, kind: "created", text: "" },
+			{ at: now - 22 * min, kind: "chat", text: "로그는 어디서 찍나요?" },
+			{ at: now - 20 * min, kind: "chat", text: "레벨을 환경 변수로 바꾸는 것을 작업 메모로 등록해 줘" },
+			{ at: now - 20 * min + 41_000, kind: "memo", text: "#11 로그 레벨을 환경 변수로 바꿀 수 있게" },
+		],
+		updatedAt: now - 20 * min,
+		dir: `${DATA}\\projects\\${P}\\issues\\t0000000002`,
+	}),
+	base("t0000000001", 0, { talk: true, title: "시험은 어떻게 돌리나요?", sessionId: "5c1f7e2a-talk-0001", runs: [talkRun("r-talk-0", now - 26 * 3600_000, "시험은 어떻게 돌리나요?")], updatedAt: now - 26 * 3600_000 }),
+];
+
 export const liveEvents: Record<string, RunEvent[]> = {
 	i0000000008: [
 		{ t: "init", model: "claude-opus-5-5", sessionId: "s8" },
@@ -308,6 +361,8 @@ export const deliverables: Deliverable[] = [
 		naming: "CALC_{제목}_v{판}_{날짜}",
 		subdir: "API_명세서",
 		mode: "file",
+		autoUpdate: false,
+		autoLast: "",
 		refs: [
 			{ name: "API_명세서_양식.xlsx", size: 48_200, kind: "extract", textPath: "x" },
 			{ name: "참고_다른_프로젝트_명세서.xlsx", size: 61_900, kind: "extract", textPath: "x" },
@@ -333,6 +388,8 @@ export const deliverables: Deliverable[] = [
 		naming: "",
 		subdir: "",
 		mode: "md",
+		autoUpdate: false,
+		autoLast: "",
 		refs: [],
 		outputDir: "D:\\work\\calc\\산출물",
 		nextName: "이번_주_변경_요약_v1_20261028.md",
@@ -357,6 +414,8 @@ export const deliverables: Deliverable[] = [
 		naming: "",
 		subdir: "",
 		mode: "file",
+		autoUpdate: true,
+		autoLast: "#9 · v2 갱신",
 		refs: [
 			{ name: "함수설명서_양식.hwpx", size: 24_800, kind: "extract", textPath: "x" },
 			{ name: "지난판_회의록.pdf", size: 1_204_000, kind: "direct", textPath: "" },
@@ -382,10 +441,46 @@ export const deliverables: Deliverable[] = [
 		naming: "",
 		subdir: "",
 		mode: "md",
+		autoUpdate: false,
+		autoLast: "",
 		refs: [],
 		outputDir: "D:\\work\\calc\\산출물",
 		nextName: "화면_캡처_모음_v2_20261028.md",
 	},
+];
+
+/** 켠 지식베이스 하나. 카드를 만드는 중이고, 읽지 못한 파일이 섞여 있다. */
+export const kb: KbView = {
+	kb: projects[0].kb,
+	dir: `${DATA}\\projects\\${P}\\kb`,
+	inboxDir: `${DATA}\\projects\\${P}\\kb\\inbox`,
+	exts: ["md", "markdown", "txt", "csv", "tsv", "json", "yaml", "yml", "xml", "html", "htm", "sql", "docx", "xlsx", "pptx", "hwpx", "pdf"],
+	files: [
+		{ path: "D:\\work\\calc\\docs\\요구사항.hwpx", source: "folder", label: "", size: 182_000, sections: 14, cards: 14, skipped: "", cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\계산 규칙.md", source: "folder", label: "", size: 6_200, sections: 5, cards: 3, skipped: "", cardError: "" },
+		{ path: `${DATA}\\projects\\${P}\\kb\\inbox\\회의록_1027.pdf`, source: "inbox", label: "", size: 1_204_000, sections: 9, cards: 0, skipped: "", cardError: "" },
+		{ path: "D:\\work\\calc\\산출물\\함수_설명서_v2_20261028.md", source: "deliverable", label: "함수 설명서", size: 905, sections: 2, cards: 2, skipped: "", cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\옛_양식.hwp", source: "folder", label: "", size: 30_100, sections: 0, cards: 0, skipped: "지원하지 않는 형식", cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\스캔본.pdf", source: "folder", label: "", size: 2_400_000, sections: 0, cards: 0, skipped: "글자 없음 (스캔 PDF 일 수 있음)", cardError: "" },
+	],
+	sections: 30,
+	cards: 19,
+	pending: 11,
+	indexedAt: now - 4 * min,
+	cardCostUsd: 0.07,
+	truncated: false,
+	cardModel: "haiku",
+	progress: { running: true, stage: "cards", done: 3, total: 11, message: "" },
+};
+
+export const kbHits: KbHit[] = [
+	{ path: "D:\\work\\calc\\docs\\계산 규칙.md", textPath: "", source: "folder", label: "", section: "나눗셈", why: "0 으로 나눌 때 None 을 돌려주는 규칙을 다룬다.", excerpt: "## 나눗셈\n0 으로 나누면 오류 대신 None 을 돌려준다.\n호출하는 쪽이 None 을 보고 안내 문구를 띄운다.", score: 7.4 },
+	{ path: "D:\\work\\calc\\docs\\요구사항.hwpx", textPath: "", source: "folder", label: "", section: "3. 계산 기능", why: "사칙연산 함수의 입력 · 출력 요구를 정리한다.", excerpt: "덧셈 · 뺄셈 · 곱셈 · 나눗셈을 제공한다.\t입력은 정수와 실수", score: 4.1 },
+];
+
+export const kbCards: KbSection[] = [
+	{ heading: "나눗셈", card: { summary: "0 으로 나눌 때 None 을 돌려주는 규칙을 다룬다.", keywords: ["div", "0 나누기"], aliases: ["ZeroDivisionError", "예외 처리"], questions: ["0 으로 나누면 어떻게 되나?"] }, excerpt: "## 나눗셈\n0 으로 나누면…" },
+	{ heading: "반올림", card: null, excerpt: "## 반올림\n소수 둘째 자리에서…" },
 ];
 
 export const docText = "# 함수 설명서\n\n| 함수 | 하는 일 | 0 을 넣으면 |\n| - | - | - |\n| `add` | 두 수를 더한다 | 그대로 |\n| `mul` | 두 수를 곱한다 | 0 |\n| `div` | 두 수를 나눈다 | `None` |\n\n## 쓰는 법\n\n```python\nfrom calc import add\nadd(2, 3)  # 5\n```\n";

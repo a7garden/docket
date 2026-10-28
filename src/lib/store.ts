@@ -2,15 +2,19 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { RunEnvelope, RunEvent } from "./types";
 
-export type View = "board" | "deliverables" | "claude" | "settings";
+export type View = "board" | "deliverables" | "talks" | "knowledge" | "claude" | "settings";
 
 interface Ui {
 	projectId: string | null;
 	view: View;
 	issueId: string | null;
 	deliverableId: string | null;
+	/** 대화 화면에서 연 대화. 아직 만들지 않은 새 대화면 화면이 정한 id 다. */
+	talkId: string | null;
 	/** Claude 설정에서 보는 프로젝트. null 이면 전역. 사이드바의 현재 프로젝트와 따로 움직인다 — 설정을 둘러보고 보드로 돌아와도 보던 프로젝트가 그대로 있게. */
 	claudeProjectId: string | null;
+	/** 설정 창을 연 프로젝트. 창은 프로젝트 머리에 있지만 사이드바 우클릭에서도 연다. */
+	editingProjectId: string | null;
 	setProject: (id: string | null) => void;
 	setView: (v: View) => void;
 	setClaudeProject: (id: string | null) => void;
@@ -18,6 +22,8 @@ interface Ui {
 	openClaude: (id: string | null) => void;
 	openIssue: (id: string | null) => void;
 	openDeliverable: (id: string | null) => void;
+	openTalk: (id: string | null) => void;
+	editProject: (id: string | null) => void;
 }
 
 // 마지막으로 본 프로젝트와 화면(Claude 설정의 범위 포함)만 기억한다. 열어 둔 이슈까지 되살리면 시작할 때 엉뚱한 창이 뜬다.
@@ -28,13 +34,17 @@ export const useUi = create<Ui>()(
 			view: "board",
 			issueId: null,
 			deliverableId: null,
+			talkId: null,
 			claudeProjectId: null,
-			setProject: (projectId) => set({ projectId, issueId: null, deliverableId: null }),
+			editingProjectId: null,
+			setProject: (projectId) => set({ projectId, issueId: null, deliverableId: null, talkId: null }),
 			setView: (view) => set({ view }),
 			setClaudeProject: (claudeProjectId) => set({ claudeProjectId }),
 			openClaude: (claudeProjectId) => set({ claudeProjectId, view: "claude" }),
 			openIssue: (issueId) => set({ issueId }),
 			openDeliverable: (deliverableId) => set({ deliverableId }),
+			openTalk: (talkId) => set({ talkId }),
+			editProject: (editingProjectId) => set({ editingProjectId }),
 		}),
 		{ name: "docket-ui", partialize: (s) => ({ projectId: s.projectId, view: s.view, claudeProjectId: s.claudeProjectId }) },
 	),

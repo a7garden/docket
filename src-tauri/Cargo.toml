@@ -1,6 +1,6 @@
 [package]
 name = "docket"
-version = "0.1.1"
+version = "0.2.0"
 description = "포스트잇처럼 적은 개발 이슈를 Claude 가 계획하고 구현하는 작업대"
 authors = ["a7garden"]
 license = "MIT"
@@ -29,6 +29,8 @@ chrono = "0.4"
 dirs = "6"
 thiserror = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# 지식베이스의 PDF 글자 뽑기. 패닉할 수 있어 앱을 한 번 더 띄운 프로세스에서만 부른다 (extract::pdf_text).
+pdf-extract = "0.9"
 
 # 앱이 끝나면 띄운 claude 를 함께 끄는 작업 개체(Job Object). 이미 의존성 트리에 있는 판을 쓴다.
 [target.'cfg(windows)'.dependencies]

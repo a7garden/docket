@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { Paperclip, Square } from "lucide-react";
+import { Copy, Hash, PanelRight, Paperclip, Square } from "lucide-react";
 import { toast } from "sonner";
+import { type ActionList, ContextActions, copy } from "@/components/ActionMenu";
 import { Chip, Diffstat, RunDot } from "@/components/bits";
 import { Button } from "@/components/ui/button";
-import { api, errorText } from "@/lib/api";
+import { primaryAction, primaryItem, useIssueActions } from "@/features/issue/issueActions";
+import { errorText } from "@/lib/api";
 import { relTime } from "@/lib/format";
 import { needsDecision, stateOf } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
@@ -106,7 +108,24 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 	const t = totals(issue);
 	const remain = Math.max(0, Math.ceil((issue.noteUpdatedAt + delaySec * 1000 - now) / 1000));
 
-	return (
+	// 카드 단추와 우클릭 메뉴가 같은 주 동작을 부른다. 단추를 누르면 카드가 열리지 않게 이벤트를 멈춘다.
+	const primary = primaryAction(issue);
+	const press = (e: React.MouseEvent) => {
+		e.stopPropagation();
+		if (primary) void act(primary.call);
+	};
+	const { items, dialogs } = useIssueActions(issue);
+	const menu: ActionList = [
+		{ label: "열기", icon: <PanelRight />, onSelect: () => openIssue(issue.id) },
+		primaryItem(primary, (fn) => void act(fn), busy),
+		"sep",
+		{ label: "번호 복사", icon: <Hash />, onSelect: () => void copy(`#${issue.number}`, "번호") },
+		{ label: "제목 복사", icon: <Copy />, onSelect: () => void copy(issue.title || "제목 없는 메모", "제목") },
+		"sep",
+		...items,
+	];
+
+	const card = (
 		<div
 			role="button"
 			tabIndex={0}
@@ -159,10 +178,7 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 							title={issue.run.phase === "queued" ? "줄에서 빼기" : "중지"}
 							disabled={busy}
 							className="shrink-0 text-subtle hover:text-danger"
-							onClick={(e) => {
-								e.stopPropagation();
-								void act(() => api.issueStop(issue.projectId, issue.id));
-							}}
+							onClick={press}
 						>
 							<Square className="size-2.5 fill-current" />
 						</Button>
@@ -182,14 +198,7 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 						)}
 						<div className="flex-1" />
 						{questions === 0 && (
-							<Button
-								size="xs"
-								disabled={busy}
-								onClick={(e) => {
-									e.stopPropagation();
-									void act(() => api.issueApprove(issue.projectId, issue.id));
-								}}
-							>
+							<Button size="xs" disabled={busy} onClick={press}>
 								승인하고 구현
 							</Button>
 						)}
@@ -203,14 +212,7 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 							</span>
 						)}
 						<div className="flex-1" />
-						<Button
-							size="xs"
-							disabled={busy}
-							onClick={(e) => {
-								e.stopPropagation();
-								void act(() => api.issueComplete(issue.projectId, issue.id));
-							}}
-						>
+						<Button size="xs" disabled={busy} onClick={press}>
 							완료
 						</Button>
 					</>
@@ -220,15 +222,7 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 						{remain > 0 ? `자동 계획 ${remain}초 뒤` : "곧 계획을 시작합니다"}
 					</span>
 				) : issue.status === "inbox" ? (
-					<Button
-						size="xs"
-						variant="secondary"
-						disabled={busy}
-						onClick={(e) => {
-							e.stopPropagation();
-							void act(() => api.issuePlan(issue.projectId, issue.id));
-						}}
-					>
+					<Button size="xs" variant="secondary" disabled={busy} onClick={press}>
 						계획 세우기
 					</Button>
 				) : (
@@ -236,5 +230,13 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 				)}
 			</div>
 		</div>
+	);
+
+	// 확인 창은 카드 밖에 둔다. 카드 안에 두면 창의 단추를 누른 것이 카드의 onClick 까지 올라가 상세 창이 열린다.
+	return (
+		<>
+			<ContextActions items={menu}>{card}</ContextActions>
+			{dialogs}
+		</>
 	);
 }

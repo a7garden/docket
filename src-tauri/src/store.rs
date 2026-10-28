@@ -3,8 +3,11 @@
 //! ```text
 //! docket/
 //!   settings.json · projects.json
+//!   usage.json                         마지막으로 받은 구독 사용률 (usage.rs)
 //!   projects/<pid>/issues/<iid>/       issue.json · note.md · attachments/ · runs/<rid>.jsonl
+//!                                      프로젝트 대화도 여기 둔다 (issue.json 의 talk · note.md 없음)
 //!   projects/<pid>/deliverables/<did>/ meta.json · v1/<파일> · runs/<rid>.jsonl
+//!   projects/<pid>/kb/                 지식베이스 · catalog.json · inbox/ · text/ (kb.rs)
 //!   trash/<시각>-<이름>/                  지운 것은 여기로 옮긴다
 //!   plugins/<id>.json                     플러그인 정의 (사용자가 쓴다 · plugins.rs)
 //! ```
@@ -112,6 +115,7 @@ pub fn same_path(a: &str, b: &str) -> bool {
 }
 
 /// 메모 첫 줄을 제목으로 쓴다. 머리표 · 목록 기호 · 이미지 줄은 건너뛴다.
+/// 옛 이슈의 제목이고, 제목 모델이 지어 오기 전이나 짓지 못했을 때의 임시 제목이다. 카드가 빈 제목으로 뜨지 않게 하려는 것이다.
 pub fn title_of(note: &str) -> String {
 	for line in note.lines() {
 		let t = line.trim().trim_start_matches('#').trim_start_matches(['-', '*', '>', ' ']).trim();
@@ -121,6 +125,29 @@ pub fn title_of(note: &str) -> String {
 		return t.chars().take(80).collect();
 	}
 	String::new()
+}
+
+/// 메모를 저장할 때 제목을 맞춘다. 모델이 지은 제목 · 손으로 고친 제목은 첫 줄로 덮지 않는다.
+/// 지은 제목은 메모가 잠잠해지면 제목 짓기 순회가 새로 바꾼다.
+pub fn note_title(issue: &mut Issue, note: &str) {
+	match issue.title_mode {
+		TitleMode::FirstLine => issue.title = title_of(note),
+		TitleMode::Auto if issue.titled_at == 0 => issue.title = title_of(note),
+		_ => {}
+	}
+}
+
+/// 모델이 하나뿐이던 옛 설정을 실행별 세 칸으로 옮긴다. 세 칸 중 하나라도 정했으면 옛 값은 버린다.
+/// 옛 값은 저장하지 않으므로, 한 번 저장하면 파일에서 빠진다.
+fn migrate_settings(mut s: Settings) -> Settings {
+	let legacy = std::mem::take(&mut s.legacy_model);
+	let legacy = legacy.trim();
+	if !legacy.is_empty() && [&s.plan_model, &s.impl_model, &s.chat_model].iter().all(|m| m.trim().is_empty()) {
+		s.plan_model = legacy.to_string();
+		s.impl_model = legacy.to_string();
+		s.chat_model = legacy.to_string();
+	}
+	s
 }
 
 /// 실행이 끝나지 못했을 때 이슈를 마지막으로 안정된 단계로 돌린다.
@@ -176,7 +203,7 @@ impl Store {
 	/* ---------- 설정 ---------- */
 
 	pub fn settings(&self) -> Result<Settings> {
-		read_json(&self.root.join("settings.json"))
+		Ok(migrate_settings(read_json(&self.root.join("settings.json"))?))
 	}
 
 	pub fn save_settings(&self, s: &Settings) -> Result<Settings> {
@@ -233,7 +260,7 @@ impl Store {
 		Ok(out)
 	}
 
-	/// 이름 · 모델 · 권한 · 산출물 설정만 바꾼다. 경로와 번호 카운터는 화면에서 온 값으로 덮지 않는다.
+	/// 이름 · 권한 · 산출물 설정만 바꾼다. 경로와 번호 카운터는 화면에서 온 값으로 덮지 않는다.
 	pub fn save_project(&self, input: &Project) -> Result<Project> {
 		let dir = input.deliverables_dir.trim();
 		if !dir.is_empty() {
@@ -253,7 +280,6 @@ impl Store {
 			.find(|p| p.id == input.id)
 			.ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
 		p.name = if input.name.trim().is_empty() { p.name.clone() } else { input.name.trim().to_string() };
-		p.model = input.model.trim().to_string();
 		p.impl_mode = if input.impl_mode == "bypassPermissions" { input.impl_mode.clone() } else { "acceptEdits".into() };
 		p.allowed_tools = input.allowed_tools.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
 		p.denied_tools = input.denied_tools.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
@@ -265,6 +291,67 @@ impl Store {
 		let out = p.clone();
 		write_json(&self.projects_path(), &list)?;
 		Ok(out)
+	}
+
+	/// 지식베이스 설정만 바꾼다. 폴더는 전체 경로로, 겹치지 않게 받는다.
+	pub fn save_kb(&self, pid: &str, kb: &ProjectKb) -> Result<Project> {
+		let mut folders: Vec<String> = Vec::new();
+		for f in kb.folders.iter().map(|f| f.trim().trim_end_matches(['/', '\\'])).filter(|f| !f.is_empty()) {
+			if !Path::new(f).is_absolute() {
+				return msg(format!("참조 폴더는 전체 경로로 적어 주세요: {f}"));
+			}
+			if !folders.iter().any(|x| same_path(x, f)) {
+				folders.push(f.to_string());
+			}
+		}
+		let _g = self.guard();
+		let mut list: Vec<Project> = read_json(&self.projects_path())?;
+		let p = list.iter_mut().find(|p| p.id == pid).ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
+		p.kb = ProjectKb { folders, top_k: kb.top_k.clamp(1, 30), ..kb.clone() };
+		let out = p.clone();
+		write_json(&self.projects_path(), &list)?;
+		Ok(out)
+	}
+
+	pub fn kb_dir(&self, pid: &str) -> PathBuf {
+		self.project_dir(pid).join("kb")
+	}
+
+	/// 끌어 놓은 파일 · 폴더를 kb/inbox/ 로 복사한다. 폴더는 폴더째 옮긴다. 형식은 가리지 않는다 — 넣을 수 없는 것은 색인이 까닭을 적는다.
+	pub fn kb_import(&self, pid: &str, paths: &[String]) -> Result<Vec<String>> {
+		let dir = self.kb_dir(safe_id(pid)?).join("inbox");
+		fs::create_dir_all(&dir)?;
+		let mut names = Vec::new();
+		for src in paths.iter().map(Path::new) {
+			let name = safe_file_name(&src.file_name().unwrap_or_default().to_string_lossy(), "자료");
+			let dest = unique_path(&dir, &name);
+			if src.is_dir() {
+				copy_dir_all(src, &dest)?;
+			} else if src.is_file() {
+				fs::copy(src, &dest)?;
+			} else {
+				continue;
+			}
+			names.push(dest.file_name().unwrap().to_string_lossy().to_string());
+		}
+		if names.is_empty() {
+			return msg("넣을 파일을 찾지 못했습니다");
+		}
+		Ok(names)
+	}
+
+	/// inbox 안의 파일 · 폴더를 휴지통으로 옮긴다. inbox 밖은 지우지 않는다.
+	pub fn kb_inbox_delete(&self, pid: &str, path: &str) -> Result<()> {
+		let inbox = self.kb_dir(safe_id(pid)?).join("inbox");
+		let target = PathBuf::from(path);
+		if !target.starts_with(&inbox) || target == inbox || target.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+			return msg("끌어 놓은 자료만 여기서 지울 수 있습니다");
+		}
+		if target.exists() {
+			let label = target.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+			self.trash(&target, &format!("kb-{label}"))?;
+		}
+		Ok(())
 	}
 
 	pub fn remove_project(&self, id: &str, delete_data: bool) -> Result<()> {
@@ -336,7 +423,21 @@ impl Store {
 		self.load_issue(pid, iid)
 	}
 
+	/// 보드의 이슈만 돌려준다. 프로젝트 대화는 같은 폴더에 있지만 뺀다 — 보드 · 사이드바 집계 · 자동 계획이 대화를 보지 않게 하는 경계가 여기 하나다.
 	pub fn list_issues(&self, pid: &str) -> Result<Vec<IssueView>> {
+		let mut out = self.scan(pid, false)?;
+		out.sort_by_key(|v| std::cmp::Reverse(v.issue.number));
+		Ok(out)
+	}
+
+	/// 프로젝트 대화. 번호가 없으니 최근 움직인 순이다.
+	pub fn list_talks(&self, pid: &str) -> Result<Vec<IssueView>> {
+		let mut out = self.scan(pid, true)?;
+		out.sort_by_key(|v| std::cmp::Reverse(v.issue.updated_at));
+		Ok(out)
+	}
+
+	fn scan(&self, pid: &str, talk: bool) -> Result<Vec<IssueView>> {
 		let dir = self.project_dir(safe_id(pid)?).join("issues");
 		let mut out = Vec::new();
 		let Ok(rd) = fs::read_dir(&dir) else { return Ok(out) };
@@ -346,16 +447,38 @@ impl Store {
 				continue;
 			}
 			match read_json::<Issue>(&path) {
-				Ok(issue) => out.push(self.view(issue)),
+				Ok(issue) if issue.talk == talk => out.push(self.view(issue)),
+				Ok(_) => {}
 				Err(err) => eprintln!("이슈를 읽지 못함 {}: {err}", path.display()),
 			}
 		}
-		out.sort_by_key(|v| std::cmp::Reverse(v.issue.number));
 		Ok(out)
 	}
 
+	/// 메모 없이 여는 프로젝트 대화. 이슈 번호를 쓰지 않는다 — 쓰면 보드 번호에 빈칸이 생긴다.
+	/// 화면이 id 를 먼저 정한다. 첫 질문 전에 붙여 넣은 그림이 그 id 의 첨부 폴더에 먼저 들어간다.
+	pub fn create_talk(&self, pid: &str, tid: &str) -> Result<IssueView> {
+		safe_id(pid)?;
+		let id = safe_id(tid)?.to_string();
+		self.project(pid)?;
+		let issue = {
+			let _g = self.guard();
+			if self.issue_dir(pid, &id).join("issue.json").exists() {
+				return msg("이미 있는 대화입니다");
+			}
+			let now = now_ms();
+			let mut issue = Issue { id, project_id: pid.to_string(), talk: true, created_at: now, updated_at: now, ..Default::default() };
+			issue.log("created", "");
+			self.write_issue(&issue)?;
+			issue
+		};
+		Ok(self.view(issue))
+	}
+
 	/// 화면이 미리 정한 id 를 받는다. 메모를 붙이기 전에 붙여 넣은 이미지가 그 id 의 폴더에 먼저 저장된다.
-	pub fn create_issue(&self, pid: &str, iid: Option<&str>, note: &str, auto_plan: bool) -> Result<IssueView> {
+	/// title_mode 가 auto 여도 첫 줄을 임시 제목으로 넣는다. 지은 제목은 제목 짓기 순회가 나중에 바꾼다.
+	/// model 을 비우면 설정의 실행별 모델을 따른다.
+	pub fn create_issue(&self, pid: &str, iid: Option<&str>, note: &str, auto_plan: bool, title_mode: TitleMode, model: &str) -> Result<IssueView> {
 		safe_id(pid)?;
 		let id = match iid {
 			Some(i) => safe_id(i)?.to_string(),
@@ -382,7 +505,9 @@ impl Store {
 				number,
 				status: Status::Inbox,
 				auto_plan,
+				model: model.trim().to_string(),
 				title: title_of(note),
+				title_mode,
 				created_at: now,
 				updated_at: now,
 				note_updated_at: now,
@@ -414,7 +539,7 @@ impl Store {
 	pub fn save_note(&self, pid: &str, iid: &str, note: &str) -> Result<IssueView> {
 		write_atomic(&self.issue_dir(safe_id(pid)?, safe_id(iid)?).join("note.md"), note.as_bytes())?;
 		self.update_issue(pid, iid, |i| {
-			i.title = title_of(note);
+			note_title(i, note);
 			i.note_updated_at = now_ms();
 			Ok(())
 		})
@@ -776,7 +901,8 @@ impl Store {
 	/// 앱이 닫혀 끊긴 실행을 정리한다. 남겨 두면 그 이슈가 영원히 「실행 중」으로 보인다.
 	pub fn recover_interrupted(&self) -> Result<()> {
 		for p in self.projects()? {
-			for v in self.list_issues(&p.id)? {
+			// 대화도 끊길 수 있다. 빠뜨리면 그 대화가 영원히 실행 중으로 남는다.
+			for v in self.scan(&p.id, false)?.into_iter().chain(self.scan(&p.id, true)?) {
 				if let Some(run) = v.issue.run.clone() {
 					self.update_issue(&p.id, &v.issue.id, |i| {
 						settle(i, run.kind);
@@ -828,6 +954,18 @@ impl Store {
 mod tests {
 	use super::*;
 
+	/// 옛 설정의 모델 하나가 세 칸으로 옮겨지고, 다시 쓸 때는 옛 칸이 남지 않는다.
+	#[test]
+	fn legacy_model_moves_to_run_models() {
+		let s = migrate_settings(serde_json::from_str(r#"{"model":"opus"}"#).unwrap());
+		assert_eq!((s.plan_model.as_str(), s.impl_model.as_str(), s.chat_model.as_str()), ("opus", "opus", "opus"));
+		let out = serde_json::to_value(&s).unwrap();
+		assert!(out.get("model").is_none(), "옛 칸이 다시 저장됐다: {out}");
+
+		let s = migrate_settings(serde_json::from_str(r#"{"model":"opus","implModel":"sonnet"}"#).unwrap());
+		assert_eq!((s.plan_model.as_str(), s.impl_model.as_str()), ("", "sonnet"), "새 칸을 정했는데 옛 값으로 덮었다");
+	}
+
 	/// 산출물 폴더 · 이름 규칙 · 지난 판 옮기기 · 템플릿 넣기를 한 번에 본다. 프로젝트 폴더에는 아무것도 생기면 안 된다.
 	#[test]
 	fn versions_follow_naming_and_archive() {
@@ -865,5 +1003,26 @@ mod tests {
 
 		assert_eq!(fs::read_dir(&proj).unwrap().count(), 0, "프로젝트 폴더에 무언가 생겼다");
 		let _ = fs::remove_dir_all(&base);
+	}
+
+	/// 메모를 고칠 때 제목: 옛 이슈는 첫 줄을 따르고, 지은 제목 · 손으로 고친 제목은 그대로 둔다. 짓기 전에는 첫 줄을 임시로 쓴다.
+	#[test]
+	fn note_title_keeps_named_titles() {
+		let note = "# 새 첫 줄\n본문";
+		let mut i = Issue { title: "옛 제목".into(), ..Default::default() };
+		note_title(&mut i, note);
+		assert_eq!(i.title, "새 첫 줄");
+
+		let mut i = Issue { title: "임시".into(), title_mode: TitleMode::Auto, ..Default::default() };
+		note_title(&mut i, note);
+		assert_eq!(i.title, "새 첫 줄", "짓기 전에는 첫 줄을 따른다");
+		i.title = "지은 제목".into();
+		i.titled_at = 1;
+		note_title(&mut i, note);
+		assert_eq!(i.title, "지은 제목");
+
+		let mut i = Issue { title: "고친 제목".into(), title_mode: TitleMode::Manual, ..Default::default() };
+		note_title(&mut i, note);
+		assert_eq!(i.title, "고친 제목");
 	}
 }

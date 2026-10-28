@@ -6,13 +6,21 @@ export type Phase = "queued" | "running";
 
 export interface Settings {
 	claudePath: string;
-	model: string;
+	/** 실행별 모델. 비우면 CLI 기본값이다. 메모에서 고른 모델이 이보다 앞선다. 산출물 작성은 구현 모델을 쓴다. */
+	planModel: string;
+	implModel: string;
+	chatModel: string;
 	autoPlan: boolean;
 	autoPlanDelaySec: number;
+	/** 새 메모의 제목을 지을 모델. 비우면 첫 줄을 제목으로 쓴다. */
+	titleModel: string;
+	titleDelaySec: number;
 	useMcp: boolean;
 	theme: "system" | "dark" | "light";
 	/** 켠 플러그인 id. 정의는 앱 데이터의 plugins/*.json 에 있다. */
 	enabledPlugins: string[];
+	/** 지식베이스의 색인 카드 · 고르기 다듬기 · 자동 갱신 판정 모델. 비우면 제목 모델, 그것도 비면 haiku. */
+	kbCardModel: string;
 }
 
 /** plugins/*.json 의 정의. 자리표시: {cwd} {claude} {session} {title} */
@@ -50,13 +58,31 @@ export interface AppInfo {
 	version: string;
 }
 
+/** 구독 사용률의 창 하나. key 는 claude 가 붙인 이름 그대로다 (five_hour · seven_day …). */
+export interface UsageWindow {
+	key: string;
+	/** 쓴 비율 0~1 */
+	utilization: number;
+	/** 다시 차는 시각(유닉스 초). 모르면 0 */
+	resetsAt: number;
+	status: string;
+}
+
+/** 실행이 돌 때 claude 가 함께 보내 온 마지막 사용률 */
+export interface Usage {
+	windows: UsageWindow[];
+	status: string;
+	overage: boolean;
+	/** 받은 시각(ms) */
+	seenAt: number;
+}
+
 export interface Project {
 	id: string;
 	name: string;
 	path: string;
 	createdAt: number;
 	nextNumber: number;
-	model: string;
 	implMode: "acceptEdits" | "bypassPermissions";
 	allowedTools: string[];
 	deniedTools: string[];
@@ -65,6 +91,79 @@ export interface Project {
 	naming: string;
 	namingUnderscore: boolean;
 	archiveDir: string;
+	/** 지식베이스. 프로젝트 저장(projectSave)은 이 칸을 덮지 않는다 — kbSave 로만 바꾼다. */
+	kb: ProjectKb;
+}
+
+export interface ProjectKb {
+	enabled: boolean;
+	/** 복사하지 않고 그 자리를 훑는 폴더(전체 경로) */
+	folders: string[];
+	includeDeliverables: boolean;
+	topK: number;
+	rerank: boolean;
+}
+
+/** 지식베이스에서 찾은 구획. 실행 기록에 남은 것은 excerpt 가 비어 있다. */
+export interface KbHit {
+	path: string;
+	textPath: string;
+	source: "folder" | "inbox" | "deliverable";
+	label: string;
+	section: string;
+	why: string;
+	excerpt: string;
+	score: number;
+}
+
+export interface KbCard {
+	summary: string;
+	keywords: string[];
+	aliases: string[];
+	questions: string[];
+}
+
+export interface KbFileView {
+	path: string;
+	source: "folder" | "inbox" | "deliverable";
+	label: string;
+	size: number;
+	sections: number;
+	cards: number;
+	/** 비어 있지 않으면 색인하지 않은 까닭 */
+	skipped: string;
+	cardError: string;
+}
+
+export interface KbProgress {
+	running: boolean;
+	/** scan: 훑는 중 · cards: 카드를 만드는 중 */
+	stage: "" | "scan" | "cards";
+	done: number;
+	total: number;
+	message: string;
+}
+
+export interface KbView {
+	kb: ProjectKb;
+	dir: string;
+	inboxDir: string;
+	exts: string[];
+	files: KbFileView[];
+	sections: number;
+	cards: number;
+	pending: number;
+	indexedAt: number;
+	cardCostUsd: number;
+	truncated: boolean;
+	cardModel: string;
+	progress: KbProgress;
+}
+
+export interface KbSection {
+	heading: string;
+	card: KbCard | null;
+	excerpt: string;
 }
 
 export interface RunState {
@@ -160,6 +259,8 @@ export interface RunRecord {
 	deniedRules: string[];
 	commands: string[];
 	denials: Denial[];
+	/** 지식베이스에서 찾아 프롬프트에 붙인 구획. 옛 기록에는 없다. */
+	kbHits?: KbHit[];
 }
 
 /** 권한 때문에 막힌 도구 호출. rule: 거부 규칙에 걸림 · ask: 허용 목록에 없음 */
@@ -185,13 +286,21 @@ export interface Suggestion {
 	why: string;
 }
 
+export type TitleMode = "firstLine" | "auto" | "manual";
+
 export interface Issue {
 	id: string;
 	projectId: string;
 	number: number;
 	status: Status;
 	autoPlan: boolean;
+	/** 이 메모의 계획 · 구현 · 대화에 쓸 모델. 비우면 설정의 실행별 모델을 따른다. */
+	model: string;
 	title: string;
+	/** firstLine: 메모 첫 줄 (옛 이슈) · auto: 제목 모델이 짓는다 · manual: 손으로 고쳤다 */
+	titleMode: TitleMode;
+	/** 제목을 지을 때 읽은 메모의 noteUpdatedAt. 이보다 메모가 새로우면 짓는 중이다. */
+	titledAt: number;
 	createdAt: number;
 	updatedAt: number;
 	noteUpdatedAt: number;
@@ -203,6 +312,8 @@ export interface Issue {
 	runs: RunRecord[];
 	history: HistoryEntry[];
 	error: string;
+	/** 메모 없이 프로젝트에서 연 대화. 보드에 나오지 않고 번호가 0 이다. 예전 이슈에는 없을 수 있다. */
+	talk?: boolean;
 	note: string;
 	attachments: string[];
 	dir: string;
@@ -234,20 +345,25 @@ export interface Deliverable {
 	createdAt: number;
 	updatedAt: number;
 	versions: Version[];
-	job: { runId: string; phase: Phase; request: string; queuedAt: number } | null;
+	/** issueId: 이슈를 완료해 자동 갱신으로 시작했으면 그 이슈 */
+	job: { runId: string; phase: Phase; request: string; queuedAt: number; issueId?: string } | null;
 	error: string;
 	runs: RunRecord[];
 	guide: string;
 	naming: string;
 	subdir: string;
 	mode: "md" | "file";
+	/** 이슈를 완료하면 그 변경과 관련 있는지 가려 새 판을 쓴다 */
+	autoUpdate: boolean;
+	/** 마지막 자동 갱신 결과 한 줄 */
+	autoLast: string;
 	dir: string;
 	refs: RefFile[];
 	outputDir: string;
 	nextName: string;
 }
 
-export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir" | "mode">;
+export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir" | "mode" | "autoUpdate">;
 
 export type ResourceKind = "instructions" | "skill" | "agent" | "command" | "rule";
 

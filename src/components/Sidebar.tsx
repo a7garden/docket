@@ -2,12 +2,14 @@ import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { BookMarked, FolderPlus, Settings2 } from "lucide-react";
 import { toast } from "sonner";
+import { projectActions } from "@/features/project/ProjectHeader";
 import { api, errorText } from "@/lib/api";
 import { qk, useProjects } from "@/lib/queries";
 import { needsDecision } from "@/lib/status";
 import { useUi } from "@/lib/store";
 import type { Issue, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { ContextActions } from "./ActionMenu";
 import { Button } from "./ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { Label, RunDot } from "./bits";
@@ -50,10 +52,10 @@ export function Sidebar() {
 						key={p.id}
 						project={p}
 						issues={lists[i]?.data ?? []}
-						active={p.id === projectId && (view === "board" || view === "deliverables")}
+						active={p.id === projectId && (view === "board" || view === "deliverables" || view === "talks" || view === "knowledge")}
 						onClick={() => {
 							setProject(p.id);
-							if (view !== "deliverables") setView("board");
+							if (view !== "deliverables" && view !== "talks" && view !== "knowledge") setView("board");
 						}}
 					/>
 				))}
@@ -69,7 +71,7 @@ export function Sidebar() {
 function ProjectItem({ project, issues, active, onClick }: { project: Project; issues: Issue[]; active: boolean; onClick: () => void }) {
 	const decide = issues.filter(needsDecision).length;
 	const running = issues.some((i) => i.run);
-	return (
+	const item = (
 		<button
 			type="button"
 			onClick={onClick}
@@ -88,6 +90,7 @@ function ProjectItem({ project, issues, active, onClick }: { project: Project; i
 			)}
 		</button>
 	);
+	return <ContextActions items={projectActions(project, true)}>{item}</ContextActions>;
 }
 
 function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode; label: string; active: boolean; onClick: () => void }) {

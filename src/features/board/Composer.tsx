@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { MarkdownEditor, type EditorHandle } from "@/components/MarkdownEditor";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
@@ -12,6 +13,7 @@ import { attachmentRef, delayText, fileUrl, isImage, joinPath, newId } from "@/l
 import { useAppInfo, useSettings } from "@/lib/queries";
 import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { MEMO_MODELS } from "../settings/Settings";
 
 /**
  * 보드 맨 위의 포스트잇. 접혀 있다가 누르거나 Ctrl+N 으로 펼친다.
@@ -24,6 +26,7 @@ export function Composer({ project }: { project: Project }) {
 	const [note, setNote] = useState("");
 	const [draftId, setDraftId] = useState(newId);
 	const [auto, setAuto] = useState<boolean | null>(null);
+	const [model, setModel] = useState("default");
 	const [attachments, setAttachments] = useState<string[]>([]);
 	const [busy, setBusy] = useState(false);
 	const editor = useRef<EditorHandle>(null);
@@ -82,11 +85,12 @@ export function Composer({ project }: { project: Project }) {
 		if (!note.trim() || busy) return;
 		setBusy(true);
 		try {
-			await api.issueCreate(project.id, draftId, note, autoOn);
+			await api.issueCreate(project.id, draftId, note, autoOn, model === "default" ? "" : model);
 			setNote("");
 			setAttachments([]);
 			setDraftId(newId());
 			setAuto(null);
+			setModel("default");
 			setOpen(false);
 		} catch (e) {
 			toast.error(errorText(e));
@@ -132,7 +136,11 @@ export function Composer({ project }: { project: Project }) {
 				autoFocus
 				minHeight="96px"
 				maxHeight="42vh"
-				placeholder="무엇을 고치거나 만들까요? 첫 줄이 제목이 됩니다. 스크린샷은 붙여 넣으세요."
+				placeholder={
+					settings?.titleModel
+						? "무엇을 고치거나 만들까요? 제목은 Claude 가 지어 붙입니다. 스크린샷은 붙여 넣으세요."
+						: "무엇을 고치거나 만들까요? 첫 줄이 제목이 됩니다. 스크린샷은 붙여 넣으세요."
+				}
 				onSubmit={submit}
 				onPasteImage={pasteImage}
 			/>
@@ -167,6 +175,18 @@ export function Composer({ project }: { project: Project }) {
 					자동 계획
 					{autoOn && <span className="text-subtle">붙이고 {delayText(settings?.autoPlanDelaySec ?? 60)}</span>}
 				</label>
+				<Select value={model} onValueChange={setModel}>
+					<SelectTrigger size="sm" className="w-32" aria-label="이 메모의 모델">
+						<SelectValue />
+					</SelectTrigger>
+					<SelectContent className="pop">
+						{MEMO_MODELS.map((m) => (
+							<SelectItem key={m.value} value={m.value}>
+								{m.label}
+							</SelectItem>
+						))}
+					</SelectContent>
+				</Select>
 				<div className="flex-1" />
 				<Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
 					접기

@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Maximize2 } from "lucide-react";
+import { ContextActions, fileActions } from "@/components/ActionMenu";
 import { Empty, SectionTitle } from "@/components/bits";
 import { DiffView } from "@/components/DiffView";
 import { Markdown } from "@/components/Markdown";
@@ -21,9 +23,11 @@ function Shots({ issue, shots }: { issue: Issue; shots: Shot[] }) {
 			<div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-3">
 				{shots.map((s) => (
 					<figure key={s.path} className="flex min-w-0 flex-col gap-1">
-						<button type="button" title="크게 보기" onClick={() => setOpen(s)} className="overflow-hidden rounded-md border border-border bg-secondary">
-							<img src={fileUrl(path(s))} alt={s.caption} loading="lazy" className="aspect-[16/10] w-full object-cover object-top" />
-						</button>
+						<ContextActions items={[{ label: "크게 보기", icon: <Maximize2 />, onSelect: () => setOpen(s) }, "sep", ...fileActions(path(s))]}>
+							<button type="button" title="크게 보기" onClick={() => setOpen(s)} className="overflow-hidden rounded-md border border-border bg-secondary">
+								<img src={fileUrl(path(s))} alt={s.caption} loading="lazy" className="aspect-[16/10] w-full object-cover object-top" />
+							</button>
+						</ContextActions>
 						{s.caption && <figcaption className="text-[12.5px] leading-snug break-keep text-muted-foreground selectable">{s.caption}</figcaption>}
 					</figure>
 				))}
