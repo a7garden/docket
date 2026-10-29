@@ -1,7 +1,7 @@
-import { type ClipboardEvent, useLayoutEffect, useRef, useState } from "react";
+import { type ClipboardEvent, type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, ChevronRight, Copy, History, ImagePlus, SquareTerminal, StickyNote, X } from "lucide-react";
+import { Check, ChevronRight, Clock, Copy, History, Image as ImageIcon, ImagePlus, SquareTerminal, StickyNote, X } from "lucide-react";
 import { toast } from "sonner";
 import { copy } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
@@ -14,10 +14,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
 import { attachmentPath, clock, cost, duration, fileUrl, isImage, relTime } from "@/lib/format";
-import { useIssues, useTerminalPlugin } from "@/lib/queries";
+import { useIssues, useSettings, useTerminalPlugin } from "@/lib/queries";
 import { RUN_KIND_LABEL } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
-import type { HistoryEntry, Issue, RunRecord, Turn } from "@/lib/types";
+import type { HistoryEntry, Issue, QueuedChat, RunRecord, Turn } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** 쓰다 만 질문은 탭을 오가도 남는다. 그래서 상태를 상세 창이 들고 있다. */
@@ -335,12 +335,75 @@ function StepTurn({ issue, root, run }: { issue: Issue; root: string; run: RunRe
 	);
 }
 
-/** 상세 창 아래 칸. 실행 중이면 무엇을 하는지와 중지를, 아니면 질문 입력을 둔다. */
+/**
+ * 설정의 보내기 키로 입력칸의 키를 가린다. 대화 · 다시 계획 · 수정 요청 입력칸이 같은 판정을 쓴다.
+ * Enter 방식이어도 Ctrl+Enter 는 보낸다. 두 방식을 오가는 손버릇이 섞여도 헛누르지 않게 하려는 것이다.
+ */
+export function useSendKey() {
+	const { data: settings } = useSettings();
+	const enter = settings?.sendKey === "enter";
+	return {
+		label: enter ? "↵" : "Ctrl ↵",
+		hint: enter ? " · Shift+Enter 로 줄바꿈" : "",
+		isSend: (e: KeyboardEvent) => {
+			if (e.key !== "Enter") return false;
+			if (e.ctrlKey || e.metaKey) return true;
+			// 한글 조합 중의 Enter 는 글자를 확정하는 것이다. 보내면 마지막 글자가 빠지거나 두 번 나간다.
+			if (!enter || e.shiftKey || e.altKey || e.nativeEvent.isComposing) return false;
+			e.preventDefault();
+			return true;
+		},
+	};
+}
+
+/**
+ * 실행이 끝나기를 기다리는 질문. 끝나면 한 차례로 묶여 나가고, 중지했으면 남아 있다.
+ * 「고치기」는 그 질문을 입력칸으로 되돌린다. 첨부는 초안이 이어 쓰므로 남긴다.
+ */
+function QueueList({ issue, onEdit, disabled }: { issue: Issue; onEdit: (q: QueuedChat) => void; disabled: boolean }) {
+	const queue = issue.queue ?? [];
+	if (!queue.length) return null;
+	return (
+		<div className="flex flex-col gap-1">
+			{queue.map((q) => (
+				<div key={q.id} className="flex items-center gap-2 rounded-md border border-dashed border-border px-2.5 py-1.5 text-[12.5px]">
+					<Clock className="size-3.5 shrink-0 text-subtle" aria-label="대기" />
+					{q.images.length > 0 && (
+						<span className="flex shrink-0 items-center gap-0.5 text-subtle" title={q.images.join(", ")}>
+							<ImageIcon className="size-3.5" />
+							{q.images.length}
+						</span>
+					)}
+					{!q.edit && <span className="shrink-0 text-subtle">읽기 전용 ·</span>}
+					<span className="min-w-0 flex-1 truncate text-foreground" title={q.text}>
+						{q.text.trim() || "첨부만"}
+					</span>
+					<Button size="xs" variant="ghost" disabled={disabled} onClick={() => onEdit(q)}>
+						고치기
+					</Button>
+					<Button
+						size="icon-xs"
+						variant="ghost"
+						aria-label="대기열에서 빼기"
+						disabled={disabled}
+						onClick={() => void api.issueQueueRemove(issue.projectId, issue.id, q.id).catch((e) => toast.error(errorText(e)))}
+					>
+						<X />
+					</Button>
+				</div>
+			))}
+		</div>
+	);
+}
+
+/** 상세 창 아래 칸. 실행 중이면 무엇을 하는지와 중지를 두고, 그 사이 적은 질문은 대기열에 넣는다. */
 export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: Draft; onDraft: (d: Draft) => void }) {
 	const [busy, setBusy] = useState(false);
+	const sendKey = useSendKey();
 	const activity = useLive((s) => (issue.run ? s.byTarget[issue.id]?.activity : undefined));
 	const { projectId: p, id } = issue;
 	const running = !!issue.run;
+	const waiting = issue.queue?.length ?? 0;
 
 	const go = async (fn: () => Promise<unknown>) => {
 		setBusy(true);
@@ -352,13 +415,26 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 		setBusy(false);
 	};
 	const empty = !draft.text.trim() && draft.images.length === 0;
+	// 실행 중이면 백엔드가 대기열에 넣는다. 실행 중인지는 백엔드가 판정한다 — 막 끝난 순간에 보낸 질문이 튕기지 않게 한다.
 	const send = () => {
-		if (running || busy || empty) return;
+		if (busy || empty) return;
 		void go(async () => {
 			await api.issueChat(p, id, draft.text, draft.edit, draft.images);
 			onDraft({ ...draft, text: "", images: [] });
 		});
 	};
+	// 대기 중인 질문을 입력칸으로 되돌린다. 적던 글이 있으면 그 뒤에 잇는다.
+	const editQueued = (q: QueuedChat) =>
+		void go(async () => {
+			await api.issueQueueRemove(p, id, q.id, true);
+			const d = latest.current;
+			const blank = !d.text.trim() && d.images.length === 0;
+			onDraft({
+				text: [d.text.trimEnd(), q.text].filter((t) => t.trim()).join("\n\n"),
+				images: [...d.images, ...q.images.filter((n) => !d.images.includes(n))],
+				edit: blank ? q.edit : d.edit || q.edit,
+			});
+		});
 
 	// 올리는 동안 draft 가 바뀔 수 있다(글을 더 친다). 끝난 시점의 초안에 이름을 더하도록 최신 값을 잡아 둔다.
 	const latest = useRef(draft);
@@ -386,21 +462,25 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 
 	return (
 		<div ref={dropRef} className={cn("flex flex-col gap-2.5 border-t border-border px-6 py-4", over && "bg-secondary")}>
+			<QueueList issue={issue} onEdit={editQueued} disabled={busy} />
 			{draft.images.length > 0 && <Thumbs issue={issue} names={draft.images} onRemove={remove} />}
 			<Textarea
 				value={draft.text}
 				onChange={(e) => onDraft({ ...draft, text: e.target.value })}
 				onPaste={paste}
 				onKeyDown={(e) => {
-					if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
+					if (sendKey.isSend(e)) send();
 				}}
 				placeholder={
 					(draft.edit ? "묻거나 고칠 것" : "물을 것 (읽기 전용)") +
-					(issue.sessionId
-						? " · 이미지는 붙여 넣거나 끌어 놓습니다"
-						: issue.talk
-							? " · 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다"
-							: " · 메모를 읽고 새 세션을 엽니다")
+					(running
+						? " · 답이 끝나면 대기 중인 질문과 묶어 보냅니다"
+						: issue.sessionId
+							? " · 이미지는 붙여 넣거나 끌어 놓습니다"
+							: issue.talk
+								? " · 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다"
+								: " · 메모를 읽고 새 세션을 엽니다") +
+					sendKey.hint
 				}
 				className="max-h-48 min-h-20 resize-none bg-transparent text-[13.5px] leading-relaxed"
 			/>
@@ -426,18 +506,27 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 					읽기 전용
 				</label>
 				<span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-subtle">
-					{running && (issue.run?.phase === "queued" ? "앞선 작업을 기다리는 중" : activity)}
+					{running && (issue.run?.phase === "queued" ? issue.run.waitFor || "앞선 작업을 기다리는 중" : activity)}
 				</span>
-				{running ? (
+				{running && (
 					<Button variant="outline" disabled={busy} onClick={() => void go(() => api.issueStop(p, id))}>
 						중지
 					</Button>
-				) : (
-					<Button disabled={busy || empty} onClick={send}>
-						보내기
-						<Kbd className="ml-1 bg-primary-foreground/15 text-primary-foreground">Ctrl ↵</Kbd>
+				)}
+				{/* 중지했거나 앱을 다시 켜서 남은 대기열. 저절로 보내지 않고 사용자가 이어 보낸다. */}
+				{!running && waiting > 0 && (
+					<Button variant="outline" disabled={busy} title="대기 중인 질문을 한 차례로 묶어 보냅니다" onClick={() => void go(() => api.issueQueueSend(p, id))}>
+						대기 {waiting}건 보내기
 					</Button>
 				)}
+				<Button
+					disabled={busy || empty}
+					title={running ? "답이 끝나면 대기 중인 질문과 묶어 보냅니다" : waiting > 0 ? "대기 중인 질문 뒤에 붙여 함께 보냅니다" : undefined}
+					onClick={send}
+				>
+					{running ? "대기열에 넣기" : "보내기"}
+					<Kbd className="ml-1 bg-primary-foreground/15 text-primary-foreground">{sendKey.label}</Kbd>
+				</Button>
 			</div>
 		</div>
 	);

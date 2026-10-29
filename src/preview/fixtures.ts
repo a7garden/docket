@@ -1,5 +1,5 @@
 // 미리보기 전용 가짜 데이터. 배포 빌드에는 들어가지 않는다 (preview.html 은 vite build 입력이 아니다).
-import type { AppInfo, Deliverable, Issue, KbHit, KbSection, KbView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Turn, Usage } from "@/lib/types";
+import type { AppInfo, Deliverable, GlossaryView, Issue, KbHit, KbSection, KbView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Turn, Usage } from "@/lib/types";
 
 const now = Date.now();
 const min = 60_000;
@@ -25,9 +25,10 @@ export const usage: Usage = {
 	seenAt: now - 4 * min,
 };
 
-export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr"], kbCardModel: "" };
+export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr"], kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true };
 
 const KB_OFF = { enabled: false, folders: [], includeDeliverables: true, topK: 8, rerank: false };
+const GL_OFF = { enabled: false, include: [] };
 
 export const plugins: PluginList = {
 	dir: "C:\\Users\\me\\AppData\\Roaming\\docket\\plugins",
@@ -52,9 +53,9 @@ export const plugins: PluginList = {
 };
 
 export const projects: Project[] = [
-	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"] } },
-	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, kb: KB_OFF },
-	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, kb: KB_OFF },
+	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"] }, glossary: { enabled: true, include: ["pdoc00000001"] } },
+	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: KB_OFF, glossary: GL_OFF },
+	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: KB_OFF, glossary: GL_OFF },
 ];
 
 const base = (id: string, number: number, extra: Partial<Issue>): Issue => {
@@ -67,6 +68,7 @@ const base = (id: string, number: number, extra: Partial<Issue>): Issue => {
 		status: "inbox",
 		autoPlan: false,
 		model: "",
+		effort: "",
 		title: note.split("\n")[0].replace(/^#+\s*/, ""),
 		titleMode: "auto",
 		titledAt: t,
@@ -121,7 +123,12 @@ export const issues: Issue[] = [
 		status: "planning",
 		note: "mul 이 큰 수에서 느리다\n\n10만 자리 곱셈에서 몇 초씩 걸린다.",
 		run: { kind: "plan", phase: "running", runId: "r-live-plan", queuedAt: now - 2 * min },
-		runs: [{ id: "r-live-plan", kind: "plan", startedAt: now - 2 * min, endedAt: 0, status: "running", costUsd: 0, durationMs: 0, numTurns: 0, model: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		runs: [{ id: "r-live-plan", kind: "plan", startedAt: now - 2 * min, endedAt: 0, status: "running", costUsd: 0, durationMs: 0, numTurns: 0, model: "", effort: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		// 계획이 도는 동안 넣어 둔 질문. 계획이 끝나면 한 차례로 묶여 나간다.
+		queue: [
+			{ id: "q1", text: "카라추바 곱셈도 후보로 같이 따져 줘", edit: false, images: [], at: now - min },
+			{ id: "q2", text: "느린 지점을 잰 그림이야. 이 구간이 맞는지 봐 줘", edit: true, images: ["붙여넣기-20261027-101500.png"], at: now - 30_000 },
+		],
 		updatedAt: now - 2 * min,
 	}),
 	base("i0000000007", 7, {
@@ -137,9 +144,17 @@ export const issues: Issue[] = [
 						"결과 칸 옆에 「반올림」 꼬리표를 둔다. 누르면 원래 값을 펼친다.",
 						"",
 						"```html",
-						"<!doctype html><html><head><style>body{font:14px sans-serif;margin:16px;display:flex;gap:16px}.box{flex:1;border:1px solid #ccc;border-radius:8px;padding:12px}h4{margin:0 0 8px;color:#666}.tag{font-size:11px;background:#eef;padding:2px 6px;border-radius:4px;cursor:pointer}</style></head>",
+						"<!doctype html><html><head><style>body{font:14px sans-serif;margin:16px;display:flex;gap:16px}.box{flex:1;border:1px solid #8888;border-radius:8px;padding:12px}h4{margin:0 0 8px;opacity:0.65}.tag{font-size:11px;background:#88f3;padding:2px 6px;border-radius:4px;cursor:pointer}</style></head>",
 						"<body><div class='box'><h4>지금</h4>결과 0.30000000000000004</div>",
 						"<div class='box'><h4>바뀐 뒤</h4>결과 0.3 <span class='tag' onclick=\"document.getElementById('raw').hidden=!document.getElementById('raw').hidden\">반올림</span><div id='raw' hidden>원래 값 0.30000000000000004</div></div></body></html>",
+						"```",
+						"",
+						"```svg",
+						"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 360 80' width='360' height='80' font-family='sans-serif' font-size='13' fill='none' stroke='currentColor'>",
+						"<rect x='10' y='20' width='110' height='40' rx='6'/><text x='65' y='45' text-anchor='middle' fill='currentColor' stroke='none'>a * b</text>",
+						"<path d='M120 40h40m-6-5 6 5-6 5'/>",
+						"<rect x='160' y='20' width='190' height='40' rx='6'/><text x='255' y='45' text-anchor='middle' fill='currentColor' stroke='none'>round(a * b, 2)</text>",
+						"</svg>",
 						"```",
 						"",
 						"![지금 화면](attachments/붙여넣기-20261027-101500.png)",
@@ -174,10 +189,12 @@ export const issues: Issue[] = [
 	}),
 	base("i0000000006", 6, {
 		status: "planned",
+		model: "opus",
+		effort: "high",
 		note: "div 에 0 을 넣으면 죽는다\n\nZeroDivisionError 대신 None 을 돌려주면 좋겠다.",
 		plan: planOf("div · mod 의 0 나누기를 None 으로 막는다", "b 가 0 이면 None 을 돌려준다. 지금 저장소에서 div · mod 를 부르는 곳은 없다."),
 		sessionId: "s1",
-		runs: [{ id: "r-plan", kind: "plan", startedAt: now - 16 * min, endedAt: now - 14 * min, status: "ok", costUsd: 0.21, durationMs: 98_000, numTurns: 9, model: "claude-opus-5-5", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		runs: [{ id: "r-plan", kind: "plan", startedAt: now - 16 * min, endedAt: now - 14 * min, status: "ok", costUsd: 0.21, durationMs: 98_000, numTurns: 9, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
 		history: [
 			{ at: now - 30 * min, kind: "created", text: "" },
 			{ at: now - 16 * min, kind: "plan", text: "" },
@@ -190,7 +207,7 @@ export const issues: Issue[] = [
 		note: "sub 함수 추가",
 		plan: planOf("sub 를 add 와 같은 꼴로 더한다", "calc.py 에 sub(a, b) 를 더한다."),
 		run: { kind: "implement", phase: "running", runId: "r-live-impl", queuedAt: now - 3 * min },
-		runs: [{ id: "r-live-impl", kind: "implement", startedAt: now - 3 * min, endedAt: 0, status: "running", costUsd: 0, durationMs: 0, numTurns: 0, model: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		runs: [{ id: "r-live-impl", kind: "implement", startedAt: now - 3 * min, endedAt: 0, status: "running", costUsd: 0, durationMs: 0, numTurns: 0, model: "", effort: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
 		changes: [
 			{
 				path: `${ROOT}\\calc.py`,
@@ -238,9 +255,9 @@ export const issues: Issue[] = [
 			},
 		],
 		runs: [
-			{ id: "r-plan4", kind: "plan", startedAt: now - 20 * min, endedAt: now - 18 * min, status: "ok", costUsd: 0.12, durationMs: 61_000, numTurns: 6, model: "claude-opus-5-5", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] },
-			{ id: "r-impl", kind: "implement", startedAt: now - 8 * min, endedAt: now - 6 * min, status: "ok", costUsd: 0.18, durationMs: 83_000, numTurns: 8, model: "claude-opus-5-5", error: "", prompt: "", mode: "편집 · 허용 목록", allowed: [], deniedRules: ["Bash(git push:*)", "Bash(git commit:*)"], commands: ["cd \"D:/work/calc\" && python -I -c \"from calc import add; print(add(2, 3))\""], denials: [{ tool: "Bash", target: "cd \"D:/work/calc\" && python -I -c \"from calc import add; print(add(2, 3))\"", reason: "ask", suggest: ["Bash(python:*)"] }] },
-			{ id: "r-chat4", kind: "chat", startedAt: now - 5 * min, endedAt: now - 4 * min, status: "ok", costUsd: 0.04, durationMs: 21_000, numTurns: 2, model: "claude-opus-5-5", error: "", prompt: "add 말고 다른 함수에도 같은 오타가 있나?\n있으면 어디인지만 알려 줘.", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] },
+			{ id: "r-plan4", kind: "plan", startedAt: now - 20 * min, endedAt: now - 18 * min, status: "ok", costUsd: 0.12, durationMs: 61_000, numTurns: 6, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] },
+			{ id: "r-impl", kind: "implement", startedAt: now - 8 * min, endedAt: now - 6 * min, status: "ok", costUsd: 0.18, durationMs: 83_000, numTurns: 8, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "편집 · 허용 목록", allowed: [], deniedRules: ["Bash(git push:*)", "Bash(git commit:*)"], commands: ["cd \"D:/work/calc\" && python -I -c \"from calc import add; print(add(2, 3))\""], denials: [{ tool: "Bash", target: "cd \"D:/work/calc\" && python -I -c \"from calc import add; print(add(2, 3))\"", reason: "ask", suggest: ["Bash(python:*)"] }] },
+			{ id: "r-chat4", kind: "chat", startedAt: now - 5 * min, endedAt: now - 4 * min, status: "ok", costUsd: 0.04, durationMs: 21_000, numTurns: 2, model: "claude-opus-5-5", effort: "high", error: "", prompt: "add 말고 다른 함수에도 같은 오타가 있나?\n있으면 어디인지만 알려 줘.", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] },
 		],
 		sessionId: "8c1f3d52-6b7e-4a09-9d1e-2f6a4b7c0e31",
 		history: [
@@ -257,7 +274,7 @@ export const issues: Issue[] = [
 		status: "inbox",
 		note: "pow 함수 추가 (음수 지수 포함)",
 		error: "Claude 가 결과 없이 끝났습니다 (종료 코드 1)\nAPI Error: 529 overloaded",
-		runs: [{ id: "r-fail", kind: "plan", startedAt: now - 40 * min, endedAt: now - 39 * min, status: "error", costUsd: 0, durationMs: 4_000, numTurns: 0, model: "", error: "API Error: 529 overloaded", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		runs: [{ id: "r-fail", kind: "plan", startedAt: now - 40 * min, endedAt: now - 39 * min, status: "error", costUsd: 0, durationMs: 4_000, numTurns: 0, model: "", effort: "", error: "API Error: 529 overloaded", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
 		updatedAt: now - 39 * min,
 	}),
 	base("i0000000002", 2, {
@@ -280,6 +297,7 @@ const talkRun = (id: string, at: number, prompt: string) => ({
 	durationMs: 40_000,
 	numTurns: 4,
 	model: "claude-opus-5-5",
+	effort: "",
 	error: "",
 	prompt,
 	mode: "읽기 · 이력 조회",
@@ -343,6 +361,20 @@ export const savedEvents: RunEvent[] = [
 	{ t: "done", ok: true, costUsd: 0.18, durationMs: 83_000, numTurns: 8, error: "" },
 ];
 
+/** 작성법을 아직 뽑지 않은 산출물의 칸 */
+const NO_RECIPE = { skill: "", vocab: [], format: "", template: "", learn: null, learnError: "", learnedAt: 0, learnCostUsd: 0, draft: { skill: "", vocab: [], format: "", naming: "", template: "" } };
+
+const SKILL_SAMPLE = `## 구성
+1. 개요 — 한 문단
+2. 함수 표 — 열: 함수 · 하는 일 · 인자 · 0 을 넣으면
+3. 남은 일
+
+## 문체
+- 「~한다」 체 · 한 줄에 한 가지
+
+## 표기
+- 함수 이름은 \`코드\` 로 · 숫자는 아라비아 숫자`;
+
 export const deliverables: Deliverable[] = [
 	{
 		id: "d0000000004",
@@ -363,10 +395,14 @@ export const deliverables: Deliverable[] = [
 		mode: "file",
 		autoUpdate: false,
 		autoLast: "",
+		...NO_RECIPE,
+		format: "xlsx",
+		template: "API_명세서_양식.xlsx",
+		learn: { runId: "r-learn", startedAt: now - 20_000 },
 		refs: [
-			{ name: "API_명세서_양식.xlsx", size: 48_200, kind: "extract", textPath: "x" },
-			{ name: "참고_다른_프로젝트_명세서.xlsx", size: 61_900, kind: "extract", textPath: "x" },
-			{ name: "작성요령.hwp", size: 30_100, kind: "none", textPath: "" },
+			{ name: "API_명세서_양식.xlsx", size: 48_200, kind: "extract", textPath: "x", template: true },
+			{ name: "참고_다른_프로젝트_명세서.xlsx", size: 61_900, kind: "extract", textPath: "x", template: false },
+			{ name: "작성요령.hwp", size: 30_100, kind: "none", textPath: "", template: false },
 		],
 		outputDir: "D:\\work\\calc\\산출물\\API_명세서",
 		nextName: "CALC_API_명세서_v1_20261028.md",
@@ -390,6 +426,7 @@ export const deliverables: Deliverable[] = [
 		mode: "md",
 		autoUpdate: false,
 		autoLast: "",
+		...NO_RECIPE,
 		refs: [],
 		outputDir: "D:\\work\\calc\\산출물",
 		nextName: "이번_주_변경_요약_v1_20261028.md",
@@ -411,15 +448,26 @@ export const deliverables: Deliverable[] = [
 		runs: [],
 		dir: `${DATA}\\projects\\${P}\\deliverables\\d0000000001`,
 		guide: "README 에 붙일 표. 함수마다 하는 일과 0 을 넣었을 때의 결과를 적는다. 확인하지 못한 것은 확인하지 못했다고 적는다.",
-		naming: "",
+		naming: "{제목}_{날짜}",
 		subdir: "",
 		mode: "file",
 		autoUpdate: true,
 		autoLast: "#9 · v2 갱신",
+		...NO_RECIPE,
+		skill: SKILL_SAMPLE,
+		vocab: [
+			{ term: "나눗셈", avoid: ["나누기"], note: "div 함수" },
+			{ term: "반환값", avoid: ["리턴값", "돌려주는 값"], note: "" },
+		],
+		format: "hwpx",
+		template: "함수설명서_양식.hwpx",
+		learnedAt: now - 3000_000,
+		learnCostUsd: 0.083,
+		draft: { skill: "", vocab: [{ term: "사칙연산", avoid: [], note: "add · sub · mul · div" }], format: "", naming: "{제목}_v{판}_{날짜}", template: "" },
 		refs: [
-			{ name: "함수설명서_양식.hwpx", size: 24_800, kind: "extract", textPath: "x" },
-			{ name: "지난판_회의록.pdf", size: 1_204_000, kind: "direct", textPath: "" },
-			{ name: "옛_양식.hwp", size: 30_100, kind: "none", textPath: "" },
+			{ name: "함수설명서_양식.hwpx", size: 24_800, kind: "extract", textPath: "x", template: true },
+			{ name: "지난판_회의록.pdf", size: 1_204_000, kind: "direct", textPath: "", template: false },
+			{ name: "옛_양식.hwp", size: 30_100, kind: "none", textPath: "", template: false },
 		],
 		outputDir: "D:\\work\\calc\\산출물",
 		nextName: "함수_설명서_v3_20261028.md",
@@ -443,6 +491,7 @@ export const deliverables: Deliverable[] = [
 		mode: "md",
 		autoUpdate: false,
 		autoLast: "",
+		...NO_RECIPE,
 		refs: [],
 		outputDir: "D:\\work\\calc\\산출물",
 		nextName: "화면_캡처_모음_v2_20261028.md",
@@ -477,6 +526,24 @@ export const kbHits: KbHit[] = [
 	{ path: "D:\\work\\calc\\docs\\계산 규칙.md", textPath: "", source: "folder", label: "", section: "나눗셈", why: "0 으로 나눌 때 None 을 돌려주는 규칙을 다룬다.", excerpt: "## 나눗셈\n0 으로 나누면 오류 대신 None 을 돌려준다.\n호출하는 쪽이 None 을 보고 안내 문구를 띄운다.", score: 7.4 },
 	{ path: "D:\\work\\calc\\docs\\요구사항.hwpx", textPath: "", source: "folder", label: "", section: "3. 계산 기능", why: "사칙연산 함수의 입력 · 출력 요구를 정리한다.", excerpt: "덧셈 · 뺄셈 · 곱셈 · 나눗셈을 제공한다.\t입력은 정수와 실수", score: 4.1 },
 ];
+
+export const glossary: GlossaryView = {
+	glossary: projects[0].glossary,
+	updatedAt: now - 3600_000,
+	entries: [
+		{ term: "나눗셈", meaning: "div 함수. 0 으로 나누면 예외 대신 None 을 돌려준다", aliases: ["div", "나누기"] },
+		{ term: "반올림", meaning: "소수 둘째 자리에서 반올림해 첫째 자리까지 남긴다", aliases: ["round"] },
+		{ term: "계산 기록", meaning: "화면 오른쪽에 쌓이는 지난 식과 결과", aliases: ["history", "이력"] },
+	],
+	others: [
+		{ id: "pweb00000001", name: "shop-admin", count: 0 },
+		{ id: "pdoc00000001", name: "위키 정리", count: 2 },
+	],
+	shared: [
+		{ term: "판", meaning: "산출물의 버전. v1, v2 … 로 센다", aliases: ["버전"], from: "위키 정리" },
+		{ term: "회신", meaning: "검토 결과를 요청한 곳에 돌려보내는 일", aliases: ["결과 통보"], from: "위키 정리" },
+	],
+};
 
 export const kbCards: KbSection[] = [
 	{ heading: "나눗셈", card: { summary: "0 으로 나눌 때 None 을 돌려주는 규칙을 다룬다.", keywords: ["div", "0 나누기"], aliases: ["ZeroDivisionError", "예외 처리"], questions: ["0 으로 나누면 어떻게 되나?"] }, excerpt: "## 나눗셈\n0 으로 나누면…" },

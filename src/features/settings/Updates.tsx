@@ -34,7 +34,7 @@ export function Updates({ version }: { version?: string }) {
 							: "아직 확인하지 않았습니다.";
 
 	return (
-		<Group title="업데이트">
+		<Group id="updates">
 			<Row label={`지금 판 ${version ?? ""}`} hint={checkedAt ? `${status} · ${relTime(checkedAt)} 확인` : status} inline>
 				<Button variant="outline" size="sm" disabled={busy} onClick={() => void check().catch(() => {})}>
 					<RefreshCw className={phase === "checking" ? "animate-spin" : undefined} />

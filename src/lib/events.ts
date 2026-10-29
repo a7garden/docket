@@ -19,29 +19,25 @@ export function useDocketEvents() {
 		pending.push(
 			listen<Issue>("docket://issue", ({ payload }) => {
 				// 프로젝트 대화는 같은 사건으로 오지만 보드 목록에 끼우지 않는다. 끼우면 메모 열에 「제목 없는 메모」로 보인다.
-				// 대화 화면은 열어 두고 보는 것이라 끝났다는 알림도 띄우지 않는다.
-				if (payload.talk) {
-					qc.setQueryData<Issue[]>(qk.talks(payload.projectId), (old) => upsert(old, payload));
-					return;
-				}
-				const key = qk.issues(payload.projectId);
+				const key = payload.talk ? qk.talks(payload.projectId) : qk.issues(payload.projectId);
 				const prev = qc.getQueryData<Issue[]>(key)?.find((x) => x.id === payload.id);
 				qc.setQueryData<Issue[]>(key, (old) => upsert(old, payload));
 
-				const finished = prev?.run && !payload.run;
-				const open = useUi.getState().issueId === payload.id;
+				// 사용자가 중지한 실행은 알리지 않는다. 알림함에서도 빠진다.
+				const last = payload.runs[payload.runs.length - 1];
+				const finished = prev?.run && !payload.run && last?.status !== "stopped";
+				const ui = useUi.getState();
+				// 대화는 대화 화면에서 그 대화를 보고 있을 때만 「보고 있다」고 친다. 다른 화면에 가 있으면 답이 온 줄 모른다.
+				const open = payload.talk ? ui.view === "talks" && ui.talkId === payload.id : ui.issueId === payload.id;
 				if (!finished || open) return;
 				const go = {
 					label: "열기",
-					onClick: () => {
-						const ui = useUi.getState();
-						if (ui.projectId !== payload.projectId) ui.setProject(payload.projectId);
-						if (ui.view !== "board" && ui.view !== "deliverables") ui.setView("board");
-						useUi.getState().openIssue(payload.id);
-					},
+					onClick: () => useUi.getState().openTarget({ projectId: payload.projectId, target: "issue", id: payload.id, talk: payload.talk }),
 				};
-				const name = `#${payload.number} ${payload.title}`;
+				const name = payload.talk ? `대화 · ${payload.title || "새 대화"}` : `#${payload.number} ${payload.title}`;
 				if (payload.error) toast.error(`${name} 실패`, { description: payload.error.slice(0, 160), action: go });
+				// 계획 · 결과 단계의 이슈에 물은 답도 상태는 그대로라, 상태보다 실행 종류를 먼저 본다.
+				else if (last?.kind === "chat") toast(`${name} 답이 왔습니다`, { action: go });
 				else if (payload.status === "planned") toast(`${name} 계획이 나왔습니다`, { action: go });
 				else if (payload.status === "review") toast(`${name} 구현이 끝났습니다`, { description: "바뀐 파일을 확인하세요", action: go });
 			}),

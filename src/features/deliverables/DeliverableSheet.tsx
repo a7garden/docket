@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ExternalLink, Eye, FolderOpen, MoreHorizontal, PenLine, Trash2, Upload, Wand2, X } from "lucide-react";
+import { ExternalLink, Eye, FolderOpen, Loader2, MoreHorizontal, PenLine, Trash2, Upload, Wand2, X } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, ContextActions, DropdownActions, fileActions } from "@/components/ActionMenu";
 import { Chip, SectionTitle } from "@/components/bits";
@@ -25,6 +25,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, errorText } from "@/lib/api";
 import { bytes, clock, dirname, fileUrl, isImage, isText, joinPath } from "@/lib/format";
+import { lastEnded, useMarkSeen } from "@/lib/notices";
 import { useDeliverables } from "@/lib/queries";
 import { useUi } from "@/lib/store";
 import type { Deliverable, Project, Version } from "@/lib/types";
@@ -37,6 +38,8 @@ export function DeliverableSheet({ project }: { project: Project }) {
 	const openDeliverable = useUi((s) => s.openDeliverable);
 	const { data } = useDeliverables(project.id);
 	const d = data?.find((x) => x.id === id);
+	// 열어 본 산출물의 새 판 · 실패는 알림함에서 뺀다.
+	useMarkSeen(d?.id, d ? lastEnded(d.runs) : 0);
 	return (
 		<Sheet open={!!d} onOpenChange={(o) => !o && openDeliverable(null)}>
 			<SheetContent
@@ -123,7 +126,8 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 							판{d.versions.length > 0 && <span className="tabular text-subtle">{d.versions.length}</span>}
 						</TabsTrigger>
 						<TabsTrigger value="recipe" className="px-0">
-							만드는 법{d.refs.length > 0 && <span className="tabular text-subtle">{d.refs.length}</span>}
+							만드는 법
+							{d.learn ? <Loader2 className="size-3.5 animate-spin text-subtle" /> : d.refs.length > 0 && <span className="tabular text-subtle">{d.refs.length}</span>}
 						</TabsTrigger>
 					</TabsList>
 				</div>

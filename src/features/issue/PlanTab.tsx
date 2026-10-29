@@ -3,6 +3,7 @@ import { Markdown } from "@/components/Markdown";
 import { RunEvents } from "@/components/RunLog";
 import { clock, cost } from "@/lib/format";
 import type { Issue, PlanStep } from "@/lib/types";
+import { effortLabel } from "../settings/RunPicker";
 import { type Answers, Questions } from "./Questions";
 
 /** projectPath 는 계획에 건 저장소 그림을 풀 기준이다. 첨부 · 결과 화면은 이슈 폴더 기준이다. */
@@ -96,7 +97,7 @@ export function PlanTab({ issue, projectPath, answers, onAnswers }: { issue: Iss
 			)}
 
 			<footer className="text-[12px] text-subtle">
-				{[`${clock(plan.createdAt)} 에 세운 계획`, run?.model, cost(run?.costUsd ?? 0)].filter(Boolean).join(" · ")}
+				{[`${clock(plan.createdAt)} 에 세운 계획`, run?.model, run?.effort && `effort ${effortLabel(run.effort)}`, cost(run?.costUsd ?? 0)].filter(Boolean).join(" · ")}
 			</footer>
 		</article>
 	);

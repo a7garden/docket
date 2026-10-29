@@ -2,10 +2,12 @@ mod claude_files;
 mod commands;
 mod error;
 mod extract;
+mod glossary;
 mod kb;
 mod model;
 mod naming;
 mod plugins;
+mod recipe;
 mod runner;
 mod store;
 mod usage;
@@ -77,12 +79,15 @@ pub fn run() {
 			commands::issue_set_title,
 			commands::issue_set_auto_plan,
 			commands::issue_set_model,
+			commands::issue_set_effort,
 			commands::issue_plan,
 			commands::issue_approve,
 			commands::issue_rework,
 			commands::runs_stop_all,
 			commands::issue_revert,
 			commands::issue_chat,
+			commands::issue_queue_remove,
+			commands::issue_queue_send,
 			commands::issue_open_terminal,
 			commands::issue_transcript,
 			commands::issue_sessions,
@@ -115,6 +120,10 @@ pub fn run() {
 			commands::deliverable_generate,
 			commands::deliverable_stop,
 			commands::deliverable_from_issue,
+			commands::deliverable_learn,
+			commands::deliverable_draft_apply,
+			commands::deliverable_set_template,
+			commands::deliverable_vocab_promote,
 			commands::kb_status,
 			commands::kb_save,
 			commands::kb_import,
@@ -123,6 +132,9 @@ pub fn run() {
 			commands::kb_stop,
 			commands::kb_search,
 			commands::kb_cards,
+			commands::glossary_get,
+			commands::glossary_save_entries,
+			commands::glossary_save_settings,
 			commands::resources_list,
 			commands::text_read,
 			commands::text_write,

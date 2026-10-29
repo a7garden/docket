@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { RunEnvelope, RunEvent } from "./types";
 
-export type View = "board" | "deliverables" | "talks" | "knowledge" | "claude" | "settings";
+export type View = "board" | "deliverables" | "talks" | "knowledge" | "glossary" | "claude" | "settings";
 
 interface Ui {
 	projectId: string | null;
@@ -23,7 +23,17 @@ interface Ui {
 	openIssue: (id: string | null) => void;
 	openDeliverable: (id: string | null) => void;
 	openTalk: (id: string | null) => void;
+	/** 다른 프로젝트 · 화면에 있어도 그 이슈 · 대화 · 산출물을 연다. 실행 목록 · 알림 · 알림함이 함께 쓴다. */
+	openTarget: (t: Target) => void;
 	editProject: (id: string | null) => void;
+}
+
+export interface Target {
+	projectId: string;
+	target: "issue" | "deliverable";
+	id: string;
+	/** 프로젝트 대화. 보드가 아니라 대화 화면으로 간다. */
+	talk?: boolean;
 }
 
 // 마지막으로 본 프로젝트와 화면(Claude 설정의 범위 포함)만 기억한다. 열어 둔 이슈까지 되살리면 시작할 때 엉뚱한 창이 뜬다.
@@ -44,6 +54,14 @@ export const useUi = create<Ui>()(
 			openIssue: (issueId) => set({ issueId }),
 			openDeliverable: (deliverableId) => set({ deliverableId }),
 			openTalk: (talkId) => set({ talkId }),
+			openTarget: ({ projectId, target, id, talk }) =>
+				set((s): Partial<Ui> => {
+					const base = s.projectId === projectId ? {} : { projectId, issueId: null, deliverableId: null, talkId: null };
+					if (talk) return { ...base, view: "talks", talkId: id };
+					if (target === "deliverable") return { ...base, view: "deliverables", deliverableId: id };
+					// 이슈 창은 산출물 화면 위에도 뜬다. 보드 · 산출물 밖에 있을 때만 보드로 옮긴다.
+					return { ...base, view: s.view === "board" || s.view === "deliverables" ? s.view : "board", issueId: id };
+				}),
 			editProject: (editingProjectId) => set({ editingProjectId }),
 		}),
 		{ name: "docket-ui", partialize: (s) => ({ projectId: s.projectId, view: s.view, claudeProjectId: s.claudeProjectId }) },

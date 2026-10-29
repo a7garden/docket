@@ -13,6 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { clock, relTime } from "@/lib/format";
+import { lastEnded, useMarkSeen } from "@/lib/notices";
 import { useIssues, useProjects } from "@/lib/queries";
 import { stateOf } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
@@ -20,7 +21,7 @@ import type { Issue, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { totals } from "../board/IssueCard";
 import { ChangesTab } from "./ChangesTab";
-import { ChatComposer, ChatTab, type Draft, NO_DRAFT, SessionBar, useTranscript } from "./ChatTab";
+import { ChatComposer, ChatTab, type Draft, NO_DRAFT, SessionBar, useSendKey, useTranscript } from "./ChatTab";
 import { HistoryTab } from "./HistoryTab";
 import { RevertConfirm, useIssueActions } from "./issueActions";
 import { NoteTab } from "./NoteTab";
@@ -42,6 +43,8 @@ export function IssueSheet({ project }: { project: Project }) {
 	const openIssue = useUi((s) => s.openIssue);
 	const { data: issues } = useIssues(project.id);
 	const issue = issues?.find((i) => i.id === issueId);
+	// 열어 본 이슈의 계획 · 결과 · 답은 알림함에서 뺀다.
+	useMarkSeen(issue?.id, issue ? lastEnded(issue.runs) : 0);
 
 	return (
 		<Sheet open={!!issue} onOpenChange={(o) => !o && openIssue(null)}>
@@ -290,13 +293,40 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 			setAsk(null);
 		});
 	};
+	const sendKey = useSendKey();
+
+	// 답이 없으면 「묻지 말고 승인」이다. 단추로는 누를 수 있어도 단축키로는 부르지 않는다 — 키 한 번에 구현이 시작되면 안 된다.
+	const implementWithAnswers = () => void go(() => (answered ? api.issueApprove(p, id, answersText(questions, answers), once) : api.issueApprove(p, id, undefined, once)));
+	const replanWithAnswers = () => void go(() => api.issuePlan(p, id, answersText(questions, answers)));
+
+	// 계획의 질문에 답한 뒤 Ctrl+Enter 는 다시 계획, Ctrl+Shift+Enter 는 답대로 구현이다.
+	// 질문 칸에서 맨 Enter 는 이미 「다음 질문」이라 보내기 키 설정과 상관없이 Ctrl 조합으로 둔다.
+	const hotkeys = !issue.run && !ask && issue.status === "planned" && questions.length > 0;
+	const latest = useRef({ busy, answered, implementWithAnswers, replanWithAnswers });
+	latest.current = { busy, answered, implementWithAnswers, replanWithAnswers };
+	useEffect(() => {
+		if (!hotkeys) return;
+		const onKey = (e: KeyboardEvent) => {
+			if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey) || e.altKey || e.repeat || e.isComposing || e.defaultPrevented) return;
+			// 메모 편집기 · 제목 칸에서 누른 키는 그 칸의 것이다. 메모를 고치다 계획이 돌면 안 된다. 확인 창이 떠 있을 때도 넘긴다.
+			const t = e.target as HTMLElement | null;
+			if (t?.closest(".cm-editor, input") || document.querySelector('[role="alertdialog"]')) return;
+			const k = latest.current;
+			if (k.busy || !k.answered) return;
+			e.preventDefault();
+			if (e.shiftKey) k.implementWithAnswers();
+			else k.replanWithAnswers();
+		};
+		window.addEventListener("keydown", onKey);
+		return () => window.removeEventListener("keydown", onKey);
+	}, [hotkeys]);
 
 	const bar = "flex items-center gap-2 border-t border-border px-6 py-3.5";
 
 	if (issue.run) {
 		return (
 			<div className={bar}>
-				<span className="min-w-0 flex-1 truncate text-[12.5px] text-subtle">{issue.run.phase === "queued" ? "앞선 작업을 기다리는 중" : activity}</span>
+				<span className="min-w-0 flex-1 truncate text-[12.5px] text-subtle">{issue.run.phase === "queued" ? issue.run.waitFor || "앞선 작업을 기다리는 중" : activity}</span>
 				<Button variant="outline" disabled={busy} onClick={() => void go(() => api.issueStop(p, id))}>
 					중지
 				</Button>
@@ -312,10 +342,10 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 					value={ask.text}
 					onChange={(e) => setAsk({ ...ask, text: e.target.value })}
 					onKeyDown={(e) => {
-						if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
+						if (sendKey.isSend(e)) send();
 						if (e.key === "Escape") setAsk(null);
 					}}
-					placeholder={ask.kind === "replan" ? "계획에서 바꿀 것이나 Claude 가 물은 것에 대한 답" : "구현 결과에서 고칠 것"}
+					placeholder={(ask.kind === "replan" ? "계획에서 바꿀 것이나 Claude 가 물은 것에 대한 답" : "구현 결과에서 고칠 것") + sendKey.hint}
 					className="min-h-24 resize-none bg-transparent text-[13.5px] leading-relaxed"
 				/>
 				<div className="flex items-center justify-end gap-2">
@@ -326,7 +356,7 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 					</Button>
 					<Button disabled={busy || !ask.text.trim()} onClick={send}>
 						{ask.kind === "replan" ? "다시 계획" : "수정 요청"}
-						<Kbd className="ml-1 bg-primary-foreground/15 text-primary-foreground">Ctrl ↵</Kbd>
+						<Kbd className="ml-1 bg-primary-foreground/15 text-primary-foreground">{sendKey.label}</Kbd>
 					</Button>
 				</div>
 			</div>
@@ -360,15 +390,13 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 								{answered}/{questions.length} 답함
 							</span>
 							{/* 답이 정해졌으면 계획을 다시 세우지 않고 답을 지시로 붙여 바로 구현할 수도 있다. 답이 없으면 그냥 승인이다. */}
-							<Button
-								variant="outline"
-								disabled={busy}
-								onClick={() => void go(() => (answered ? api.issueApprove(p, id, answersText(questions, answers), once) : api.issueApprove(p, id, undefined, once)))}
-							>
+							<Button variant="outline" disabled={busy} onClick={implementWithAnswers}>
 								{answered ? "답대로 구현" : "묻지 말고 승인"}
+								{answered > 0 && <Kbd className="ml-1">Ctrl ⇧ ↵</Kbd>}
 							</Button>
-							<Button disabled={busy || !answered} onClick={() => void go(() => api.issuePlan(p, id, answersText(questions, answers)))}>
+							<Button disabled={busy || !answered} onClick={replanWithAnswers}>
 								답하고 다시 계획
+								<Kbd className="ml-1 bg-primary-foreground/15 text-primary-foreground">Ctrl ↵</Kbd>
 							</Button>
 						</>
 					) : (

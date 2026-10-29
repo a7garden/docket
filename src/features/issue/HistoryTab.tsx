@@ -17,7 +17,7 @@ export function HistoryTab({ issue }: { issue: Issue }) {
 		<div className="flex flex-col gap-7">
 			<section className="flex flex-col gap-2">
 				<SectionTitle>Claude 실행</SectionTitle>
-				{issue.run?.phase === "queued" && <p className="text-[13px] text-subtle">같은 프로젝트의 앞선 작업이 끝나기를 기다립니다.</p>}
+				{issue.run?.phase === "queued" && <p className="text-[13px] text-subtle">{issue.run.waitFor || "같은 프로젝트의 앞선 작업이 끝나기를 기다립니다."}</p>}
 				{runs.length === 0 && !issue.run && <p className="text-[13px] text-subtle">아직 실행하지 않았습니다.</p>}
 				<div className="flex flex-col gap-1.5">
 					{runs.map((r) => (
@@ -43,6 +43,22 @@ export function HistoryTab({ issue }: { issue: Issue }) {
 					))}
 				</ol>
 			</section>
+		</div>
+	);
+}
+
+/** 이 실행의 프롬프트에 어휘 사전이 붙인 용어. */
+export function GlossaryTerms({ run }: { run: RunRecord }) {
+	const [open, setOpen] = useState(false);
+	const terms = run.glossaryTerms ?? [];
+	if (terms.length === 0) return null;
+	return (
+		<div className="mb-2 border-b border-border pb-2 text-[12px]">
+			<button type="button" onClick={() => setOpen((v) => !v)} className="flex items-center gap-1.5 text-subtle hover:text-foreground">
+				<ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
+				어휘 {terms.length}
+			</button>
+			{open && <p className="mt-1.5 pl-4.5 leading-relaxed text-muted-foreground selectable">{terms.join(" · ")}</p>}
 		</div>
 	);
 }
@@ -132,6 +148,7 @@ function RunRow({ issue, run, defaultOpen }: { issue: Issue; run: RunRecord; def
 			{open && (
 				<div className="border-t border-border px-3 py-2">
 					{run.mode && <RunPerms run={run} />}
+					<GlossaryTerms run={run} />
 					<KbHits run={run} />
 					<RunEvents projectId={issue.projectId} target="issue" targetId={issue.id} runId={run.id} live={live} />
 				</div>

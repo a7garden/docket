@@ -10,6 +10,7 @@ import { useLive, useUi } from "@/lib/store";
 import type { Project } from "@/lib/types";
 import { type ActionList, ContextActions } from "./ActionMenu";
 import { RunDot } from "./bits";
+import { NoticeCenter } from "./NoticeCenter";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -63,6 +64,7 @@ export function TitleBar() {
 			</div>
 			<div data-tauri-drag-region className="flex-1 self-stretch" />
 			<UsageMeter />
+			<NoticeCenter />
 			{jobs.length > 0 && (
 				<Popover>
 					<PopoverTrigger asChild>
@@ -221,20 +223,7 @@ function JobList({ jobs }: { jobs: Job[] }) {
 
 function JobRow({ job, onStop }: { job: Job; onStop: () => void }) {
 	const activity = useLive((s) => (job.phase === "running" ? s.byTarget[job.id]?.activity : undefined));
-	const go = () => {
-		const ui = useUi.getState();
-		if (ui.projectId !== job.project.id) ui.setProject(job.project.id);
-		if (job.talk) {
-			ui.setView("talks");
-			useUi.getState().openTalk(job.id);
-		} else if (job.target === "issue") {
-			ui.setView("board");
-			useUi.getState().openIssue(job.id);
-		} else {
-			ui.setView("deliverables");
-			useUi.getState().openDeliverable(job.id);
-		}
-	};
+	const go = () => useUi.getState().openTarget({ projectId: job.project.id, target: job.target, id: job.id, talk: job.talk });
 	const menu: ActionList = [
 		{ label: job.talk ? "대화 열기" : job.target === "issue" ? "이슈 열기" : "산출물 열기", icon: <PanelRight />, onSelect: go },
 		"sep",

@@ -3,12 +3,15 @@ import type {
 	AppInfo,
 	Deliverable,
 	DeliverablePatch,
+	GlossaryEntry,
+	GlossaryView,
 	Issue,
 	KbHit,
 	KbSection,
 	KbView,
 	PluginList,
 	Project,
+	ProjectGlossary,
 	ProjectKb,
 	Resource,
 	ResourceKind,
@@ -45,9 +48,9 @@ export const api = {
 
 	issues: (projectId: string) => invoke<Issue[]>("issues_list", { projectId }),
 	issue: (projectId: string, issueId: string) => invoke<Issue>("issue_get", { projectId, issueId }),
-	/** model 을 비우면 설정의 실행별 모델을 따른다. */
-	issueCreate: (projectId: string, issueId: string, note: string, autoPlan: boolean, model: string) =>
-		invoke<Issue>("issue_create", { projectId, issueId, note, autoPlan, model }),
+	/** model · effort 를 비우면 설정의 실행별 값을 따른다. */
+	issueCreate: (projectId: string, issueId: string, note: string, autoPlan: boolean, model: string, effort: string) =>
+		invoke<Issue>("issue_create", { projectId, issueId, note, autoPlan, model, effort }),
 	/** 프로젝트 대화. 보내기 · 중지 · 터미널 · 첨부 · 지우기는 issue* 를 그대로 쓴다. */
 	talks: (projectId: string) => invoke<Issue[]>("talks_list", { projectId }),
 	talkCreate: (projectId: string, talkId: string) => invoke<Issue>("talk_create", { projectId, talkId }),
@@ -61,6 +64,9 @@ export const api = {
 	/** 비우면 설정의 실행별 모델을 따른다. 다음 실행부터 쓰인다. */
 	issueSetModel: (projectId: string, issueId: string, model: string) =>
 		invoke<Issue>("issue_set_model", { projectId, issueId, model }),
+	/** 비우면 설정의 실행별 effort 를 따른다. 다음 실행부터 쓰인다. */
+	issueSetEffort: (projectId: string, issueId: string, effort: string) =>
+		invoke<Issue>("issue_set_effort", { projectId, issueId, effort }),
 	issuePlan: (projectId: string, issueId: string, feedback?: string) =>
 		invoke<Issue>("issue_plan", { projectId, issueId, feedback: feedback || null }),
 	issueApprove: (projectId: string, issueId: string, instruction?: string, allowAll = false) =>
@@ -71,6 +77,10 @@ export const api = {
 	issueRevert: (projectId: string, issueId: string) => invoke<Issue>("issue_revert", { projectId, issueId }),
 	issueChat: (projectId: string, issueId: string, text: string, edit: boolean, images: string[] = []) =>
 		invoke<Issue>("issue_chat", { projectId, issueId, text, edit, images }),
+	/** keepFiles 는 고치려고 입력칸으로 되돌릴 때 첨부를 남긴다. */
+	issueQueueRemove: (projectId: string, issueId: string, queueId: string, keepFiles = false) =>
+		invoke<Issue>("issue_queue_remove", { projectId, issueId, queueId, keepFiles }),
+	issueQueueSend: (projectId: string, issueId: string) => invoke<Issue>("issue_queue_send", { projectId, issueId }),
 	issueOpenTerminal: (projectId: string, issueId: string) => invoke<void>("issue_open_terminal", { projectId, issueId }),
 	issueTranscript: (projectId: string, issueId: string) => invoke<Turn[]>("issue_transcript", { projectId, issueId }),
 	issueSessions: (projectId: string) => invoke<SessionInfo[]>("issue_sessions", { projectId }),
@@ -124,6 +134,14 @@ export const api = {
 		invoke<void>("deliverable_stop", { projectId, deliverableId }),
 	deliverableFromIssue: (projectId: string, issueId: string) =>
 		invoke<Deliverable>("deliverable_from_issue", { projectId, issueId }),
+	deliverableLearn: (projectId: string, deliverableId: string) => invoke<Deliverable>("deliverable_learn", { projectId, deliverableId }),
+	/** field: skill · vocab · format · naming · template · all */
+	deliverableDraftApply: (projectId: string, deliverableId: string, field: string, apply: boolean) =>
+		invoke<Deliverable>("deliverable_draft_apply", { projectId, deliverableId, field, apply }),
+	deliverableSetTemplate: (projectId: string, deliverableId: string, name: string) =>
+		invoke<Deliverable>("deliverable_set_template", { projectId, deliverableId, name }),
+	deliverableVocabPromote: (projectId: string, deliverableId: string, term: string) =>
+		invoke<Deliverable>("deliverable_vocab_promote", { projectId, deliverableId, term }),
 
 	kbStatus: (projectId: string) => invoke<KbView>("kb_status", { projectId }),
 	kbSave: (projectId: string, kb: ProjectKb) => invoke<KbView>("kb_save", { projectId, kb }),
@@ -134,6 +152,13 @@ export const api = {
 	kbStop: (projectId: string) => invoke<boolean>("kb_stop", { projectId }),
 	kbSearch: (projectId: string, query: string) => invoke<KbHit[]>("kb_search", { projectId, query }),
 	kbCards: (projectId: string, path: string) => invoke<KbSection[]>("kb_cards", { projectId, path }),
+
+	glossary: (projectId: string) => invoke<GlossaryView>("glossary_get", { projectId }),
+	/** 표 전체를 바꾼다. updatedAt 은 읽어 둔 값 — 그 사이 다른 곳에서 저장했으면 거절된다. */
+	glossarySaveEntries: (projectId: string, entries: GlossaryEntry[], updatedAt: number) =>
+		invoke<GlossaryView>("glossary_save_entries", { projectId, entries, updatedAt }),
+	glossarySaveSettings: (projectId: string, glossary: ProjectGlossary) =>
+		invoke<GlossaryView>("glossary_save_settings", { projectId, glossary }),
 
 	resources: (projectId?: string | null) => invoke<Resource[]>("resources_list", { projectId: projectId ?? null }),
 	textRead: (path: string) => invoke<TextFile>("text_read", { path }),

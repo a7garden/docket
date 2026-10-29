@@ -3,7 +3,8 @@
 //! - 프롬프트는 표준 입력으로 넣는다. 인자로 넘기면 Windows 셸을 거칠 때 여러 줄 · 기호가 깨진다.
 //! - 계획과 문서 작성은 읽기 도구(Read · Grep · Glob)만 열어 저장소를 고칠 수 없게 한다.
 //! - 결과는 --json-schema 로 받는다. 화면이 계획 · 결과를 칸별로 보여 주려면 구조가 필요하다.
-//! - 한 프로젝트 안의 구현 · 되돌리기 · 파일로 만드는 산출물은 한 줄로 선다. 두 구현이 같은 파일을 동시에 고치지 않게 한다.
+//! - 한 프로젝트 안의 구현 · 되돌리기 · 파일로 만드는 산출물은 줄에 선다. 두 구현이 같은 파일을 동시에 고치지 않게 한다.
+//!   구현은 계획에 적힌 파일을 잡고, 겹치지 않으면 IMPL_SLOTS 개까지 함께 돈다. 근거가 애매하면 프로젝트 전체를 잡는다(Claims).
 //!   계획 · 대화 · 마크다운 산출물은 줄을 기다리지 않고 프로젝트마다 READ_SLOTS 개까지 함께 돈다.
 
 use std::collections::{HashMap, HashSet};
@@ -841,15 +842,154 @@ impl RunCtl {
 /// 2026.10.28 : 3. 자동 계획이 메모를 한꺼번에 띄워도 사용량이 예측되게 묶는다.
 const READ_SLOTS: usize = 3;
 
+/// 파일이 겹치지 않아 함께 도는 구현의 상한.
+/// 2026.10.29 : 2. 한 저장소에서 빌드 · 테스트 명령이 겹치는 부담을 줄이려고 낮게 잡았다.
+const IMPL_SLOTS: usize = 2;
+
 /// 실행이 잡고 도는 차례. 실행이 끝나 놓아야 다음 실행이 들어온다.
 enum Seat {
-	Lock(#[allow(dead_code)] tokio::sync::OwnedMutexGuard<()>),
+	Claim(#[allow(dead_code)] ClaimGuard),
 	Slot(#[allow(dead_code)] tokio::sync::OwnedSemaphorePermit),
+}
+
+/// 줄에 서는 실행이 잡는 범위. 구현끼리 같은 파일을 함께 고치지 않게 하려는 것이다.
+#[derive(Clone)]
+struct Claim {
+	key: String,
+	/// 기다리는 쪽에 보일 이름 (#12 · 산출물 제목)
+	label: String,
+	/// 저장소 기준 파일 경로. None 이면 프로젝트 전체 — 지금 도는 모든 실행과 겹친다.
+	files: Option<Vec<String>>,
+	/// 함께 돌 수 있는 프로젝트인데 전체를 잡은 까닭. 기다리는 문구에 붙인다.
+	solo: String,
+}
+
+#[derive(Default)]
+struct Book {
+	seq: u64,
+	held: Vec<Claim>,
+	/// 먼저 선 차례대로. 겹치는 것끼리는 앞선 것이 먼저 들어간다 — 뒤에 온 작은 구현이 큰 것을 계속 앞지르지 않게 한다.
+	waiting: Vec<(u64, Claim)>,
+}
+
+/// 프로젝트마다 잡힌 범위와 기다리는 줄.
+#[derive(Default)]
+struct Claims {
+	books: Mutex<HashMap<String, Book>>,
+	/// 잡은 것이 풀리거나 줄에서 빠지면 기다리는 쪽을 모두 깨운다. 저마다 다시 따져 보고 안 되면 또 기다린다.
+	freed: Notify,
+}
+
+fn norm_path(p: &str) -> String {
+	p.trim().replace('\\', "/").trim_start_matches("./").trim_end_matches('/').to_lowercase()
+}
+
+/// 같은 파일이거나 한쪽이 다른 쪽 폴더 아래다. Windows 라 대소문자는 가리지 않는다.
+fn path_overlap(a: &str, b: &str) -> bool {
+	let (a, b) = (norm_path(a), norm_path(b));
+	a == b || a.starts_with(&format!("{b}/")) || b.starts_with(&format!("{a}/"))
+}
+
+/// 두 범위가 겹치는 경로. 한쪽이 전체를 잡았으면 빈 글, 겹치지 않으면 None.
+fn shared(a: &Claim, b: &Claim) -> Option<String> {
+	let (Some(x), Some(y)) = (&a.files, &b.files) else { return Some(String::new()) };
+	x.iter().find_map(|f| y.iter().any(|g| path_overlap(f, g)).then(|| f.clone()))
+}
+
+fn wait_text(me: &Claim, label: &str, path: &str) -> String {
+	let mut s = if path.is_empty() { format!("앞선 작업을 기다림 · {label}") } else { format!("파일이 겹쳐 기다림 · {label} · {path}") };
+	if !me.solo.is_empty() {
+		s.push_str(&format!(" · {}", me.solo));
+	}
+	s
+}
+
+impl Claims {
+	fn enqueue(&self, pid: &str, claim: Claim) -> u64 {
+		let mut books = self.books.lock().unwrap();
+		let book = books.entry(pid.to_string()).or_default();
+		book.seq += 1;
+		let seq = book.seq;
+		book.waiting.push((seq, claim));
+		seq
+	}
+
+	fn leave(&self, pid: &str, seq: u64) {
+		if let Some(book) = self.books.lock().unwrap().get_mut(pid) {
+			book.waiting.retain(|(s, _)| *s != seq);
+		}
+		self.freed.notify_waiters();
+	}
+
+	/// 들어갈 수 있으면 잡는다. 아니면 무엇을 기다리는지 돌려준다.
+	fn try_take(&self, pid: &str, seq: u64) -> std::result::Result<(), String> {
+		let mut books = self.books.lock().unwrap();
+		let book = books.entry(pid.to_string()).or_default();
+		let Some(at) = book.waiting.iter().position(|(s, _)| *s == seq) else { return Ok(()) };
+		let me = &book.waiting[at].1;
+		if let Some(c) = book.held.iter().find_map(|c| shared(c, me).map(|p| (c, p))) {
+			return Err(wait_text(me, &c.0.label, &c.1));
+		}
+		if me.files.is_some() && book.held.len() >= IMPL_SLOTS {
+			return Err(format!("함께 도는 구현이 {IMPL_SLOTS}개라 기다림"));
+		}
+		if let Some(c) = book.waiting[..at].iter().find(|(_, c)| shared(c, me).is_some()) {
+			return Err(wait_text(me, &c.1.label, ""));
+		}
+		let (_, me) = book.waiting.remove(at);
+		book.held.push(me);
+		Ok(())
+	}
+
+	fn free(&self, pid: &str, key: &str) {
+		if let Some(book) = self.books.lock().unwrap().get_mut(pid) {
+			book.held.retain(|c| c.key != key);
+		}
+		self.freed.notify_waiters();
+	}
+
+	/// 다른 실행이 잡고 있는 파일. 이번 실행이 고치지 못하게 거부 규칙으로 건다.
+	fn others(&self, pid: &str, key: &str) -> Vec<String> {
+		let books = self.books.lock().unwrap();
+		let Some(book) = books.get(pid) else { return Vec::new() };
+		book.held.iter().filter(|c| c.key != key).filter_map(|c| c.files.clone()).flatten().collect()
+	}
+
+	/// 이 실행이 고친 파일. 다른 실행이 잡고 있으면 그 이름을 돌려주고, 아니면 이 실행이 잡은 범위에 더한다.
+	/// 계획에 없던 파일도 잡아야 뒤에 오는 구현이 그 파일을 피해 간다.
+	fn touch(&self, pid: &str, key: &str, rel: &str) -> Option<String> {
+		let mut books = self.books.lock().unwrap();
+		let book = books.get_mut(pid)?;
+		if let Some(c) = book.held.iter().find(|c| c.key != key && c.files.as_ref().is_some_and(|f| f.iter().any(|f| path_overlap(f, rel)))) {
+			return Some(c.label.clone());
+		}
+		if !Path::new(rel).is_absolute()
+			&& let Some(files) = book.held.iter_mut().find(|c| c.key == key).and_then(|c| c.files.as_mut())
+			&& !files.iter().any(|f| norm_path(f) == norm_path(rel))
+		{
+			files.push(rel.to_string());
+		}
+		None
+	}
+}
+
+/// 잡은 범위를 놓는다. 실행이 끝나든 · 멈추든 · 오류로 빠지든 놓아야 그 프로젝트의 줄이 멈추지 않는다.
+struct ClaimGuard {
+	claims: Arc<Claims>,
+	pid: String,
+	key: String,
+}
+
+impl Drop for ClaimGuard {
+	fn drop(&mut self) {
+		self.claims.free(&self.pid, &self.key);
+	}
 }
 
 #[derive(Default)]
 pub struct Runner {
-	locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+	/// 구현 · 되돌리기 · 파일로 만드는 산출물이 잡는 범위
+	claims: Arc<Claims>,
 	/// 줄 밖 실행의 자리. 프로젝트마다 READ_SLOTS 개.
 	slots: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
 	active: Mutex<HashMap<String, Arc<RunCtl>>>,
@@ -858,10 +998,6 @@ pub struct Runner {
 }
 
 impl Runner {
-	fn project_lock(&self, pid: &str) -> Arc<tokio::sync::Mutex<()>> {
-		self.locks.lock().unwrap().entry(pid.to_string()).or_default().clone()
-	}
-
 	fn project_slots(&self, pid: &str) -> Arc<tokio::sync::Semaphore> {
 		self.slots.lock().unwrap().entry(pid.to_string()).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(READ_SLOTS))).clone()
 	}
@@ -898,20 +1034,99 @@ impl Runner {
 	}
 }
 
-/// 차례를 기다린다. exclusive 면 프로젝트 줄을, 아니면 READ_SLOTS 자리 하나를 받는다.
-/// 기다리는 동안 중지되면 None. 그래야 「줄에서 빼기」가 바로 먹는다.
-async fn wait_turn(lock: Arc<tokio::sync::Mutex<()>>, slots: Arc<tokio::sync::Semaphore>, exclusive: bool, ctl: &RunCtl) -> Option<Seat> {
-	if exclusive {
-		tokio::select! {
-			g = lock.lock_owned() => Some(Seat::Lock(g)),
-			_ = ctl.wait_cancel() => None,
-		}
-	} else {
-		tokio::select! {
+/// 차례를 기다린다. claim 이 있으면 그 범위를 잡고, 없으면 READ_SLOTS 자리 하나를 받는다.
+/// 기다리는 까닭이 바뀔 때마다 on_wait 로 알린다. 기다리는 동안 중지되면 None. 그래야 「줄에서 빼기」가 바로 먹는다.
+async fn wait_turn(claims: Arc<Claims>, slots: Arc<tokio::sync::Semaphore>, pid: &str, claim: Option<Claim>, ctl: &RunCtl, on_wait: impl Fn(&str)) -> Option<Seat> {
+	let Some(claim) = claim else {
+		return tokio::select! {
 			p = slots.acquire_owned() => p.ok().map(Seat::Slot),
 			_ = ctl.wait_cancel() => None,
+		};
+	};
+	let key = claim.key.clone();
+	let seq = claims.enqueue(pid, claim);
+	let mut last = String::new();
+	loop {
+		// 따져 보기 전에 깨울 허가를 먼저 걸어 둔다. 따지는 사이에 풀린 것을 놓치면 다음 풀림까지 멈춘다.
+		let freed = claims.freed.notified();
+		tokio::pin!(freed);
+		freed.as_mut().enable();
+		match claims.try_take(pid, seq) {
+			Ok(()) => return Some(Seat::Claim(ClaimGuard { claims: claims.clone(), pid: pid.to_string(), key })),
+			Err(why) if why != last => {
+				on_wait(&why);
+				last = why;
+			}
+			Err(_) => {}
+		}
+		tokio::select! {
+			_ = &mut freed => {}
+			_ = ctl.wait_cancel() => {
+				claims.leave(pid, seq);
+				return None;
+			}
 		}
 	}
+}
+
+/// 구현이 잡을 범위. 함께 돌 근거가 없으면 프로젝트 전체를 잡고 그 까닭을 solo 에 둔다.
+fn issue_claim(job: &Job, i: &Issue, p: &Project, key: &str) -> Claim {
+	let (files, solo) = match claim_files(job, i, p) {
+		Ok(f) => (Some(f), ""),
+		Err(why) => (None, why),
+	};
+	Claim { key: key.to_string(), label: format!("#{}", i.number), files, solo: solo.to_string() }
+}
+
+/// 함께 돌 수 있으면 잡을 파일(저장소 기준)을, 아니면 한 줄로 서는 까닭을 돌려준다. 끈 프로젝트는 까닭을 비운다.
+/// 근거는 계획에 적힌 파일과 이미 고친 파일이다. 애매하면 한 줄로 세운다 — 판정이 틀리면 두 구현이 한 파일을 함께 고친다.
+fn claim_files(job: &Job, i: &Issue, p: &Project) -> std::result::Result<Vec<String>, &'static str> {
+	if !p.parallel_impl {
+		return Err("");
+	}
+	// 「모두 허용」은 명령으로도 파일을 쓸 수 있어 거부 규칙이 닿지 않는다.
+	if p.impl_mode == "bypassPermissions" || matches!(job, Job::Implement { allow_all: true, .. } | Job::Rework { allow_all: true, .. }) {
+		return Err("모두 허용이라 한 줄로 섬");
+	}
+	let mut raw: Vec<&str> = Vec::new();
+	if !matches!(job, Job::Revert)
+		&& let Some(plan) = &i.plan
+	{
+		raw.extend(plan.files.iter().map(|f| f.path.as_str()));
+		raw.extend(plan.steps.iter().flat_map(|s| s.files.iter().map(String::as_str)));
+	}
+	raw.extend(i.changes.iter().map(|c| c.rel.as_str()));
+	let root = p.path.replace('\\', "/");
+	let root = root.trim_end_matches('/');
+	let mut out: Vec<String> = Vec::new();
+	for r in raw {
+		let f = r.trim().replace('\\', "/");
+		if f.is_empty() {
+			continue;
+		}
+		// 저장소 안 전체 경로는 저장소 기준으로 바꾼다. get 으로 잘라 한글 경로의 글자 가운데를 자르지 않는다.
+		let f = if Path::new(&f).is_absolute() {
+			match f.get(..root.len()) {
+				Some(head) if head.eq_ignore_ascii_case(root) && f[root.len()..].starts_with('/') => f[root.len() + 1..].to_string(),
+				_ => return Err("저장소 밖 파일이 있어 한 줄로 섬"),
+			}
+		} else {
+			f.trim_start_matches("./").to_string()
+		};
+		if f.split('/').any(|s| s == "..") {
+			return Err("저장소 밖 파일이 있어 한 줄로 섬");
+		}
+		if f.ends_with('/') || f.contains(['*', '?', '[']) || Path::new(&p.path).join(&f).is_dir() {
+			return Err("계획에 폴더가 있어 한 줄로 섬");
+		}
+		if !out.iter().any(|o| norm_path(o) == norm_path(&f)) {
+			out.push(f);
+		}
+	}
+	if out.is_empty() {
+		return Err("계획에 바꿀 파일이 없어 한 줄로 섬");
+	}
+	Ok(out)
 }
 
 pub fn issue_key(pid: &str, iid: &str) -> String {
@@ -1101,7 +1316,8 @@ const VISUAL_RULE: &str = "\
 ## 그림 · 목업
 - 화면 · 배치 · 흐름이 바뀌는 설계일 때만 그림을 함께 낸다. 백엔드 · 내부 로직만 바뀌면 넣지 않는다.
 - 화면 목업은 마크다운 ```html 코드 블록 하나로 낸다. 화면이 블록을 그대로 미리 보기로 그린다. 한 덩어리 HTML 에 style 을 안에 두고, 외부 파일 · 글꼴 · 네트워크 요청은 쓰지 않는다. 스크립트는 돌아가니 탭 전환 · 펼치기 같은 동작도 보일 수 있다. 바뀌기 전과 뒤를 나란히 두면 판단하기 쉽다. 짧게 유지한다.
-- 흐름도 · 구조도는 ```svg 코드 블록으로 낸다.
+- 미리 보기는 앱의 밝은 · 어두운 테마를 따른다. HTML 은 바탕색과 글자색을 둘 다 정하거나 둘 다 비워 둔다. 하나만 정하면 다른 테마에서 글자가 묻힌다.
+- 흐름도 · 구조도는 ```svg 코드 블록으로 낸다. 선 · 글자는 `currentColor` 로 칠하거나 바탕 사각형을 함께 그린다. 검정을 박아 두면 어두운 테마에서 보이지 않는다.
 - 저장소에 있는 그림을 보여 줄 때는 `![설명](절대 경로)` 로 건다.";
 
 /// 프로젝트 대화에서 묻다가 바로 일감을 남기게 한다. 앱은 블록만 보고 보드에 메모를 만든다.
@@ -1156,6 +1372,7 @@ impl Job {
 
 	/// 프로젝트 줄에 서는가. 줄은 구현끼리 같은 파일을 함께 고치지 않게 하려는 것이다.
 	/// 2026.10.28 : 대화는 편집 권한이어도 줄 밖에서 돈다. 구현 중에도 바로 답하게 하려고, 함께 고칠 위험을 받아들였다.
+	/// 2026.10.29 : 줄은 프로젝트 전체가 아니라 계획에 적힌 파일을 잡는다(issue_claim). 겹치지 않으면 IMPL_SLOTS 개까지 함께 돈다.
 	fn exclusive(&self) -> bool {
 		matches!(self, Job::Implement { .. } | Job::Rework { .. } | Job::Revert)
 	}
@@ -1346,15 +1563,36 @@ fn doc_material(v: &DeliverableView, request: &str, current: Option<&str>) -> St
 	if !d.guide.trim().is_empty() {
 		s.push_str(&format!("\n## 작성 지침\n{}\n", d.guide.trim()));
 	}
+	if !d.skill.trim().is_empty() {
+		s.push_str(&format!("\n## 작성법\n템플릿 · 지난 판에서 정리한 구성 · 문체 · 표기 규칙이다. 작성 지침과 어긋나면 작성 지침을 따른다.\n\n{}\n", d.skill.trim()));
+	}
+	let vocab: Vec<&Term> = d.vocab.iter().filter(|t| !t.term.trim().is_empty()).collect();
+	if !vocab.is_empty() {
+		// 프로젝트 어휘 사전이 뒤에 붙을 수 있다. 같은 말이면 이 산출물의 것을 따르게 한다.
+		s.push_str("\n## 이 산출물의 어휘\n이 문서에서는 아래 말을 쓴다. 「피할 말」은 같은 뜻이지만 쓰지 않는다. 프로젝트 용어와 다르면 이쪽을 따른다.\n");
+		for t in vocab {
+			s.push_str(&format!("- **{}**", t.term.trim()));
+			if !t.note.trim().is_empty() {
+				s.push_str(&format!(" — {}", t.note.trim()));
+			}
+			let avoid: Vec<&str> = t.avoid.iter().map(|a| a.trim()).filter(|a| !a.is_empty()).collect();
+			if !avoid.is_empty() {
+				s.push_str(&format!(" (피할 말: {})", avoid.join(" · ")));
+			}
+			s.push('\n');
+		}
+	}
 	if !v.refs.is_empty() {
 		let dir = Path::new(&v.dir).join("refs");
 		s.push_str("\n## 템플릿 · 참고 자료\n먼저 아래 파일을 모두 읽는다. 템플릿이 있으면 그 목차 · 표 구성 · 문구 형식을 그대로 따르고, 참고 자료는 내용의 근거로 쓴다.\n");
 		for r in &v.refs {
 			let path = dir.join(&r.name);
+			// 앱이 빈 양식을 따로 만들지 않는다(오피스 파일 구조가 깨질 수 있다). 견본의 글자는 Claude 가 갈아 넣게 한다.
+			let mark = if r.template { "[템플릿 — 목차 · 표 · 서식은 그대로 두고 내용만 바꾼다] " } else { "" };
 			match (r.kind.as_str(), r.text_path.is_empty()) {
-				("extract", false) => s.push_str(&format!("- {} (뽑아 둔 글자: {})\n", path.display(), r.text_path)),
-				("direct", _) => s.push_str(&format!("- {}\n", path.display())),
-				_ => s.push_str(&format!("- {} (글자를 읽을 수 없는 형식이다. 이름과 형식만 참고한다)\n", path.display())),
+				("extract", false) => s.push_str(&format!("- {mark}{} (뽑아 둔 글자: {})\n", path.display(), r.text_path)),
+				("direct", _) => s.push_str(&format!("- {mark}{}\n", path.display())),
+				_ => s.push_str(&format!("- {mark}{} (글자를 읽을 수 없는 형식이다. 이름과 형식만 참고한다)\n", path.display())),
 			}
 		}
 	}
@@ -1374,12 +1612,15 @@ fn doc_prompt(material: &str) -> String {
 	)
 }
 
-fn doc_file_prompt(material: &str, dir: &Path, base: &str) -> String {
+/// format 이 있으면 확장자를 그것으로 못 박는다. 비우면 템플릿을 따르고, 템플릿도 없으면 md 다.
+fn doc_file_prompt(material: &str, dir: &Path, base: &str, format: &str) -> String {
+	let ext = format.trim().trim_start_matches('.').to_lowercase();
+	let name_line = if ext.is_empty() { format!("{base}.<확장자>  확장자는 템플릿 형식을 따르고, 템플릿이 없으면 md 로 한다.") } else { format!("{base}.{ext}") };
 	format!(
 		"이 저장소를 읽고 아래 산출물을 파일로 만들어라.\n\n\
 		## 결과 파일\n\
 		- 폴더: {}\n\
-		- 이름: {base}.<확장자>  확장자는 템플릿 형식을 따르고, 템플릿이 없으면 md 로 한다.\n\
+		- 이름: {name_line}\n\
 		- 한글(hwpx) · 워드(docx) · 엑셀(xlsx) · 파워포인트(pptx)는 그 형식을 다루는 스킬로 만든다. 템플릿 파일이 있으면 복사해 내용을 채우는 쪽을 먼저 고른다.\n\
 		- 그 폴더에는 결과 파일만 남긴다. 중간 파일은 시스템 임시 폴더에 두고 끝나면 지운다.\n\
 		- 저장소 안의 파일은 고치지 않는다. 편집 도구는 저장소 안에서 막혀 있고, 명령으로도 저장소에 쓰지 않는다.\n\
@@ -1393,7 +1634,7 @@ fn doc_file_prompt(material: &str, dir: &Path, base: &str) -> String {
 
 /// 메모에서 고른 모델이 앞서고, 없으면 설정의 실행별 모델이다. 둘 다 비면 빈 값이라 CLI 기본 모델로 돈다.
 /// 되돌리기는 구현과 같은 권한 · 결과 형식으로 돌고, 산출물 작성은 결과물을 만들어 쓰는 일이라 둘 다 구현 모델을 쓴다.
-fn pick_model<'a>(s: &'a Settings, issue_model: &'a str, kind: RunKind) -> &'a str {
+pub(crate) fn pick_model<'a>(s: &'a Settings, issue_model: &'a str, kind: RunKind) -> &'a str {
 	if !issue_model.trim().is_empty() {
 		return issue_model.trim();
 	}
@@ -1404,10 +1645,26 @@ fn pick_model<'a>(s: &'a Settings, issue_model: &'a str, kind: RunKind) -> &'a s
 	}
 }
 
-fn base_args(s: &Settings, model: &str, add_dirs: &[&Path]) -> Vec<String> {
+/// effort 도 모델과 같은 순서다: 메모 → 설정의 실행별 값 → 빈 값(--effort 를 넘기지 않아 CLI 기본값).
+/// 메모에서 모델만 골랐으면 effort 는 설정을 따른다. 둘을 따로 고를 수 있게 하려는 것이다.
+pub(crate) fn pick_effort<'a>(s: &'a Settings, issue_effort: &'a str, kind: RunKind) -> &'a str {
+	if !issue_effort.trim().is_empty() {
+		return issue_effort.trim();
+	}
+	match kind {
+		RunKind::Plan => s.plan_effort.trim(),
+		RunKind::Chat => s.chat_effort.trim(),
+		RunKind::Implement | RunKind::Revert | RunKind::Document => s.impl_effort.trim(),
+	}
+}
+
+fn base_args(s: &Settings, model: &str, effort: &str, add_dirs: &[&Path]) -> Vec<String> {
 	let mut a: Vec<String> = ["-p", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"].map(String::from).to_vec();
 	if !model.is_empty() {
 		a.extend(["--model".into(), model.to_string()]);
+	}
+	if !effort.is_empty() {
+		a.extend(["--effort".into(), effort.to_string()]);
 	}
 	if !s.use_mcp {
 		a.push("--strict-mcp-config".into());
@@ -1417,8 +1674,8 @@ fn base_args(s: &Settings, model: &str, add_dirs: &[&Path]) -> Vec<String> {
 	a
 }
 
-fn job_args(job: &Job, s: &Settings, p: &Project, issue_model: &str, add_dir: &Path, resume: Option<&str>) -> Vec<String> {
-	let mut a = base_args(s, pick_model(s, issue_model, job.kind()), &[add_dir]);
+fn job_args(job: &Job, s: &Settings, p: &Project, issue: &Issue, add_dir: &Path, resume: Option<&str>) -> Vec<String> {
+	let mut a = base_args(s, pick_model(s, &issue.model, job.kind()), pick_effort(s, &issue.effort, job.kind()), &[add_dir]);
 	perm_args(&mut a, &job_perms(job, p), &[]);
 	match job {
 		Job::Plan { .. } => a.extend(["--json-schema".into(), PLAN_SCHEMA.into()]),
@@ -1494,6 +1751,7 @@ pub fn revert(app: &AppHandle, pid: &str, iid: &str) -> Result<IssueView> {
 
 /// 진행 중인 이슈에 질문을 보낸다. 계획 · 구현과 같은 세션을 이으므로 Claude 가 지금까지 읽고 고친 것을 기억한다.
 /// 설계가 정해지면 승인 대기로, 파일을 고쳤으면 결과 확인으로 단계를 옮긴다.
+/// 실행 중이면 대기열에 넣고, 대기열이 남아 있으면 그 뒤에 붙여 함께 보낸다.
 pub fn chat(app: &AppHandle, pid: &str, iid: &str, text: String, edit: bool, images: Vec<String>) -> Result<IssueView> {
 	// 첨부 폴더 밖을 가리키지 못하게 이름만 받고, 지금 있는 파일만 넘긴다.
 	let have = app.state::<Store>().attachments(pid, iid);
@@ -1501,11 +1759,84 @@ pub fn chat(app: &AppHandle, pid: &str, iid: &str, text: String, edit: bool, ima
 	if text.trim().is_empty() && images.is_empty() {
 		return msg("물을 것을 적어 주세요");
 	}
-	start_issue(app, pid, iid, Job::Chat { text, edit, images })
+	let item = QueuedChat { id: short_id(), text, edit, images, at: now_ms() };
+	match send_queued(app, pid, iid, Some(item))? {
+		Some(v) => Ok(v),
+		None => app.state::<Store>().get_issue(pid, iid),
+	}
+}
+
+/// 대기열을 꺼내는 일과 실행을 여는 일 사이에 다른 보내기가 끼면 질문의 차례가 뒤집힌다. 둘을 한 줄로 세운다.
+static DISPATCH: Mutex<()> = Mutex::new(());
+
+/// 대기열을 한 차례로 묶는다. 글은 넣은 차례대로 빈 줄을 두고 잇고, 첨부는 겹치는 이름을 한 번만 넣는다.
+/// 하나라도 고칠 수 있게 넣었으면 고칠 수 있는 쪽을 따른다. 읽기 전용으로 묶으면 그 질문이 바라던 고침을 못 한다.
+fn batch_job(items: &[QueuedChat], have: &[String]) -> Option<Job> {
+	let text = items.iter().map(|q| q.text.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
+	let mut images: Vec<String> = Vec::new();
+	for n in items.iter().flat_map(|q| &q.images) {
+		if have.contains(n) && !images.contains(n) {
+			images.push(n.clone());
+		}
+	}
+	if text.is_empty() && images.is_empty() {
+		return None;
+	}
+	Some(Job::Chat { text, edit: items.iter().any(|q| q.edit), images })
+}
+
+/// 실행 중이 아니면 대기열(과 extra)을 한 차례로 묶어 보낸다. 실행 중이면 extra 를 대기열 뒤에 넣는다.
+/// 보낸 차례가 없으면 None 이다. 열지 못했으면 꺼낸 대기열을 앞에 되돌려 놓는다 — 적어 둔 질문이 사라지지 않게 한다.
+pub fn send_queued(app: &AppHandle, pid: &str, iid: &str, extra: Option<QueuedChat>) -> Result<Option<IssueView>> {
+	let _line = DISPATCH.lock().unwrap_or_else(|e| e.into_inner());
+	let store = app.state::<Store>();
+	let mut taken: Vec<QueuedChat> = Vec::new();
+	let mut queued = false;
+	let view = store.update_issue(pid, iid, |i| {
+		if i.run.is_some() {
+			if let Some(q) = extra.clone() {
+				i.queue.push(q);
+				queued = true;
+			}
+			return Ok(());
+		}
+		taken = std::mem::take(&mut i.queue);
+		Ok(())
+	})?;
+	if queued {
+		emit_issue(app, &view);
+		return Ok(Some(view));
+	}
+	let had = taken.len();
+	let mut items = taken.clone();
+	items.extend(extra);
+	let Some(job) = batch_job(&items, &store.attachments(pid, iid)) else {
+		if had > 0 {
+			emit_issue(app, &store.get_issue(pid, iid)?);
+		}
+		return Ok(None);
+	};
+	match start_issue(app, pid, iid, job) {
+		Ok(v) => Ok(Some(v)),
+		Err(e) => {
+			if had > 0 {
+				let v = store.update_issue(pid, iid, |i| {
+					let rest = std::mem::take(&mut i.queue);
+					i.queue = taken;
+					i.queue.extend(rest);
+					Ok(())
+				})?;
+				emit_issue(app, &v);
+			}
+			Err(e)
+		}
+	}
 }
 
 fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueView> {
 	let store = app.state::<Store>();
+	// 이슈를 실행 중으로 바꾸기 전에 읽는다. 바꾼 뒤에 실패하면 이슈가 실행 중인 채로 남는다.
+	let project = store.project(pid)?;
 	let run_id = short_id();
 	let kind = job.kind();
 	let view = store.update_issue(pid, iid, |i| {
@@ -1555,7 +1886,7 @@ fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueV
 				}
 			}
 		}
-		i.run = Some(RunState { kind, phase: Phase::Queued, run_id: run_id.clone(), queued_at: now_ms() });
+		i.run = Some(RunState { kind, phase: Phase::Queued, run_id: run_id.clone(), queued_at: now_ms(), wait_for: String::new() });
 		i.error.clear();
 		Ok(())
 	})?;
@@ -1563,12 +1894,23 @@ fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueV
 
 	let runner = app.state::<Runner>();
 	let key = issue_key(pid, iid);
+	let claim = job.exclusive().then(|| issue_claim(&job, &view.issue, &project, &key));
 	let ctl = runner.register(&key);
-	let (lock, slots) = (runner.project_lock(pid), runner.project_slots(pid));
-	let exclusive = job.exclusive();
+	let (claims, slots) = (runner.claims.clone(), runner.project_slots(pid));
 	let (app, pid, iid) = (app.clone(), pid.to_string(), iid.to_string());
 	tauri::async_runtime::spawn(async move {
-		let turn = wait_turn(lock, slots, exclusive, &ctl).await;
+		// 무엇을 기다리는지 이슈에 적어 화면이 보이게 한다. 그 사이 실행이 바뀌었으면 건드리지 않는다.
+		let on_wait = |why: &str| {
+			if let Ok(v) = app.state::<Store>().update_issue(&pid, &iid, |i| {
+				if let Some(r) = i.run.as_mut().filter(|r| r.run_id == run_id) {
+					r.wait_for = why.to_string();
+				}
+				Ok(())
+			}) {
+				emit_issue(&app, &v);
+			}
+		};
+		let turn = wait_turn(claims, slots, &pid, claim, &ctl, on_wait).await;
 		let res = match turn {
 			Some(_g) => run_issue_job(&app, &pid, &iid, &job, &run_id, &ctl).await,
 			None => Ok(()),
@@ -1594,6 +1936,12 @@ fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueV
 				Ok(())
 			}) {
 				emit_issue(&app, &v);
+			}
+		}
+		// 기다리던 질문을 이어 보낸다. 사용자가 중지했으면 멈춘 뜻을 따라 보내지 않고 남겨 둔다. 실패한 차례 뒤에는 이어 보낸다.
+		if !ctl.cancelled() {
+			if let Err(e) = send_queued(&app, &pid, &iid, None) {
+				eprintln!("대기열을 보내지 못했습니다: {e}");
 			}
 		}
 	});
@@ -1699,18 +2047,29 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 		return Ok(());
 	}
 	let settings = store.settings()?;
-	let project = store.project(pid)?;
+	let mut project = store.project(pid)?;
 	let exe = resolve_claude(&settings.claude_path)
 		.ok_or_else(|| Error::Msg("claude 실행 파일을 찾지 못했습니다. 설정에서 경로를 지정하세요.".into()))?;
 	let kind = job.kind();
+	let key = issue_key(pid, iid);
+	let claims = app.state::<Runner>().claims.clone();
+	// 함께 도는 구현이 잡은 파일은 이번 실행이 고치지 못하게 막는다. 막을 목록에 더해 인자 · 실행 기록이 같은 값을 쓰게 한다.
+	// Edit · Write 도구만 막는다. 명령으로 쓰는 것은 막지 못해 「모두 허용」은 함께 돌리지 않는다(claim_files).
+	if job.exclusive() {
+		for f in claims.others(pid, &key) {
+			project.denied_tools.extend([format!("Edit(./{f})"), format!("Write(./{f})")]);
+		}
+	}
 
 	let view = store.update_issue(pid, iid, |i| {
 		if let Some(r) = i.run.as_mut() {
 			r.phase = Phase::Running;
+			r.wait_for.clear();
 		}
 		let perms = job_perms(job, &project);
 		let mut rec = record(run_id, kind, job.prompt());
 		rec.mode = perms.label;
+		rec.effort = pick_effort(&settings, &i.effort, kind).to_string();
 		rec.allowed = perms.allow;
 		rec.denied_rules = perms.deny;
 		if let Job::Chat { images, .. } = job {
@@ -1727,8 +2086,22 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 		Job::Chat { text, .. } => Some(text.clone()),
 		_ => None,
 	};
+	// 어휘 사전은 새 세션으로 시작할 때 붙인다(아래 loop). 이어 붙인 세션은 첫 프롬프트에서 이미 받았다.
+	// 되돌리기는 계획을 거꾸로 따라가는 일이라 붙이지 않는다.
+	let gl_list = if project.glossary.enabled && kind != RunKind::Revert { crate::glossary::merged(&store, &project) } else { Vec::new() };
+	let (gl_block, gl_terms) = {
+		let q = match job {
+			Job::Chat { text, .. } => text.clone(),
+			Job::Plan { feedback } => format!("{}\n{}", view.note, feedback.as_deref().unwrap_or("")),
+			Job::Rework { feedback, .. } => format!("{}\n{feedback}", view.note),
+			_ => view.note.clone(),
+		};
+		crate::glossary::prompt_block(&gl_list, &q)
+	};
 	let mut kb_block = String::new();
 	if let Some(q) = kb_query.filter(|_| project.kb.enabled) {
+		// 사전의 비슷한 말을 덧붙여 찾는다. 문서가 다른 말로 적었어도 걸리게 한다.
+		let q = crate::glossary::expand_query(&gl_list, &q);
 		let hits = crate::kb::find(app, &project, &settings, &q, "").await;
 		if !hits.is_empty() {
 			kb_block = crate::kb::prompt_block(&hits);
@@ -1751,11 +2124,25 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 	if matches!(kind, RunKind::Implement | RunKind::Chat) {
 		let _ = std::fs::create_dir_all(Path::new(&view.dir).join("shots"));
 	}
+	// 함께 도는 구현이 잡은 파일을 고쳤으면 실행은 그대로 두고 흐름에 한 번씩 남긴다. 결과 확인 때 사람이 본다.
+	let mut overlapped: HashSet<String> = HashSet::new();
 	let outcome = loop {
-		let mut args = job_args(job, &settings, &project, &view.issue.model, Path::new(&view.dir), resumed.then_some(view.issue.session_id.as_str()));
+		let mut args = job_args(job, &settings, &project, &view.issue, Path::new(&view.dir), resumed.then_some(view.issue.session_id.as_str()));
 		let mut prompt = issue_prompt(job, &view, resumed);
 		if project.kb.enabled {
 			kb_add_dir(&mut args, &store, pid);
+		}
+		if !resumed && !gl_block.is_empty() {
+			prompt.push('\n');
+			prompt.push_str(&gl_block);
+			if let Ok(v) = store.update_issue(pid, iid, |i| {
+				if let Some(rec) = i.runs.iter_mut().find(|r| r.id == run_id) {
+					rec.glossary_terms = gl_terms.clone();
+				}
+				Ok(())
+			}) {
+				emit_issue(app, &v);
+			}
 		}
 		if !kb_block.is_empty() {
 			prompt.push('\n');
@@ -1775,6 +2162,15 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 				"docket://run",
 				Envelope { project_id: pid, target: "issue", target_id: iid, run_id, event: ev },
 			);
+			if let RunEvent::Change { rel, .. } = ev
+				&& let Some(who) = claims.touch(pid, &key, rel)
+				&& overlapped.insert(norm_path(rel))
+				&& let Ok(v) = store.update_issue(pid, iid, |i| {
+					i.log("overlap", format!("{rel} · 함께 도는 {who} 도 이 파일을 잡고 있다"));
+					Ok(())
+				}) {
+				emit_issue(app, &v);
+			}
 			// 바뀐 파일은 그때그때 남긴다. 실행 도중 앱이 꺼져도 무엇을 고쳤는지는 남는다.
 			// 되돌리는 편집은 남기지 않는다. 남기면 되돌린 뒤에도 「바꾼 파일」로 보이고, 다시 되돌리면 원래대로 돌아간다.
 			if kind != RunKind::Revert
@@ -1899,7 +2295,7 @@ fn register_memos(app: &AppHandle, pid: &str, tid: &str, memos: &[(String, Strin
 		let note = if title.is_empty() { format!("{body}\n") } else { format!("# {title}\n\n{body}\n") };
 		// 대화가 제목을 붙여 낸 메모는 그 제목(첫 줄)을 쓴다. 이미 Claude 가 지은 제목을 한 번 더 지을 까닭이 없다.
 		let mode = if title.is_empty() { mode } else { TitleMode::FirstLine };
-		match store.create_issue(pid, None, &note, auto_plan, mode, "") {
+		match store.create_issue(pid, None, &note, auto_plan, mode, "", "") {
 			Ok(v) => {
 				logs.push(format!("#{} {}", v.issue.number, v.issue.title));
 				emit_issue(app, &v);
@@ -1935,8 +2331,8 @@ pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: S
 	let did = match did {
 		Some(d) => {
 			let v = store.get_deliverable(pid, &d)?;
-			if request.trim().is_empty() && v.deliverable.guide.trim().is_empty() && v.refs.is_empty() {
-				return msg("무엇을 쓸지 적거나, 만드는 법에 작성 지침 · 템플릿을 넣어 주세요");
+			if request.trim().is_empty() && v.deliverable.guide.trim().is_empty() && v.deliverable.skill.trim().is_empty() && v.refs.is_empty() {
+				return msg("무엇을 쓸지 적거나, 만드는 법에 작성 지침 · 작성법 · 템플릿을 넣어 주세요");
 			}
 			d
 		}
@@ -1957,12 +2353,13 @@ pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: S
 	let runner = app.state::<Runner>();
 	let key = doc_key(pid, &did);
 	let ctl = runner.register(&key);
-	let (lock, slots) = (runner.project_lock(pid), runner.project_slots(pid));
-	// 파일로 만들기는 명령을 열어 두어 저장소를 쓸 수 있으므로 줄에 선다. 마크다운으로 받기는 읽기 도구만 연다.
-	let exclusive = view.deliverable.mode == "file";
+	let (claims, slots) = (runner.claims.clone(), runner.project_slots(pid));
+	// 파일로 만들기는 명령을 열어 두어 저장소를 쓸 수 있으므로 줄에 선다. 무엇을 쓸지 미리 알 수 없어 프로젝트 전체를 잡는다.
+	// 마크다운으로 받기는 읽기 도구만 연다.
+	let claim = (view.deliverable.mode == "file").then(|| Claim { key: key.clone(), label: format!("산출물 「{}」", view.deliverable.title), files: None, solo: String::new() });
 	let (app, pid) = (app.clone(), pid.to_string());
 	tauri::async_runtime::spawn(async move {
-		let turn = wait_turn(lock, slots, exclusive, &ctl).await;
+		let turn = wait_turn(claims, slots, &pid, claim, &ctl, |_| {}).await;
 		let res = match turn {
 			Some(_g) => run_doc_job(&app, &pid, &did, &request, &run_id, &ctl).await,
 			None => Ok(()),
@@ -1992,14 +2389,14 @@ pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: S
 fn doc_args(s: &Settings, p: &Project, data_dir: &Path, out: Option<&Path>) -> Vec<String> {
 	match out {
 		Some(dir) => {
-			let mut a = base_args(s, pick_model(s, "", RunKind::Document), &[data_dir, dir]);
+			let mut a = base_args(s, pick_model(s, "", RunKind::Document), pick_effort(s, "", RunKind::Document), &[data_dir, dir]);
 			let perms = Perms { tools: None, mode: "acceptEdits", allow: vec!["Bash".into(), "Skill".into()], deny: p.denied_tools.clone(), label: String::new() };
 			perm_args(&mut a, &perms, DENY_REPO_EDITS);
 			a.extend(["--json-schema".into(), FILE_SCHEMA.into()]);
 			a
 		}
 		None => {
-			let mut a = base_args(s, pick_model(s, "", RunKind::Document), &[data_dir]);
+			let mut a = base_args(s, pick_model(s, "", RunKind::Document), pick_effort(s, "", RunKind::Document), &[data_dir]);
 			perm_args(&mut a, &read_perms(p), &[]);
 			a.extend(["--json-schema".into(), DOC_SCHEMA.into()]);
 			a
@@ -2032,7 +2429,7 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		if let Some(j) = d.job.as_mut() {
 			j.phase = Phase::Running;
 		}
-		d.runs.push(record(run_id, RunKind::Document, ""));
+		d.runs.push(RunRecord { effort: pick_effort(&settings, "", RunKind::Document).to_string(), ..record(run_id, RunKind::Document, "") });
 		Ok(())
 	})?;
 	emit_deliverable(app, &view);
@@ -2049,7 +2446,20 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 	// 지식베이스에서 이 산출물과 가까운 자료를 붙인다. 자기 자신(이 산출물의 판)은 근거로 붙이지 않는다.
 	let d = &view.deliverable;
 	let query: String = format!("{} {} {} {}", d.title, d.note, d.guide, request).chars().take(4000).collect();
-	let hits = crate::kb::find(app, &project, &settings, &query, did).await;
+	let gl_list = if project.glossary.enabled { crate::glossary::merged(&store, &project) } else { Vec::new() };
+	let (gl_block, gl_terms) = crate::glossary::prompt_block(&gl_list, &query);
+	if !gl_block.is_empty() {
+		material.push_str(&format!("\n{gl_block}"));
+		if let Ok(v) = store.update_deliverable(pid, did, |d| {
+			if let Some(rec) = d.runs.iter_mut().find(|r| r.id == run_id) {
+				rec.glossary_terms = gl_terms.clone();
+			}
+			Ok(())
+		}) {
+			emit_deliverable(app, &v);
+		}
+	}
+	let hits = crate::kb::find(app, &project, &settings, &crate::glossary::expand_query(&gl_list, &query), did).await;
 	if !hits.is_empty() {
 		material.push_str(&format!("\n{}", crate::kb::prompt_block(&hits)));
 		if let Ok(v) = store.update_deliverable(pid, did, |d| {
@@ -2067,7 +2477,7 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 	let (mut args, prompt, target) = if as_file {
 		let (dir, base) = store.plan_file_output(pid, did)?;
 		let before = snapshot(&dir);
-		(doc_args(&settings, &project, &data_dir, Some(&dir)), doc_file_prompt(&material, &dir, &base), Some((dir, before)))
+		(doc_args(&settings, &project, &data_dir, Some(&dir)), doc_file_prompt(&material, &dir, &base, &view.deliverable.format), Some((dir, before)))
 	} else {
 		(doc_args(&settings, &project, &data_dir, None), doc_prompt(&material), None)
 	};
@@ -2233,10 +2643,10 @@ fn clean_title(text: &str) -> String {
 /// 결과 형식(--json-schema)은 쓰지 않는다. 도구를 모두 닫은 채로 구조화 결과가 나오는지 확인하지 못해, 부른 쪽이 답 글에서 JSON 을 꺼낸다.
 /// 끝나지 않는 호출이 순회를 붙잡지 않게 secs 에서 끊는다. 미래를 버리면 kill_on_drop 으로 claude 도 꺼진다.
 /// 성공하면 답 글과 비용(USD)을 돌려준다.
+/// model 이 비면 --model 을 빼 CLI 기본 모델로 돈다. 작성법 뽑기는 구현 모델을 쓰는데, 그 칸은 비어 있을 수 있다.
 pub async fn quick_call(exe: PathBuf, model: &str, system: &str, prompt: String, cwd: &Path, log: PathBuf, secs: u64) -> Option<(String, f64)> {
-	let args: Vec<String> = [
+	let mut args: Vec<String> = [
 		"-p", "--output-format", "stream-json", "--verbose",
-		"--model", model,
 		"--tools", "",
 		"--no-session-persistence",
 		"--disable-slash-commands",
@@ -2246,6 +2656,9 @@ pub async fn quick_call(exe: PathBuf, model: &str, system: &str, prompt: String,
 	]
 	.map(String::from)
 	.to_vec();
+	if !model.trim().is_empty() {
+		args.extend(["--model".into(), model.trim().to_string()]);
+	}
 	let spec = Spec { exe, cwd: cwd.to_path_buf(), args, prompt, log, root: cwd.to_string_lossy().to_string(), run_id: "quick".into() };
 	let ctl = RunCtl::new();
 	match tokio::time::timeout(Duration::from_secs(secs), exec(spec, &ctl, |_, _| {})).await {
@@ -2380,6 +2793,22 @@ mod tests {
 		assert_eq!(suggest_rules("WebFetch", &serde_json::json!({ "url": "https://docs.rs/serde/latest" }), ""), vec!["WebFetch(domain:docs.rs)"]);
 	}
 
+	/// 대기열 묶기: 글은 차례대로 빈 줄로 잇고, 사라진 첨부 · 겹친 첨부는 걸러 내고, 하나라도 고칠 수 있으면 고칠 수 있게 보낸다.
+	#[test]
+	fn batch_job_joins_queue_in_order() {
+		let q = |text: &str, edit: bool, images: &[&str]| QueuedChat { text: text.into(), edit, images: images.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+		let have = vec!["a.png".to_string(), "b.png".to_string()];
+		let Some(Job::Chat { text, edit, images }) = batch_job(&[q("첫 물음 ", false, &["a.png"]), q("", false, &["gone.png"]), q("둘째", true, &["a.png", "b.png"])], &have) else {
+			panic!("묶지 못했다");
+		};
+		assert_eq!(text, "첫 물음\n\n둘째");
+		assert!(edit);
+		assert_eq!(images, vec!["a.png", "b.png"]);
+		let Some(Job::Chat { edit, .. }) = batch_job(&[q("읽기만", false, &[])], &have) else { panic!() };
+		assert!(!edit);
+		assert!(batch_job(&[q("  ", true, &["gone.png"])], &have).is_none(), "빈 묶음을 보냈다");
+	}
+
 	/// 제목 짓기: 프롬프트에서 그림 줄 · 첨부 경로를 걷고, 답에서 따옴표 · 머리표 · 덧붙인 설명을 걷는다.
 	#[test]
 	fn title_prompt_and_answer_are_trimmed() {
@@ -2408,23 +2837,88 @@ mod tests {
 		assert!(!absorb_terminal(&mut i, &turns), "다시 읽어도 또 담지 않는다");
 	}
 
+	/// 함께 돌 근거: 계획 · 고친 파일을 저장소 기준으로 모으고, 폴더 · 와일드카드 · 저장소 밖 · 빈 목록 · 「모두 허용」 · 끈 프로젝트는 한 줄로 세운다.
+	#[test]
+	fn claim_files_only_when_plan_is_specific() {
+		let root = std::env::temp_dir().join(format!("docket-claim-{}", short_id()));
+		std::fs::create_dir_all(root.join("src")).unwrap();
+		let p = Project { path: root.to_string_lossy().into(), ..Default::default() };
+		let plan = |files: &[&str]| Plan { files: files.iter().map(|f| PlanFile { path: f.to_string(), change: String::new() }).collect(), ..Default::default() };
+		let issue = |files: &[&str]| Issue { number: 3, plan: Some(plan(files)), ..Default::default() };
+		let imp = Job::Implement { instruction: None, allow_all: false };
+		let abs = format!("{}\\src\\b.rs", root.to_string_lossy());
+
+		let mut i = issue(&["./src/a.rs", "src\\A.rs", &abs]);
+		i.plan.as_mut().unwrap().steps.push(PlanStep { files: vec!["README.md".into()], ..Default::default() });
+		i.changes.push(FileChange { rel: "src/c.rs".into(), ..Default::default() });
+		assert_eq!(claim_files(&imp, &i, &p), Ok(vec!["src/a.rs".to_string(), "src/b.rs".into(), "README.md".into(), "src/c.rs".into()]));
+		assert_eq!(claim_files(&Job::Revert, &i, &p), Ok(vec!["src/c.rs".to_string()]), "되돌리기는 고친 파일만 잡는다");
+
+		assert_eq!(claim_files(&imp, &issue(&["src"]), &p), Err("계획에 폴더가 있어 한 줄로 섬"));
+		assert_eq!(claim_files(&imp, &issue(&["src/*.rs"]), &p), Err("계획에 폴더가 있어 한 줄로 섬"));
+		assert_eq!(claim_files(&imp, &issue(&["../x.rs"]), &p), Err("저장소 밖 파일이 있어 한 줄로 섬"));
+		assert_eq!(claim_files(&imp, &issue(&["C:\\elsewhere\\x.rs"]), &p), Err("저장소 밖 파일이 있어 한 줄로 섬"));
+		assert_eq!(claim_files(&imp, &issue(&[]), &p), Err("계획에 바꿀 파일이 없어 한 줄로 섬"));
+		assert_eq!(claim_files(&Job::Implement { instruction: None, allow_all: true }, &issue(&["a.rs"]), &p), Err("모두 허용이라 한 줄로 섬"));
+		assert_eq!(claim_files(&imp, &issue(&["a.rs"]), &Project { parallel_impl: false, ..p.clone() }), Err(""));
+		let _ = std::fs::remove_dir_all(&root);
+	}
+
+	/// 잡기 장부: 겹치지 않으면 IMPL_SLOTS 개까지 함께, 겹치면 · 전체를 잡은 것이 있으면 기다리고, 겹치는 것끼리는 먼저 선 차례대로 들어간다.
+	#[test]
+	fn claims_let_disjoint_files_run_together() {
+		let c = Claims::default();
+		let files = |key: &str, f: &[&str]| Claim { key: key.into(), label: format!("#{key}"), files: Some(f.iter().map(|s| s.to_string()).collect()), solo: String::new() };
+		let whole = |key: &str| Claim { key: key.into(), label: format!("#{key}"), files: None, solo: "계획에 폴더가 있어 한 줄로 섬".into() };
+
+		let a = c.enqueue("p", files("1", &["src/a.rs"]));
+		assert_eq!(c.try_take("p", a), Ok(()));
+		let b = c.enqueue("p", files("2", &["src/b.rs"]));
+		assert_eq!(c.try_take("p", b), Ok(()), "겹치지 않으면 함께 돈다");
+		let d = c.enqueue("p", files("3", &["SRC/A.rs"]));
+		assert_eq!(c.try_take("p", d), Err("파일이 겹쳐 기다림 · #1 · src/a.rs".into()), "대소문자만 달라도 같은 파일이다");
+		let e = c.enqueue("p", files("4", &["src/e.rs"]));
+		assert_eq!(c.try_take("p", e), Err(format!("함께 도는 구현이 {IMPL_SLOTS}개라 기다림")));
+		assert_eq!(c.others("p", "1"), vec!["src/b.rs".to_string()]);
+
+		// 1 이 끝나면 3 이 들어간다. 1 이 고친 계획 밖 파일은 1 이 놓을 때까지 1 의 것이다.
+		assert_eq!(c.touch("p", "1", "src/x.rs"), None);
+		assert_eq!(c.touch("p", "2", "src/x.rs"), Some("#1".into()), "남이 잡은 파일을 고치면 그 이름을 알린다");
+		c.free("p", "1");
+		assert_eq!(c.try_take("p", d), Ok(()));
+
+		// 전체를 잡는 것은 도는 것이 모두 끝나야 들어가고, 뒤에 온 것은 그것을 앞지르지 않는다.
+		let w = c.enqueue("p", whole("5"));
+		assert_eq!(c.try_take("p", w), Err("앞선 작업을 기다림 · #2 · 계획에 폴더가 있어 한 줄로 섬".into()));
+		c.leave("p", e);
+		c.free("p", "2");
+		c.free("p", "3");
+		let f = c.enqueue("p", files("6", &["src/f.rs"]));
+		assert!(c.try_take("p", f).is_err(), "먼저 줄 선 전체 잡기를 앞질렀다");
+		assert_eq!(c.try_take("p", w), Ok(()));
+		c.free("p", "5");
+		assert_eq!(c.try_take("p", f), Ok(()));
+		assert!(c.try_take("q", 99).is_ok() && c.others("q", "x").is_empty(), "다른 프로젝트는 따로 센다");
+	}
+
 	/// 권한 인자: 모드는 늘 적고(전역 기본 모드 auto 를 따르지 않게), 「모두 허용」도 위험 플래그 없이 허용 목록으로 연다.
 	#[test]
 	fn perm_args_never_skip_permissions() {
 		let p = Project { allowed_tools: vec!["Bash(npm test:*)".into()], ..Default::default() };
 		let s = Settings::default();
 		let dir = Path::new("x");
-		let plan = job_args(&Job::Plan { feedback: None }, &s, &p, "", dir, None);
+		let i = Issue::default();
+		let plan = job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None);
 		let at = |a: &[String], k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
 		assert_eq!(at(&plan, "--permission-mode").as_deref(), Some("default"));
 		assert_eq!(at(&plan, "--tools").as_deref(), Some("Read,Grep,Glob,Bash"));
 		assert!(plan.iter().any(|x| x == "Bash(svn log:*)") && !plan.iter().any(|x| x == "Bash(npm test:*)"), "계획에 구현용 허용 목록이 섞였다");
 		assert!(at(&plan, "--settings").unwrap().contains("git push"), "기본 거부 목록이 걸리지 않았다");
 
-		let once = job_args(&Job::Implement { instruction: None, allow_all: true }, &s, &p, "", dir, None);
+		let once = job_args(&Job::Implement { instruction: None, allow_all: true }, &s, &p, &i, dir, None);
 		assert_eq!(at(&once, "--permission-mode").as_deref(), Some("acceptEdits"));
 		assert!(once.iter().any(|x| x == "Bash") && once.iter().any(|x| x == "Bash(npm test:*)"));
-		let all = job_args(&Job::Revert, &s, &Project { impl_mode: "bypassPermissions".into(), ..p.clone() }, "", dir, None);
+		let all = job_args(&Job::Revert, &s, &Project { impl_mode: "bypassPermissions".into(), ..p.clone() }, &i, dir, None);
 		for a in [&plan, &once, &all] {
 			assert!(!a.iter().any(|x| x.contains("dangerously")), "위험 플래그를 썼다: {a:?}");
 		}
@@ -2437,17 +2931,43 @@ mod tests {
 		let p = Project::default();
 		let dir = Path::new("x");
 		let model = |a: &[String]| a.iter().position(|x| x == "--model").map(|i| a[i + 1].clone());
-		let none = job_args(&Job::Plan { feedback: None }, &Settings::default(), &p, "", dir, None);
+		let i = Issue::default();
+		let none = job_args(&Job::Plan { feedback: None }, &Settings::default(), &p, &i, dir, None);
 		assert_eq!(model(&none), None);
 
 		let s = Settings { plan_model: "opus".into(), impl_model: "sonnet".into(), chat_model: "haiku".into(), ..Default::default() };
 		let chat = Job::Chat { text: "물음".into(), edit: false, images: vec![] };
-		assert_eq!(model(&job_args(&Job::Plan { feedback: None }, &s, &p, "", dir, None)).as_deref(), Some("opus"));
-		assert_eq!(model(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, "", dir, None)).as_deref(), Some("sonnet"));
-		assert_eq!(model(&job_args(&Job::Revert, &s, &p, "", dir, None)).as_deref(), Some("sonnet"));
-		assert_eq!(model(&job_args(&chat, &s, &p, "", dir, None)).as_deref(), Some("haiku"));
-		assert_eq!(model(&job_args(&chat, &s, &p, " fable ", dir, None)).as_deref(), Some("fable"), "메모 모델이 앞서지 않았다");
+		assert_eq!(model(&job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None)).as_deref(), Some("opus"));
+		assert_eq!(model(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None)).as_deref(), Some("sonnet"));
+		assert_eq!(model(&job_args(&Job::Revert, &s, &p, &i, dir, None)).as_deref(), Some("sonnet"));
+		assert_eq!(model(&job_args(&chat, &s, &p, &i, dir, None)).as_deref(), Some("haiku"));
+		let memo = Issue { model: " fable ".into(), ..Default::default() };
+		assert_eq!(model(&job_args(&chat, &s, &p, &memo, dir, None)).as_deref(), Some("fable"), "메모 모델이 앞서지 않았다");
 		assert_eq!(model(&doc_args(&s, &p, dir, None)).as_deref(), Some("sonnet"));
+	}
+
+	/// effort: 모델과 같은 순서로 고르되 따로 고른다. 모두 비면 --effort 를 넘기지 않는다.
+	#[test]
+	fn effort_follows_memo_then_run_kind() {
+		let p = Project::default();
+		let dir = Path::new("x");
+		let effort = |a: &[String]| a.iter().position(|x| x == "--effort").map(|i| a[i + 1].clone());
+		let i = Issue::default();
+		assert_eq!(effort(&job_args(&Job::Plan { feedback: None }, &Settings::default(), &p, &i, dir, None)), None);
+		assert_eq!(effort(&doc_args(&Settings::default(), &p, dir, None)), None);
+
+		let s = Settings { plan_effort: "high".into(), impl_effort: "medium".into(), chat_effort: "low".into(), ..Default::default() };
+		let chat = Job::Chat { text: "물음".into(), edit: false, images: vec![] };
+		assert_eq!(effort(&job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None)).as_deref(), Some("high"));
+		assert_eq!(effort(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None)).as_deref(), Some("medium"));
+		assert_eq!(effort(&job_args(&Job::Revert, &s, &p, &i, dir, None)).as_deref(), Some("medium"));
+		assert_eq!(effort(&job_args(&chat, &s, &p, &i, dir, None)).as_deref(), Some("low"));
+		assert_eq!(effort(&doc_args(&s, &p, dir, None)).as_deref(), Some("medium"), "산출물이 구현 effort 를 따르지 않았다");
+
+		let memo = Issue { effort: " max ".into(), ..Default::default() };
+		assert_eq!(effort(&job_args(&chat, &s, &p, &memo, dir, None)).as_deref(), Some("max"), "메모 effort 가 앞서지 않았다");
+		let model_only = Issue { model: "opus".into(), ..Default::default() };
+		assert_eq!(effort(&job_args(&chat, &s, &p, &model_only, dir, None)).as_deref(), Some("low"), "메모 모델만 골랐는데 effort 가 설정을 따르지 않았다");
 	}
 
 	/// 결과 화면: 그림 파일만 실행 폴더로 모으고, 이슈 폴더 것은 옮기고 밖의 것은 복사한다.
@@ -2572,7 +3092,7 @@ mod tests {
 		let spec = Spec {
 			exe: exe.clone(),
 			cwd: PathBuf::from(&root),
-			args: job_args(&job, &settings, &project, "", &issue_dir, None),
+			args: job_args(&job, &settings, &project, &view.issue, &issue_dir, None),
 			prompt: issue_prompt(&job, &view, false),
 			log: issue_dir.join("plan.jsonl"),
 			root: root.clone(),
@@ -2601,7 +3121,7 @@ mod tests {
 		let spec = Spec {
 			exe: exe.clone(),
 			cwd: PathBuf::from(&root),
-			args: job_args(&job, &settings, &project, "", &issue_dir, Some(&view.issue.session_id)),
+			args: job_args(&job, &settings, &project, &view.issue, &issue_dir, Some(&view.issue.session_id)),
 			prompt: issue_prompt(&job, &view, true),
 			log: issue_dir.join("chat.jsonl"),
 			root: root.clone(),
@@ -2631,7 +3151,7 @@ mod tests {
 		let spec = Spec {
 			exe: exe.clone(),
 			cwd: PathBuf::from(&root),
-			args: job_args(&job, &settings, &project, "", &issue_dir, Some(&view.issue.session_id)),
+			args: job_args(&job, &settings, &project, &view.issue, &issue_dir, Some(&view.issue.session_id)),
 			prompt: issue_prompt(&job, &view, true),
 			log: issue_dir.join("impl.jsonl"),
 			root: root.clone(),
@@ -2654,7 +3174,7 @@ mod tests {
 		let spec = Spec {
 			exe,
 			cwd: PathBuf::from(&root),
-			args: job_args(&job, &settings, &project, "", &issue_dir, Some(&view.issue.session_id)),
+			args: job_args(&job, &settings, &project, &view.issue, &issue_dir, Some(&view.issue.session_id)),
 			prompt: issue_prompt(&job, &view, true),
 			log: issue_dir.join("revert.jsonl"),
 			root: root.clone(),
@@ -2690,7 +3210,7 @@ mod doc_tests {
 		let view = DeliverableView {
 			deliverable: Deliverable { title: "함수 목록".into(), guide: "calc.py 의 함수를 양식의 표에 채운다.".into(), mode: "file".into(), ..Default::default() },
 			dir: data.to_string_lossy().into(),
-			refs: vec![RefFile { name: "양식.md".into(), size: 0, kind: "direct".into(), text_path: String::new() }],
+			refs: vec![RefFile { name: "양식.md".into(), size: 0, kind: "direct".into(), text_path: String::new(), template: false }],
 			output_dir: out.to_string_lossy().into(),
 			next_name: String::new(),
 		};
@@ -2699,7 +3219,7 @@ mod doc_tests {
 			exe,
 			cwd: PathBuf::from(&root),
 			args: doc_args(&settings, &project, &data, Some(&out)),
-			prompt: doc_file_prompt(&doc_material(&view, "", None), &out, "함수_목록_v1"),
+			prompt: doc_file_prompt(&doc_material(&view, "", None), &out, "함수_목록_v1", ""),
 			log: base.join("run.jsonl"),
 			root: root.clone(),
 			run_id: "t".into(),
@@ -2752,7 +3272,7 @@ mod perm_tests {
 		let spec = Spec {
 			exe,
 			cwd: PathBuf::from(&root),
-			args: job_args(&job, &settings, &project, "", &dir, None),
+			args: job_args(&job, &settings, &project, &view.issue, &dir, None),
 			prompt: issue_prompt(&job, &view, true),
 			log: dir.join("read.jsonl"),
 			root: root.clone(),

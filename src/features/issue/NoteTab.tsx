@@ -6,7 +6,6 @@ import { attempt, ContextActions, fileActions } from "@/components/ActionMenu";
 import { Markdown } from "@/components/Markdown";
 import { MarkdownEditor, type EditorHandle } from "@/components/MarkdownEditor";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
@@ -14,7 +13,7 @@ import { attachmentPath, attachmentRef, delayText, fileUrl, isImage } from "@/li
 import { useSettings } from "@/lib/queries";
 import type { Issue } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { MEMO_MODELS } from "../settings/Settings";
+import { RunPicker } from "../settings/RunPicker";
 
 /**
  * 메모는 입력이 멈추면 저장한다. 따로 저장 단추를 두지 않는 것은 포스트잇이라서다.
@@ -105,21 +104,15 @@ export function NoteTab({ issue }: { issue: Issue }) {
 				</div>
 				<span className="text-[12px] text-subtle">{locked ? "실행 중에는 고칠 수 없습니다" : editing ? (saved ? "저장됨" : "저장하는 중") : ""}</span>
 				<div className="flex-1" />
-				<Select
-					value={issue.model || "default"}
-					onValueChange={(v) => void api.issueSetModel(issue.projectId, issue.id, v === "default" ? "" : v).catch((e) => toast.error(errorText(e)))}
-				>
-					<SelectTrigger size="sm" className="w-32" aria-label="이 메모의 모델" title="이 메모의 계획 · 구현 · 대화에 쓸 모델. 다음 실행부터 쓰입니다.">
-						<SelectValue />
-					</SelectTrigger>
-					<SelectContent className="pop">
-						{MEMO_MODELS.map((m) => (
-							<SelectItem key={m.value} value={m.value}>
-								{m.label}
-							</SelectItem>
-						))}
-					</SelectContent>
-				</Select>
+				<RunPicker
+					model={issue.model}
+					effort={issue.effort}
+					onModel={(v) => void api.issueSetModel(issue.projectId, issue.id, v).catch((e) => toast.error(errorText(e)))}
+					onEffort={(v) => void api.issueSetEffort(issue.projectId, issue.id, v).catch((e) => toast.error(errorText(e)))}
+					followLabel="설정 따름"
+					className="max-w-48 min-w-32"
+					title="이 메모의 계획 · 구현 · 대화에 쓸 모델과 effort. 다음 실행부터 쓰입니다."
+				/>
 				{issue.status === "inbox" && (
 					<label className="flex items-center gap-2 text-[12.5px] text-muted-foreground">
 						<Switch checked={issue.autoPlan} onCheckedChange={(on) => void api.issueSetAutoPlan(issue.projectId, issue.id, on)} />

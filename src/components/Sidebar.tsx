@@ -52,10 +52,10 @@ export function Sidebar() {
 						key={p.id}
 						project={p}
 						issues={lists[i]?.data ?? []}
-						active={p.id === projectId && (view === "board" || view === "deliverables" || view === "talks" || view === "knowledge")}
+						active={p.id === projectId && (view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary")}
 						onClick={() => {
 							setProject(p.id);
-							if (view !== "deliverables" && view !== "talks" && view !== "knowledge") setView("board");
+							if (view !== "deliverables" && view !== "talks" && view !== "knowledge" && view !== "glossary") setView("board");
 						}}
 					/>
 				))}

@@ -70,6 +70,7 @@ export const HISTORY_LABEL: Record<string, string> = {
 	drop: "보류",
 	reopen: "다시 엶",
 	stop: "중지",
+	overlap: "파일 겹침",
 	error: "실패",
 	memo: "메모 등록",
 	deliverable: "산출물 자동 갱신",

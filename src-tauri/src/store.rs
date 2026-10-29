@@ -8,6 +8,7 @@
 //!                                      프로젝트 대화도 여기 둔다 (issue.json 의 talk · note.md 없음)
 //!   projects/<pid>/deliverables/<did>/ meta.json · v1/<파일> · runs/<rid>.jsonl
 //!   projects/<pid>/kb/                 지식베이스 · catalog.json · inbox/ · text/ (kb.rs)
+//!   projects/<pid>/glossary.json       어휘 사전 용어 목록 (glossary.rs)
 //!   trash/<시각>-<이름>/                  지운 것은 여기로 옮긴다
 //!   plugins/<id>.json                     플러그인 정의 (사용자가 쓴다 · plugins.rs)
 //! ```
@@ -284,6 +285,7 @@ impl Store {
 		p.allowed_tools = input.allowed_tools.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
 		p.denied_tools = input.denied_tools.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
 		p.plan_vcs_read = input.plan_vcs_read;
+		p.parallel_impl = input.parallel_impl;
 		p.deliverables_dir = dir.to_string();
 		p.naming = input.naming.trim().to_string();
 		p.naming_underscore = input.naming_underscore;
@@ -311,6 +313,76 @@ impl Store {
 		let out = p.clone();
 		write_json(&self.projects_path(), &list)?;
 		Ok(out)
+	}
+
+	/// 어휘 사전 설정만 바꾼다. 자기 자신 · 목록에 없는 프로젝트는 걸러 낸다.
+	pub fn save_glossary_settings(&self, pid: &str, g: &ProjectGlossary) -> Result<Project> {
+		let _g = self.guard();
+		let mut list: Vec<Project> = read_json(&self.projects_path())?;
+		let ids: Vec<String> = list.iter().map(|p| p.id.clone()).collect();
+		let p = list.iter_mut().find(|p| p.id == pid).ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
+		let mut include: Vec<String> = Vec::new();
+		for id in &g.include {
+			if id != pid && ids.contains(id) && !include.contains(id) {
+				include.push(id.clone());
+			}
+		}
+		p.glossary = ProjectGlossary { enabled: g.enabled, include };
+		let out = p.clone();
+		write_json(&self.projects_path(), &list)?;
+		Ok(out)
+	}
+
+	pub fn glossary_path(&self, pid: &str) -> PathBuf {
+		self.project_dir(pid).join("glossary.json")
+	}
+
+	/// 어휘 사전. 파일이 없거나 지워진 프로젝트면 빈 사전이다.
+	pub fn glossary(&self, pid: &str) -> GlossaryFile {
+		safe_id(pid).ok().and_then(|id| read_json(&self.glossary_path(id)).ok()).unwrap_or_default()
+	}
+
+	/// 용어 표 전체를 바꾼다. 빈 용어는 버리고 같은 용어(대소문자 무시)는 앞의 것에 합친다.
+	/// expected 가 지금 파일의 updated_at 과 다르면 다른 화면이 먼저 저장한 것이라 덮지 않는다.
+	pub fn save_glossary_entries(&self, pid: &str, entries: &[GlossaryEntry], expected: i64) -> Result<GlossaryFile> {
+		let path = self.glossary_path(safe_id(pid)?);
+		let _g = self.guard();
+		let cur: GlossaryFile = read_json(&path)?;
+		if cur.updated_at != expected {
+			return msg("다른 곳에서 어휘 사전을 먼저 고쳤습니다. 화면을 새로 읽은 뒤 다시 고쳐 주세요");
+		}
+		let mut out: Vec<GlossaryEntry> = Vec::new();
+		for e in entries {
+			let term = e.term.trim();
+			if term.is_empty() {
+				continue;
+			}
+			let aliases: Vec<String> = e.aliases.iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty() && a.to_lowercase() != term.to_lowercase()).collect();
+			match out.iter_mut().find(|o| o.term.to_lowercase() == term.to_lowercase()) {
+				Some(o) => {
+					if o.meaning.is_empty() {
+						o.meaning = e.meaning.trim().to_string();
+					}
+					for a in aliases {
+						if !o.aliases.contains(&a) {
+							o.aliases.push(a);
+						}
+					}
+				}
+				None => {
+					let mut uniq: Vec<String> = Vec::new();
+					for a in aliases {
+						if !uniq.contains(&a) {
+							uniq.push(a);
+						}
+					}
+					out.push(GlossaryEntry { term: term.to_string(), meaning: e.meaning.trim().to_string(), aliases: uniq });
+				}
+			}
+		}
+		let file = GlossaryFile { updated_at: now_ms().max(cur.updated_at + 1), entries: out };
+		write_json(&path, &file)?;
+		Ok(file)
 	}
 
 	pub fn kb_dir(&self, pid: &str) -> PathBuf {
@@ -360,6 +432,10 @@ impl Store {
 			let _g = self.guard();
 			let mut list: Vec<Project> = read_json(&self.projects_path())?;
 			list.retain(|p| p.id != id);
+			// 이 프로젝트의 어휘 사전을 함께 쓰던 프로젝트에서 참조를 걷는다. 남기면 화면에 이름 없는 칩이 남는다.
+			for p in list.iter_mut() {
+				p.glossary.include.retain(|x| x != id);
+			}
 			write_json(&self.projects_path(), &list)?;
 		}
 		let dir = self.project_dir(id);
@@ -477,8 +553,8 @@ impl Store {
 
 	/// 화면이 미리 정한 id 를 받는다. 메모를 붙이기 전에 붙여 넣은 이미지가 그 id 의 폴더에 먼저 저장된다.
 	/// title_mode 가 auto 여도 첫 줄을 임시 제목으로 넣는다. 지은 제목은 제목 짓기 순회가 나중에 바꾼다.
-	/// model 을 비우면 설정의 실행별 모델을 따른다.
-	pub fn create_issue(&self, pid: &str, iid: Option<&str>, note: &str, auto_plan: bool, title_mode: TitleMode, model: &str) -> Result<IssueView> {
+	/// model · effort 를 비우면 설정의 실행별 값을 따른다.
+	pub fn create_issue(&self, pid: &str, iid: Option<&str>, note: &str, auto_plan: bool, title_mode: TitleMode, model: &str, effort: &str) -> Result<IssueView> {
 		safe_id(pid)?;
 		let id = match iid {
 			Some(i) => safe_id(i)?.to_string(),
@@ -506,6 +582,7 @@ impl Store {
 				status: Status::Inbox,
 				auto_plan,
 				model: model.trim().to_string(),
+				effort: effort.trim().to_string(),
 				title: title_of(note),
 				title_mode,
 				created_at: now,
@@ -667,6 +744,7 @@ impl Store {
 							size: e.metadata().map(|m| m.len()).unwrap_or(0),
 							kind: kind.into(),
 							text_path: if kind == "extract" && text.is_file() { text.to_string_lossy().to_string() } else { String::new() },
+							template: false,
 							name,
 						}
 					})
@@ -682,7 +760,7 @@ impl Store {
 		let n = Self::next_n(&d);
 		DeliverableView {
 			dir: self.deliverable_dir(&d.project_id, &d.id).to_string_lossy().to_string(),
-			refs: self.list_refs(&d.project_id, &d.id),
+			refs: self.list_refs(&d.project_id, &d.id).into_iter().map(|r| RefFile { template: r.name == d.template, ..r }).collect(),
 			output_dir: self.output_dir(p.as_ref(), &d, n).to_string_lossy().to_string(),
 			next_name: Self::file_name_for(p.as_ref(), &d, n, "md"),
 			deliverable: d,
@@ -917,6 +995,13 @@ impl Store {
 				}
 			}
 			for v in self.list_deliverables(&p.id)? {
+				if v.deliverable.learn.is_some() {
+					self.update_deliverable(&p.id, &v.deliverable.id, |d| {
+						d.learn = None;
+						d.learn_error = "앱이 닫혀 작성법 뽑기가 끊겼습니다".into();
+						Ok(())
+					})?;
+				}
 				if v.deliverable.job.is_some() {
 					self.update_deliverable(&p.id, &v.deliverable.id, |d| {
 						d.job = None;

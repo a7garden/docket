@@ -9,6 +9,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { Board } from "@/features/board/Board";
 import { ClaudeConfig } from "@/features/claude/ClaudeConfig";
 import { Deliverables } from "@/features/deliverables/Deliverables";
+import { Glossary } from "@/features/glossary/Glossary";
 import { IssueSheet } from "@/features/issue/IssueSheet";
 import { Knowledge } from "@/features/knowledge/Knowledge";
 import { ProjectHeader } from "@/features/project/ProjectHeader";
@@ -65,20 +66,21 @@ export default function App() {
 		if (projects && !project && projects.length) setProject(projects[0].id);
 	}, [projects, project, setProject]);
 
-	const projectView = view === "board" || view === "deliverables" || view === "talks" || view === "knowledge";
-	const title = view === "claude" ? "Claude 설정" : view === "settings" ? "설정" : null;
-
+	const projectView = view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary";
 	return (
 		<div className="flex h-full flex-col">
 			<TitleBar />
 			<div className="flex min-h-0 flex-1 border-t border-border">
 				<Sidebar />
 				<main className="flex min-w-0 flex-1 flex-col gap-5 px-6 pt-5 pb-4">
-					{title ? (
+					{view === "claude" ? (
 						<>
-							<h1 className="text-[18px] font-semibold tracking-[-0.02em]">{title}</h1>
-							{view === "claude" ? <ClaudeConfig /> : <Settings />}
+							<h1 className="text-[18px] font-semibold tracking-[-0.02em]">Claude 설정</h1>
+							<ClaudeConfig />
 						</>
+					) : view === "settings" ? (
+						// 설정은 제목을 스스로 그린다. 가운데로 모은 목차 · 본문과 왼쪽 끝을 맞추려면 같은 덩어리 안에 있어야 한다.
+						<Settings />
 					) : !isLoading && !project ? (
 						<Welcome />
 					) : project && projectView ? (
@@ -90,6 +92,8 @@ export default function App() {
 								<Talks project={project} />
 							) : view === "knowledge" ? (
 								<Knowledge project={project} />
+							) : view === "glossary" ? (
+								<Glossary project={project} />
 							) : (
 								<Deliverables project={project} />
 							)}
@@ -98,7 +102,8 @@ export default function App() {
 					) : null}
 				</main>
 			</div>
-			<Toaster position="bottom-right" theme={theme} />
+			{/* 2026.10.29 : 오른쪽 아래 → 위 가운데. 오른쪽 아래의 진행 버튼을 가렸다. 제목 줄(h-9 · 36px)을 덮지 않게 8px 아래에 띄운다. */}
+			<Toaster position="top-center" offset={{ top: 44 }} mobileOffset={{ top: 44 }} theme={theme} />
 		</div>
 	);
 }

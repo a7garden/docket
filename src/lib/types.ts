@@ -10,6 +10,10 @@ export interface Settings {
 	planModel: string;
 	implModel: string;
 	chatModel: string;
+	/** 실행별 effort(low · medium · high · xhigh · max). 비우면 --effort 를 넘기지 않는다. 메모에서 고른 effort 가 앞선다. */
+	planEffort: string;
+	implEffort: string;
+	chatEffort: string;
 	autoPlan: boolean;
 	autoPlanDelaySec: number;
 	/** 새 메모의 제목을 지을 모델. 비우면 첫 줄을 제목으로 쓴다. */
@@ -21,6 +25,10 @@ export interface Settings {
 	enabledPlugins: string[];
 	/** 지식베이스의 색인 카드 · 고르기 다듬기 · 자동 갱신 판정 모델. 비우면 제목 모델, 그것도 비면 haiku. */
 	kbCardModel: string;
+	/** 대화 · 다시 계획 · 수정 요청 입력칸의 보내기 키. enter 면 Shift+Enter 로 줄을 바꾼다. */
+	sendKey: "ctrlEnter" | "enter";
+	/** 산출물에 파일을 넣거나 새로 등록하면 작성법 · 어휘 · 형식 · 템플릿 · 이름 규칙을 뽑는다 (구현 모델) */
+	recipeAuto: boolean;
 }
 
 /** plugins/*.json 의 정의. 자리표시: {cwd} {claude} {session} {title} */
@@ -87,12 +95,38 @@ export interface Project {
 	allowedTools: string[];
 	deniedTools: string[];
 	planVcsRead: boolean;
+	/** 계획에 적힌 파일이 겹치지 않는 구현을 함께 돌린다 */
+	parallelImpl: boolean;
 	deliverablesDir: string;
 	naming: string;
 	namingUnderscore: boolean;
 	archiveDir: string;
 	/** 지식베이스. 프로젝트 저장(projectSave)은 이 칸을 덮지 않는다 — kbSave 로만 바꾼다. */
 	kb: ProjectKb;
+	/** 어휘 사전 설정. 프로젝트 저장(projectSave)은 이 칸을 덮지 않는다 — glossarySaveSettings 로만 바꾼다. */
+	glossary: ProjectGlossary;
+}
+
+export interface ProjectGlossary {
+	enabled: boolean;
+	/** 함께 쓸 다른 프로젝트의 id */
+	include: string[];
+}
+
+export interface GlossaryEntry {
+	term: string;
+	meaning: string;
+	aliases: string[];
+}
+
+export interface GlossaryView {
+	glossary: ProjectGlossary;
+	/** 저장할 때 돌려보낸다. 그 사이 다른 곳에서 저장했으면 거절된다. */
+	updatedAt: number;
+	entries: GlossaryEntry[];
+	others: { id: string; name: string; count: number }[];
+	/** 다른 프로젝트에서 함께 쓰는 용어. from 은 그 프로젝트 이름이다. */
+	shared: (GlossaryEntry & { from: string })[];
 }
 
 export interface ProjectKb {
@@ -171,6 +205,8 @@ export interface RunState {
 	phase: Phase;
 	runId: string;
 	queuedAt: number;
+	/** 줄에서 무엇을 기다리는지. 비면 기본 문구를 보인다. */
+	waitFor?: string;
 }
 
 export interface PlanStep {
@@ -248,6 +284,8 @@ export interface RunRecord {
 	durationMs: number;
 	numTurns: number;
 	model: string;
+	/** 이 실행에 넘긴 effort. 비면 CLI 기본값으로 돌았다. */
+	effort: string;
 	error: string;
 	/** 대화 실행에서 사용자가 보낸 글. 다른 실행은 비어 있다. */
 	prompt: string;
@@ -261,6 +299,8 @@ export interface RunRecord {
 	denials: Denial[];
 	/** 지식베이스에서 찾아 프롬프트에 붙인 구획. 옛 기록에는 없다. */
 	kbHits?: KbHit[];
+	/** 어휘 사전에서 프롬프트에 붙인 용어. 다른 프로젝트 것은 「용어 · 프로젝트」 꼴이다. 옛 기록에는 없다. */
+	glossaryTerms?: string[];
 }
 
 /** 권한 때문에 막힌 도구 호출. rule: 거부 규칙에 걸림 · ask: 허용 목록에 없음 */
@@ -288,6 +328,15 @@ export interface Suggestion {
 
 export type TitleMode = "firstLine" | "auto" | "manual";
 
+/** 실행이 끝나기를 기다리는 질문 하나. 넣을 때의 읽기 전용 여부와 첨부를 따로 든다. */
+export interface QueuedChat {
+	id: string;
+	text: string;
+	edit: boolean;
+	images: string[];
+	at: number;
+}
+
 export interface Issue {
 	id: string;
 	projectId: string;
@@ -296,6 +345,8 @@ export interface Issue {
 	autoPlan: boolean;
 	/** 이 메모의 계획 · 구현 · 대화에 쓸 모델. 비우면 설정의 실행별 모델을 따른다. */
 	model: string;
+	/** 이 메모에 쓸 effort. 비우면 설정의 실행별 effort 를 따른다. */
+	effort: string;
 	title: string;
 	/** firstLine: 메모 첫 줄 (옛 이슈) · auto: 제목 모델이 짓는다 · manual: 손으로 고쳤다 */
 	titleMode: TitleMode;
@@ -314,6 +365,8 @@ export interface Issue {
 	error: string;
 	/** 메모 없이 프로젝트에서 연 대화. 보드에 나오지 않고 번호가 0 이다. 예전 이슈에는 없을 수 있다. */
 	talk?: boolean;
+	/** 실행 중에 보낸 질문. 실행이 끝나면 한 차례로 묶여 나간다. 중지했으면 남는다. 예전 이슈에는 없을 수 있다. */
+	queue?: QueuedChat[];
 	note: string;
 	attachments: string[];
 	dir: string;
@@ -334,6 +387,24 @@ export interface RefFile {
 	size: number;
 	kind: "extract" | "direct" | "none";
 	textPath: string;
+	/** Deliverable.template 이 이 파일이다 */
+	template: boolean;
+}
+
+/** 산출물에서 쓸 말. avoid 는 같은 뜻이지만 쓰지 않을 말이다. */
+export interface Term {
+	term: string;
+	avoid: string[];
+	note: string;
+}
+
+/** 값이 이미 있는 칸에 들어갈 뽑은 값. 빈 칸 · 빈 목록이면 제안이 없다. */
+export interface RecipeDraft {
+	skill: string;
+	vocab: Term[];
+	format: string;
+	naming: string;
+	template: string;
 }
 
 export interface Deliverable {
@@ -357,13 +428,25 @@ export interface Deliverable {
 	autoUpdate: boolean;
 	/** 마지막 자동 갱신 결과 한 줄 */
 	autoLast: string;
+	/** 작성법 — 템플릿 · 지난 판에서 뽑은 구성 · 문체 · 표기 규칙 (마크다운) */
+	skill: string;
+	vocab: Term[];
+	/** 결과 파일 형식(확장자). 비우면 템플릿을 따른다 */
+	format: string;
+	/** refs 안에서 템플릿으로 쓸 파일 이름 */
+	template: string;
+	learn: { runId: string; startedAt: number } | null;
+	learnError: string;
+	learnedAt: number;
+	learnCostUsd: number;
+	draft: RecipeDraft;
 	dir: string;
 	refs: RefFile[];
 	outputDir: string;
 	nextName: string;
 }
 
-export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir" | "mode" | "autoUpdate">;
+export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir" | "mode" | "autoUpdate"> & Partial<Pick<Deliverable, "skill" | "vocab" | "format">>;
 
 export type ResourceKind = "instructions" | "skill" | "agent" | "command" | "rule";
 

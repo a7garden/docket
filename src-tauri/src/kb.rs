@@ -153,7 +153,7 @@ pub fn card_model(s: &Settings) -> String {
 }
 
 /// 답 글에서 JSON 을 꺼낸다. 모델이 설명을 덧붙이거나 코드 블록으로 감싸도 처음 괄호부터 마지막 괄호까지 읽는다.
-fn json_in(text: &str) -> Option<Value> {
+pub(crate) fn json_in(text: &str) -> Option<Value> {
 	let t = text.trim();
 	if let Ok(v) = serde_json::from_str::<Value>(t) {
 		return Some(v);

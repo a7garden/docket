@@ -12,6 +12,7 @@ export const qk = {
 	deliverables: (pid: string) => ["deliverables", pid] as const,
 	resources: (pid: string | null) => ["resources", pid ?? ""] as const,
 	kb: (pid: string) => ["kb", pid] as const,
+	glossary: (pid: string) => ["glossary", pid] as const,
 };
 
 export function useAppInfo() {
@@ -55,6 +56,10 @@ export function useDeliverables(pid: string | null) {
 
 export function useKb(pid: string | null) {
 	return useQuery({ queryKey: qk.kb(pid ?? ""), queryFn: () => api.kbStatus(pid!), enabled: !!pid });
+}
+
+export function useGlossary(pid: string | null) {
+	return useQuery({ queryKey: qk.glossary(pid ?? ""), queryFn: () => api.glossary(pid!), enabled: !!pid });
 }
 
 export function useResources(pid: string | null) {

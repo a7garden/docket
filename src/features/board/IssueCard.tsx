@@ -169,7 +169,12 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 				{issue.run ? (
 					<>
 						<Chip tone={state?.tone}>{state?.label}</Chip>
-						{issue.run.phase === "running" && activity ? <span className="min-w-0 flex-1 truncate text-[12px] text-subtle">{activity}</span> : <div className="flex-1" />}
+						{/* 줄 서 있으면 무엇을 기다리는지 보인다. 파일이 겹친 상대를 알아야 어느 쪽을 먼저 끝낼지 고른다. */}
+						{(issue.run.phase === "running" ? activity : issue.run.waitFor) ? (
+							<span className="min-w-0 flex-1 truncate text-[12px] text-subtle">{issue.run.phase === "running" ? activity : issue.run.waitFor}</span>
+						) : (
+							<div className="flex-1" />
+						)}
 						{/* 카드를 열지 않고 멈춘다. 줄 서 있는 작업은 줄에서 빠진다. */}
 						<Button
 							size="icon-xs"

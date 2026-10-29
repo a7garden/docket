@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { BookMarked, Check, ChevronRight, Copy, FileStack, FolderOpen, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink } from "lucide-react";
+import { BookA, BookMarked, Check, ChevronRight, Copy, FileStack, FolderOpen, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, attempt, copy, DropdownActions } from "@/components/ActionMenu";
 import { Label } from "@/components/bits";
@@ -21,14 +21,14 @@ import { cn } from "@/lib/utils";
 function goProject(id: string, view?: View) {
 	const ui = useUi.getState();
 	if (ui.projectId !== id) ui.setProject(id);
-	// 프로젝트 머리는 보드 · 대화 · 산출물 · 지식베이스에만 있다. Claude 설정 · 설정 화면에서 불렀으면 보드로 간다.
-	const next = view ?? (ui.view === "talks" || ui.view === "deliverables" || ui.view === "knowledge" ? ui.view : "board");
+	// 프로젝트 머리는 보드 · 대화 · 산출물 · 지식베이스 · 어휘 사전에만 있다. Claude 설정 · 설정 화면에서 불렀으면 보드로 간다.
+	const next = view ?? (ui.view === "talks" || ui.view === "deliverables" || ui.view === "knowledge" || ui.view === "glossary" ? ui.view : "board");
 	if (ui.view !== next) ui.setView(next);
 }
 
 /**
  * 프로젝트 메뉴. 머리의 「프로젝트 메뉴」와 사이드바 우클릭이 같이 쓴다.
- * `nav` 는 사이드바에서만 켠다 — 머리에는 보드 · 대화 · 산출물 · 지식베이스 칸이 이미 있다.
+ * `nav` 는 사이드바에서만 켠다 — 머리에는 보드 · 대화 · 산출물 · 지식베이스 · 어휘 사전 칸이 이미 있다.
  */
 export function projectActions(project: Project, nav = false): ActionList {
 	const ui = () => useUi.getState();
@@ -37,6 +37,7 @@ export function projectActions(project: Project, nav = false): ActionList {
 		nav && { label: "대화", icon: <MessagesSquare />, onSelect: () => goProject(project.id, "talks") },
 		nav && { label: "산출물", icon: <FileStack />, onSelect: () => goProject(project.id, "deliverables") },
 		nav && { label: "지식베이스", icon: <Library />, onSelect: () => goProject(project.id, "knowledge") },
+		nav && { label: "어휘 사전", icon: <BookA />, onSelect: () => goProject(project.id, "glossary") },
 		"sep",
 		{
 			label: "프로젝트 설정",
@@ -79,6 +80,7 @@ export function ProjectHeader({ project }: { project: Project }) {
 						["talks", "대화"],
 						["deliverables", "산출물"],
 						["knowledge", "지식베이스"],
+						["glossary", "어휘 사전"],
 					] as [View, string][]
 				).map(([v, label]) => (
 					<button
@@ -233,6 +235,15 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 							<span className="flex flex-col gap-0.5">
 								<span className="font-medium">계획 · 질문 때 이력 조회 허용</span>
 								<span className="text-[12px] leading-relaxed break-keep text-subtle">git · svn 의 log · diff · status · show · cat 같은 조회 명령만 엽니다. 최근에 누가 왜 바꿨는지를 근거로 계획합니다.</span>
+							</span>
+						</label>
+						<label className="flex items-start gap-3 text-[13px]">
+							<Switch checked={p.parallelImpl} onCheckedChange={(parallelImpl) => setP({ ...p, parallelImpl })} className="mt-0.5" />
+							<span className="flex flex-col gap-0.5">
+								<span className="font-medium">파일이 겹치지 않는 구현은 함께 돌리기</span>
+								<span className="text-[12px] leading-relaxed break-keep text-subtle">
+									계획에 적힌 파일이 겹치지 않을 때만 둘까지 함께 돌고, 다른 구현이 잡은 파일은 고치지 못하게 막습니다. 계획에 폴더 · 와일드카드가 있거나 「모두 허용」이면 한 줄로 섭니다.
+								</span>
 							</span>
 						</label>
 						<EffectiveRules projectId={project.id} open={open} />

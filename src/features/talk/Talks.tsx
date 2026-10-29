@@ -18,6 +18,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/compon
 import { ChatComposer, ChatTab, type Draft, NO_TALK_DRAFT, SessionBar, useTranscript } from "@/features/issue/ChatTab";
 import { api, errorText } from "@/lib/api";
 import { newId, relTime } from "@/lib/format";
+import { lastEnded, useMarkSeen, useUnread } from "@/lib/notices";
 import { useTalks } from "@/lib/queries";
 import { useUi } from "@/lib/store";
 import type { Issue, Project } from "@/lib/types";
@@ -95,6 +96,8 @@ function TalkPane({ talk, projectPath }: { talk: Issue; projectPath: string }) {
 	const [draft, setDraft] = useState<Draft>(NO_TALK_DRAFT);
 	// 터미널에서 이어 간 차례가 고친 파일을 담는다. 이슈 상세 창과 같다.
 	useTranscript(talk);
+	// 대화 화면에서 연 대화의 답은 본 것이다. 알림함 · 목록의 점이 꺼진다.
+	useMarkSeen(talk.id, lastEnded(talk.runs));
 	return (
 		<>
 			<header className="flex items-center gap-2 border-b border-border px-6 py-2.5">
@@ -171,6 +174,7 @@ function TalkMenu({ talk }: { talk: Issue }) {
 
 function TalkRow({ talk, active, onOpen }: { talk: Issue; active: boolean; onOpen: () => void }) {
 	const { items, dialogs } = useTalkActions(talk);
+	const unread = useUnread(talk.id, lastEnded(talk.runs)) && !talk.run;
 	return (
 		<>
 			<ContextActions items={[{ label: "열기", icon: <MessageSquare />, onSelect: onOpen }, "sep", ...items]}>
@@ -182,6 +186,7 @@ function TalkRow({ talk, active, onOpen }: { talk: Issue; active: boolean; onOpe
 					<span className="flex items-center gap-2">
 						{talk.run && <RunDot />}
 						<span className="min-w-0 flex-1 truncate text-[13px] font-medium">{talk.title || "새 대화"}</span>
+						{unread && <span aria-label="읽지 않은 답" title="읽지 않은 답" className={cn("size-1.5 shrink-0 rounded-full", talk.error ? "bg-danger" : "bg-brand")} />}
 					</span>
 					<span className="text-[11.5px] text-subtle">{relTime(talk.updatedAt)}</span>
 				</button>

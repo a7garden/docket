@@ -1,19 +1,36 @@
+/**
+ * 산출물 상세의 「만드는 법」 탭.
+ *
+ * 목차
+ * 1. RecipeTab — 템플릿 · 참고 자료 · 작성법 · 어휘 · 작성 지침 · 만드는 방식(형식) · 자동 갱신 · 파일 이름 · 저장 폴더
+ * 2. LearnBar — 작성법 뽑기 상태 · 다시 뽑기 · 제안 한꺼번에 처리
+ * 3. Suggest · Block · Choice — 제안 줄과 칸 틀
+ */
 import { useEffect, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ExternalLink, FileText, FolderOpen, Plus, X } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { BookA, ExternalLink, FileText, FolderOpen, Loader2, Plus, RefreshCw, Stamp, X } from "lucide-react";
 import { toast } from "sonner";
 import { attempt, ContextActions, fileActions } from "@/components/ActionMenu";
-import { SectionTitle } from "@/components/bits";
+import { Markdown } from "@/components/Markdown";
+import { MarkdownEditor } from "@/components/MarkdownEditor";
+import { Chip, SectionTitle } from "@/components/bits";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
-import { bytes, joinPath } from "@/lib/format";
+import { bytes, cost, extOf, joinPath, relTime } from "@/lib/format";
+import { qk, useGlossary } from "@/lib/queries";
+import { useUi } from "@/lib/store";
 import type { Deliverable, DeliverablePatch, Project, RefFile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { FileIcon } from "./Deliverables";
+import { TermChip, VocabEditor } from "./VocabEditor";
+
+/** 템플릿으로 삼을 수 있는 형식. 백엔드 recipe::TEMPLATE_EXTS 와 같다. */
+const TEMPLATE_EXTS = ["hwpx", "docx", "xlsx", "pptx"];
 
 const REF_STATE: Record<RefFile["kind"], (r: RefFile) => string> = {
 	direct: () => "그대로 읽음",
@@ -29,12 +46,20 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 	const [guide, setGuide] = useState(d.guide);
 	const [naming, setNaming] = useState(d.naming);
 	const [subdir, setSubdir] = useState(d.subdir);
+	const [skill, setSkill] = useState(d.skill);
+	const [format, setFormat] = useState(d.format);
 	const [preview, setPreview] = useState(d.nextName);
 	useEffect(() => {
 		setGuide(d.guide);
 		setNaming(d.naming);
 		setSubdir(d.subdir);
-	}, [d.guide, d.naming, d.subdir]);
+		setSkill(d.skill);
+		setFormat(d.format);
+	}, [d.guide, d.naming, d.subdir, d.skill, d.format]);
+	const qc = useQueryClient();
+	const { data: glossary } = useGlossary(project.id);
+	const setView = useUi((s) => s.setView);
+	const shared = glossary?.glossary.enabled ? [...glossary.entries, ...glossary.shared] : [];
 
 	const nextN = Math.max(0, ...d.versions.map((v) => v.n)) + 1;
 	useEffect(() => {
@@ -58,10 +83,24 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 	};
 	const [dropRef, over] = useDropZone<HTMLDivElement>(addRefs);
 	const asFile = d.mode === "file";
-	const ext = asFile ? "(템플릿 형식)" : "md";
+	const ext = asFile ? d.format || "(템플릿 형식)" : "md";
+	const dr = d.draft;
+	const hasDraft = !!(dr.skill || dr.vocab.length || dr.format || dr.naming || dr.template);
+	const draftAct = (field: string, apply: boolean) => void attempt(() => api.deliverableDraftApply(project.id, d.id, field, apply));
+	const setTemplate = (name: string) => void attempt(() => api.deliverableSetTemplate(project.id, d.id, name));
+	const promote = async (term: string) => {
+		try {
+			await api.deliverableVocabPromote(project.id, d.id, term);
+			await qc.invalidateQueries({ queryKey: qk.glossary(project.id) });
+			toast(glossary?.glossary.enabled ? `「${term}」 을 어휘 사전으로 올렸습니다` : `「${term}」 을 어휘 사전으로 올렸습니다. 사전이 꺼져 있어 켜야 쓰입니다`);
+		} catch (e) {
+			toast.error(errorText(e));
+		}
+	};
 
 	return (
 		<div className="flex flex-col gap-7">
+			<LearnBar project={project} d={d} hasDraft={hasDraft} onAll={(apply) => draftAct("all", apply)} />
 			<Block
 				title="템플릿 · 참고 자료"
 				action={
@@ -94,6 +133,9 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 										...fileActions(joinPath(d.dir, "refs", r.name)),
 										// 뽑은 글자는 Claude 가 실제로 읽는 쪽이다. 템플릿을 어떻게 읽었는지 볼 때 연다.
 										!!r.textPath && { label: "뽑은 글자 열기", icon: <FileText />, onSelect: () => void attempt(() => api.open(r.textPath)) },
+										r.template
+											? { label: "템플릿에서 빼기", icon: <Stamp />, onSelect: () => setTemplate("") }
+											: TEMPLATE_EXTS.includes(extOf(r.name)) && { label: "템플릿으로 쓰기", icon: <Stamp />, onSelect: () => setTemplate(r.name) },
 										"sep",
 										{ label: "빼기", icon: <X />, destructive: true, onSelect: () => void attempt(() => api.deliverableRefDelete(project.id, d.id, r.name)) },
 									]}
@@ -101,6 +143,7 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 									<li className="flex h-10 items-center gap-3 px-3 text-[13px]">
 										<FileIcon name={r.name} className="text-subtle" />
 										<span className="min-w-0 flex-1 truncate">{r.name}</span>
+										{r.template && <Chip tone="brand">템플릿</Chip>}
 										<span className="tabular text-[12px] text-subtle">{bytes(r.size)}</span>
 										<span className={cn("w-28 text-right text-[12px]", r.kind === "none" || (r.kind === "extract" && !r.textPath) ? "text-danger" : "text-subtle")}>
 											{REF_STATE[r.kind](r)}
@@ -122,9 +165,63 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 						</ul>
 					)}
 				</div>
+				{dr.template && (
+					<Suggest onApply={() => draftAct("template", true)} onDiscard={() => draftAct("template", false)}>
+						템플릿으로 <span className="font-medium text-foreground">{dr.template}</span> 이 더 맞아 보입니다
+					</Suggest>
+				)}
 			</Block>
 
-			<Block title="작성 지침">
+			<Block title="작성법" hint="템플릿 · 지난 판에서 뽑음 · 고칠 수 있음">
+				<MarkdownEditor
+					value={skill}
+					onChange={setSkill}
+					onBlur={() => skill !== d.skill && save({ skill })}
+					placeholder={"구성 · 문체 · 표기 규칙. 파일을 넣으면 Claude 가 뽑아 채웁니다.\n## 구성\n1. 개요\n2. 표 — 열: …"}
+					minHeight="7rem"
+					maxHeight="22rem"
+					className="rounded-md border border-border"
+				/>
+				{dr.skill && (
+					<Suggest onApply={() => draftAct("skill", true)} onDiscard={() => draftAct("skill", false)} block>
+						<span>새로 뽑은 작성법 — 적용하면 지금 작성법을 바꿉니다</span>
+						<Markdown text={dr.skill} className="mt-1.5 max-h-48 overflow-y-auto text-[12.5px]" />
+					</Suggest>
+				)}
+			</Block>
+
+			<Block title="어휘" hint="이 문서에서 쓸 말">
+				<VocabEditor vocab={d.vocab} onChange={(vocab) => save({ vocab })} onPromote={(t) => void promote(t)} />
+				{dr.vocab.length > 0 && (
+					<Suggest onApply={() => draftAct("vocab", true)} onDiscard={() => draftAct("vocab", false)} block>
+						<span>새로 찾은 말 {dr.vocab.length}개 — 적용하면 덧붙입니다</span>
+						<div className="mt-1.5 flex flex-wrap gap-1.5">
+							{dr.vocab.map((t) => (
+								<TermChip key={t.term} t={t} tone="draft" />
+							))}
+						</div>
+					</Suggest>
+				)}
+				<div className="flex flex-wrap items-center gap-1.5 text-[12.5px] text-subtle">
+					{glossary?.glossary.enabled ? (
+						<>
+							<span>프로젝트 어휘 사전 {shared.length}개도 함께 붙습니다. 같은 말이면 위의 것을 따릅니다.</span>
+							{shared.slice(0, 8).map((e) => (
+								<TermChip key={e.term} t={{ term: e.term, avoid: [], note: e.meaning }} tone="shared" />
+							))}
+							{shared.length > 8 && <span>외 {shared.length - 8}개</span>}
+						</>
+					) : (
+						<span>프로젝트 어휘 사전은 꺼져 있습니다. 켜면 모든 산출물에 함께 붙습니다.</span>
+					)}
+					<Button size="xs" variant="ghost" onClick={() => setView("glossary")}>
+						<BookA />
+						어휘 사전
+					</Button>
+				</div>
+			</Block>
+
+			<Block title="작성 지침" hint="내가 적는 칸 · 다시 뽑아도 바뀌지 않음">
 				<Textarea
 					value={guide}
 					onChange={(e) => setGuide(e.target.value)}
@@ -143,6 +240,28 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 						템플릿 형식(hwpx · docx · xlsx · pptx)으로 만듭니다. 문서 스킬을 돌리느라 명령 실행을 허용합니다. 저장소 안 편집은 막지만 명령으로 쓰는 것까지 막지는 못합니다.
 					</Choice>
 				</div>
+				{asFile && (
+					<div className="flex items-center gap-2">
+						<span className="shrink-0 text-[13px] text-muted-foreground">파일 형식</span>
+						<Input
+							value={format}
+							onChange={(e) => setFormat(e.target.value)}
+							onBlur={() => format !== d.format && save({ format })}
+							placeholder="비우면 템플릿을 따름"
+							className="mono h-8 w-40 text-[13px] md:text-[13px]"
+						/>
+						<span className="text-[12.5px] text-subtle">{d.template ? `템플릿 ${d.template}` : "템플릿 없음 · 비우면 md"}</span>
+					</div>
+				)}
+				{/* 파일로 만들지 않을 때도 형식 제안은 보인다 — 오피스 템플릿을 넣었으면 「파일로 만들기」를 고르라는 신호다 */}
+				{dr.format && (
+					<Suggest onApply={() => draftAct("format", true)} onDiscard={() => draftAct("format", false)}>
+						파일 형식을 <span className="mono font-medium text-foreground">{dr.format}</span> 로 {d.format ? `(지금 ${d.format})` : ""}
+					</Suggest>
+				)}
+				{!asFile && d.template && (
+					<p className="text-[12.5px] leading-relaxed break-keep text-subtle">템플릿 {d.template} 의 형식으로 받으려면 「Claude 가 파일로 만들기」를 고르세요.</p>
+				)}
 			</Block>
 
 			<Block title="코드가 바뀌면 자동 갱신" action={<Switch checked={d.autoUpdate} onCheckedChange={(on) => save({ autoUpdate: on })} aria-label="자동 갱신" />}>
@@ -174,6 +293,11 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 					<span className="font-medium">{asFile ? preview.replace(/\.md$/, `.${ext}`) : preview}</span>
 				</p>
 				<p className="text-[12.5px] text-subtle">가져온 파일은 받은 이름 그대로 둡니다.</p>
+				{dr.naming && (
+					<Suggest onApply={() => draftAct("naming", true)} onDiscard={() => draftAct("naming", false)}>
+						파일 이름에서 찾은 규칙 <span className="mono font-medium text-foreground">{dr.naming}</span>
+					</Suggest>
+				)}
 			</Block>
 
 			<Block title="저장 폴더">
@@ -202,11 +326,70 @@ export function RecipeTab({ project, d }: { project: Project; d: Deliverable }) 
 	);
 }
 
-function Block({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
+/**
+ * 작성법 뽑기의 상태 줄. 뽑는 중 · 실패 · 마지막으로 뽑은 때와 비용을 보이고, 다시 뽑기와 제안 한꺼번에 처리를 둔다.
+ * 뽑기는 구현 모델로 돌아 비용이 들어서, 언제 얼마나 썼는지를 늘 보인다.
+ */
+function LearnBar({ project, d, hasDraft, onAll }: { project: Project; d: Deliverable; hasDraft: boolean; onAll: (apply: boolean) => void }) {
+	const learning = !!d.learn;
+	const state = learning
+		? "템플릿 · 자료 · 지난 판을 읽고 작성법 · 어휘 · 형식을 뽑는 중"
+		: d.learnedAt
+			? `${relTime(d.learnedAt)}에 뽑음${d.learnCostUsd ? ` · 지금까지 ${cost(d.learnCostUsd)}` : ""}`
+			: "파일을 넣거나 등록하면 작성법 · 어휘 · 형식 · 템플릿 · 이름 규칙을 뽑아 아래 칸을 채웁니다";
+	return (
+		<div className="surface flex flex-col gap-2 rounded-md px-3.5 py-3">
+			<div className="flex items-center gap-2">
+				{learning ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : <RefreshCw className="size-4 text-subtle" />}
+				<span className="min-w-0 flex-1 text-[13px] break-keep text-muted-foreground">{state}</span>
+				{hasDraft && !learning && (
+					<>
+						<Button size="sm" variant="ghost" onClick={() => onAll(false)}>
+							제안 모두 버리기
+						</Button>
+						<Button size="sm" variant="outline" onClick={() => onAll(true)}>
+							제안 모두 적용
+						</Button>
+					</>
+				)}
+				<Button size="sm" variant="outline" disabled={learning} onClick={() => void attempt(() => api.deliverableLearn(project.id, d.id))}>
+					<RefreshCw />
+					{d.learnedAt ? "다시 뽑기" : "작성법 뽑기"}
+				</Button>
+			</div>
+			{d.learnError && !learning && <p className="text-[12.5px] leading-relaxed break-keep text-danger selectable">{d.learnError}</p>}
+			{!learning && (
+				<p className="text-[12px] leading-relaxed break-keep text-subtle">
+					빈 칸은 바로 채우고, 값이 있는 칸은 아래에 제안으로만 둡니다. 작성 지침은 바꾸지 않습니다. 뽑은 내용은 앱 데이터에만 둡니다.
+				</p>
+			)}
+		</div>
+	);
+}
+
+/** 값이 있는 칸에 들어갈 뽑은 값. 적용해야 칸이 바뀐다. */
+function Suggest({ children, onApply, onDiscard, block }: { children: ReactNode; onApply: () => void; onDiscard: () => void; block?: boolean }) {
+	return (
+		<div className={cn("flex gap-2 rounded-md border border-dashed border-brand/45 bg-brand/6 px-3 py-2 text-[12.5px] text-muted-foreground", block ? "flex-col" : "items-center")}>
+			<div className={cn("min-w-0 break-keep", !block && "flex-1")}>{children}</div>
+			<div className="flex shrink-0 justify-end gap-1">
+				<Button size="xs" variant="ghost" onClick={onDiscard}>
+					버리기
+				</Button>
+				<Button size="xs" variant="outline" onClick={onApply}>
+					적용
+				</Button>
+			</div>
+		</div>
+	);
+}
+
+function Block({ title, hint, action, children }: { title: string; hint?: string; action?: ReactNode; children: ReactNode }) {
 	return (
 		<section className="flex flex-col gap-2">
 			<div className="flex min-h-7 items-center gap-2">
 				<SectionTitle>{title}</SectionTitle>
+				{hint && <span className="text-[12px] text-subtle">{hint}</span>}
 				<div className="flex-1" />
 				{action}
 			</div>

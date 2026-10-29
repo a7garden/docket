@@ -13,7 +13,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::claude_files::{self, Resource, TextFile};
 use crate::error::{Error, Result, msg};
 use crate::model::*;
-use crate::{kb, plugins, usage};
+use crate::{glossary, kb, plugins, recipe, usage};
 use crate::runner::{self, RunEvent, emit_deliverable, emit_issue};
 use crate::store::{Store, settle, title_of};
 
@@ -195,14 +195,14 @@ pub fn issue_get(store: State<Store>, project_id: String, issue_id: String) -> R
 }
 
 #[tauri::command]
-pub fn issue_create(app: AppHandle, project_id: String, issue_id: Option<String>, note: String, auto_plan: Option<bool>, model: Option<String>) -> Result<IssueView> {
+pub fn issue_create(app: AppHandle, project_id: String, issue_id: Option<String>, note: String, auto_plan: Option<bool>, model: Option<String>, effort: Option<String>) -> Result<IssueView> {
 	let store = app.state::<Store>();
 	if note.trim().is_empty() {
 		return msg("메모가 비어 있습니다");
 	}
 	let settings = store.settings()?;
 	let auto = auto_plan.unwrap_or(settings.auto_plan);
-	let v = store.create_issue(&project_id, issue_id.as_deref(), &note, auto, runner::new_title_mode(&settings), model.as_deref().unwrap_or(""))?;
+	let v = store.create_issue(&project_id, issue_id.as_deref(), &note, auto, runner::new_title_mode(&settings), model.as_deref().unwrap_or(""), effort.as_deref().unwrap_or(""))?;
 	emit_issue(&app, &v);
 	Ok(v)
 }
@@ -279,6 +279,15 @@ pub fn issue_set_model(app: AppHandle, project_id: String, issue_id: String, mod
 	})
 }
 
+/// 이 메모에 쓸 effort 를 바꾼다. 비우면 설정의 실행별 effort 를 따른다. 모델과 같이 다음 실행부터 쓰인다.
+#[tauri::command]
+pub fn issue_set_effort(app: AppHandle, project_id: String, issue_id: String, effort: String) -> Result<IssueView> {
+	change(&app, &project_id, &issue_id, |i| {
+		i.effort = effort.trim().to_string();
+		Ok(())
+	})
+}
+
 #[tauri::command]
 pub fn issue_plan(app: AppHandle, project_id: String, issue_id: String, feedback: Option<String>) -> Result<IssueView> {
 	runner::plan(&app, &project_id, &issue_id, feedback)
@@ -308,6 +317,38 @@ pub fn issue_revert(app: AppHandle, project_id: String, issue_id: String) -> Res
 #[tauri::command]
 pub fn issue_chat(app: AppHandle, project_id: String, issue_id: String, text: String, edit: bool, images: Option<Vec<String>>) -> Result<IssueView> {
 	runner::chat(&app, &project_id, &issue_id, text, edit, images.unwrap_or_default())
+}
+
+/// 대기열에서 질문 하나를 뺀다. 고치려고 입력칸으로 되돌릴 때는 첨부를 남기고(keep_files), 그냥 뺄 때는 첨부 폴더에서도 치운다.
+#[tauri::command]
+pub fn issue_queue_remove(app: AppHandle, project_id: String, issue_id: String, queue_id: String, keep_files: bool) -> Result<IssueView> {
+	let mut gone = Vec::new();
+	let v = change(&app, &project_id, &issue_id, |i| {
+		if let Some(at) = i.queue.iter().position(|q| q.id == queue_id) {
+			gone = i.queue.remove(at).images;
+		}
+		Ok(())
+	})?;
+	if !keep_files {
+		let store = app.state::<Store>();
+		for name in gone {
+			let _ = store.delete_attachment(&project_id, &issue_id, &name);
+		}
+	}
+	Ok(v)
+}
+
+/// 중지했거나 앱을 다시 켜서 남은 대기열을 한 차례로 묶어 보낸다.
+#[tauri::command]
+pub fn issue_queue_send(app: AppHandle, project_id: String, issue_id: String) -> Result<IssueView> {
+	let store = app.state::<Store>();
+	if store.get_issue(&project_id, &issue_id)?.issue.run.is_some() {
+		return msg("실행이 끝나면 이어서 보냅니다");
+	}
+	match runner::send_queued(&app, &project_id, &issue_id, None)? {
+		Some(v) => Ok(v),
+		None => store.get_issue(&project_id, &issue_id),
+	}
 }
 
 /// 같은 세션을 두 곳에서 동시에 이으면 대화가 갈라진다. 앱이 그 세션을 돌리는 동안에는 열지 않는다.
@@ -528,16 +569,21 @@ pub fn deliverable_import(app: AppHandle, project_id: String, paths: Vec<String>
 	let store = app.state::<Store>();
 	let mut out = Vec::new();
 	for p in paths.iter().map(PathBuf::from).filter(|p| p.is_file()) {
-		let did = match &deliverable_id {
-			Some(d) => d.clone(),
+		let (did, fresh) = match &deliverable_id {
+			Some(d) => (d.clone(), false),
 			None => {
 				let title = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-				store.create_deliverable(&project_id, &title, "")?.id
+				(store.create_deliverable(&project_id, &title, "")?.id, true)
 			}
 		};
 		let v = store.add_version_file(&project_id, &did, &p, "import", "")?;
-		emit_deliverable(&app, &v);
-		out.push(v);
+		// 새로 등록한 오피스 파일은 견본으로 refs/ 에 한 부 더 둬 템플릿으로 삼는다. 판 파일은 나중에 옮겨지거나 덮일 수 있다.
+		if fresh && recipe::is_template(&p.to_string_lossy()) {
+			store.import_refs(&project_id, &did, &[p.to_string_lossy().to_string()])?;
+		}
+		// 이미 작성법이 있는 산출물에 판을 더 가져온 것이면 다시 뽑지 않는다. 이름 규칙 · 형식만 맞춘다.
+		let learn = fresh || v.deliverable.skill.trim().is_empty();
+		out.push(recipe::after_files(&app, &project_id, &did, learn)?);
 	}
 	if out.is_empty() {
 		return msg("가져올 파일이 없습니다. 폴더는 가져오지 않습니다.");
@@ -551,8 +597,8 @@ pub fn deliverable_create_doc(app: AppHandle, project_id: String, title: String,
 	let store = app.state::<Store>();
 	let title = if title.trim().is_empty() { "제목 없는 문서".to_string() } else { title.trim().to_string() };
 	let d = store.create_deliverable(&project_id, &title, "")?;
-	let v = store.add_version_text(&project_id, &d.id, &content, "editor", "")?;
-	emit_deliverable(&app, &v);
+	store.add_version_text(&project_id, &d.id, &content, "editor", "")?;
+	let v = recipe::after_files(&app, &project_id, &d.id, !content.trim().is_empty())?;
 	kb::touch(&app, &project_id);
 	Ok(v)
 }
@@ -606,6 +652,13 @@ pub struct DeliverablePatch {
 	/// 이 칸이 생기기 전의 화면이 보낸 패치에는 없다. 그때는 지금 값을 그대로 둔다.
 	#[serde(default)]
 	auto_update: Option<bool>,
+	/// 작성법 · 어휘 · 형식. 없으면 지금 값을 그대로 둔다 — 다른 칸만 고친 패치가 뽑아 둔 값을 지우지 않게.
+	#[serde(default)]
+	skill: Option<String>,
+	#[serde(default)]
+	vocab: Option<Vec<Term>>,
+	#[serde(default)]
+	format: Option<String>,
 }
 
 #[tauri::command]
@@ -622,26 +675,113 @@ pub fn deliverable_update(app: AppHandle, project_id: String, deliverable_id: St
 		if let Some(on) = patch.auto_update {
 			d.auto_update = on;
 		}
+		if let Some(s) = &patch.skill {
+			d.skill = s.clone();
+		}
+		if let Some(list) = &patch.vocab {
+			d.vocab = clean_vocab(list);
+		}
+		if let Some(f) = &patch.format {
+			d.format = f.trim().trim_start_matches('.').to_lowercase();
+		}
 		Ok(())
 	})?;
 	emit_deliverable(&app, &v);
 	Ok(v)
 }
 
+/// 빈 말을 빼고, 같은 말은 앞의 것만 남긴다.
+fn clean_vocab(list: &[Term]) -> Vec<Term> {
+	let mut out: Vec<Term> = Vec::new();
+	for t in list {
+		let term = t.term.trim();
+		if term.is_empty() || out.iter().any(|o| o.term.to_lowercase() == term.to_lowercase()) {
+			continue;
+		}
+		let avoid = t.avoid.iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty() && a != term).collect();
+		out.push(Term { term: term.to_string(), avoid, note: t.note.trim().to_string() });
+	}
+	out
+}
+
 #[tauri::command]
 pub fn deliverable_refs_add(app: AppHandle, project_id: String, deliverable_id: String, paths: Vec<String>) -> Result<DeliverableView> {
 	let store = app.state::<Store>();
 	store.import_refs(&project_id, &deliverable_id, &paths)?;
-	let v = store.get_deliverable(&project_id, &deliverable_id)?;
-	emit_deliverable(&app, &v);
-	Ok(v)
+	recipe::after_files(&app, &project_id, &deliverable_id, true)
 }
 
 #[tauri::command]
 pub fn deliverable_ref_delete(app: AppHandle, project_id: String, deliverable_id: String, name: String) -> Result<DeliverableView> {
 	let store = app.state::<Store>();
 	store.delete_ref(&project_id, &deliverable_id, &name)?;
-	let v = store.get_deliverable(&project_id, &deliverable_id)?;
+	// 지운 것이 템플릿이었으면 남은 오피스 파일로 바꾸거나 비운다. 작성법은 다시 뽑지 않는다.
+	recipe::after_files(&app, &project_id, &deliverable_id, false)
+}
+
+/// 작성법 · 어휘 · 형식 · 템플릿 · 이름 규칙을 다시 뽑는다. 값이 있는 칸은 제안으로만 들어온다.
+#[tauri::command]
+pub fn deliverable_learn(app: AppHandle, project_id: String, deliverable_id: String) -> Result<DeliverableView> {
+	recipe::start(&app, &project_id, &deliverable_id)
+}
+
+/// 뽑은 제안을 적용하거나 버린다. field: skill · vocab · format · naming · template · all
+#[tauri::command]
+pub fn deliverable_draft_apply(app: AppHandle, project_id: String, deliverable_id: String, field: String, apply: bool) -> Result<DeliverableView> {
+	let v = app.state::<Store>().update_deliverable(&project_id, &deliverable_id, |d| recipe::apply_draft(d, &field, apply))?;
+	emit_deliverable(&app, &v);
+	Ok(v)
+}
+
+/// 템플릿으로 쓸 refs/ 파일을 정한다. 비우면 템플릿 없이 참고 자료만 둔다. 형식은 템플릿을 따라간다.
+#[tauri::command]
+pub fn deliverable_set_template(app: AppHandle, project_id: String, deliverable_id: String, name: String) -> Result<DeliverableView> {
+	let store = app.state::<Store>();
+	let refs: Vec<String> = store.list_refs(&project_id, &deliverable_id).into_iter().map(|r| r.name).collect();
+	if !name.is_empty() && !refs.contains(&name) {
+		return msg("템플릿 · 참고 자료에 없는 파일입니다");
+	}
+	let v = store.update_deliverable(&project_id, &deliverable_id, |d| {
+		if !name.is_empty() {
+			d.format = crate::extract::ext_of(&name);
+		}
+		d.template = name.clone();
+		d.draft.template.clear();
+		d.draft.format.clear();
+		Ok(())
+	})?;
+	emit_deliverable(&app, &v);
+	Ok(v)
+}
+
+/// 산출물 어휘 하나를 프로젝트 어휘 사전으로 옮긴다. 사전에 같은 말이 있으면 피할 말 · 뜻만 보탠다.
+#[tauri::command]
+pub fn deliverable_vocab_promote(app: AppHandle, project_id: String, deliverable_id: String, term: String) -> Result<DeliverableView> {
+	let store = app.state::<Store>();
+	let d = store.get_deliverable(&project_id, &deliverable_id)?;
+	let k = term.trim().to_lowercase();
+	let Some(t) = d.deliverable.vocab.iter().find(|t| t.term.trim().to_lowercase() == k).cloned() else { return msg("그 어휘가 없습니다") };
+	let file = store.glossary(&project_id);
+	let mut entries = file.entries.clone();
+	match entries.iter_mut().find(|e| e.term.trim().to_lowercase() == k) {
+		Some(e) => {
+			for a in &t.avoid {
+				if !e.aliases.iter().any(|x| x.trim() == a.trim()) {
+					e.aliases.push(a.clone());
+				}
+			}
+			if e.meaning.trim().is_empty() {
+				e.meaning = t.note.clone();
+			}
+		}
+		// 사전의 「비슷한 말」은 같은 것을 가리키는 다른 표현이라 피할 말을 그리로 옮긴다.
+		None => entries.push(GlossaryEntry { term: t.term.clone(), meaning: t.note.clone(), aliases: t.avoid.clone() }),
+	}
+	store.save_glossary_entries(&project_id, &entries, file.updated_at)?;
+	let v = store.update_deliverable(&project_id, &deliverable_id, |d| {
+		d.vocab.retain(|x| x.term.trim().to_lowercase() != k);
+		Ok(())
+	})?;
 	emit_deliverable(&app, &v);
 	Ok(v)
 }
@@ -813,6 +953,27 @@ pub async fn kb_search(app: AppHandle, project_id: String, query: String) -> Res
 #[tauri::command]
 pub fn kb_cards(app: AppHandle, project_id: String, path: String) -> Result<Vec<kb::SectionView>> {
 	kb::cards_of(&app, &project_id, &path)
+}
+
+/* ---------- 어휘 사전 ---------- */
+
+#[tauri::command]
+pub fn glossary_get(store: State<Store>, project_id: String) -> Result<glossary::GlossaryView> {
+	glossary::view(&store, &project_id)
+}
+
+/// 용어 표 전체를 바꾼다. updated_at 은 화면이 읽어 둔 값이다 — 그 사이 다른 곳에서 저장했으면 거절한다.
+#[tauri::command]
+pub fn glossary_save_entries(store: State<Store>, project_id: String, entries: Vec<GlossaryEntry>, updated_at: i64) -> Result<glossary::GlossaryView> {
+	store.save_glossary_entries(&project_id, &entries, updated_at)?;
+	glossary::view(&store, &project_id)
+}
+
+/// 켜기 · 함께 쓸 프로젝트를 바꾼다.
+#[tauri::command]
+pub fn glossary_save_settings(store: State<Store>, project_id: String, glossary: ProjectGlossary) -> Result<glossary::GlossaryView> {
+	store.save_glossary_settings(&project_id, &glossary)?;
+	glossary::view(&store, &project_id)
 }
 
 /* ---------- Claude 설정 ---------- */
