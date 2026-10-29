@@ -4,14 +4,21 @@
 //!
 //! ```json
 //! { "id": "herdr", "name": "herdr", "kind": "terminal", "exe": "herdr",
-//!   "probe": [], "attach": [], "launch": [], "hostWt": true, "note": "" }
+//!   "probe": ["workspace", "list"], "focus": [], "attach": [["tab", "create"], ["…", "{out.result.root_pane.pane_id}"]],
+//!   "launch": [], "hostWt": true, "attachAfterLaunch": true, "note": "" }
 //! ```
 //!
-//! - 자리표시: {cwd} 프로젝트 폴더 · {claude} claude 실행 파일 · {session} 세션 ID · {title} `#번호 제목`
-//! - probe 가 0 으로 끝나면(이미 켜 둔 것이 있으면) attach 로 붙이고, 아니면 launch 로 새로 띄운다.
-//!   probe · attach 를 비우면 늘 launch 로 연다.
+//! - 자리표시: {cwd} 프로젝트 폴더 · {claude} claude 실행 파일 · {session} 세션 ID · {session_short} 세션 ID 앞 8자 · {title} `#번호 제목`
+//!   attach 의 둘째 단계부터는 {out.경로} 로 앞 단계가 낸 JSON 의 값을 받는다 (예: {out.result.root_pane.pane_id}).
+//! - probe 가 0 으로 끝나면(이미 켜 둔 것이 있으면) focus 를 먼저 돌려 0 이면 거기서 끝내고, 아니면 attach 의 단계를 차례로 돌려 붙인다.
+//!   켜 둔 것이 없거나 attach 첫 단계가 실패하면 launch 로 새로 띄운다. probe · attach 를 비우면 늘 launch 로 연다.
+//! - attachAfterLaunch 를 켜면 launch 로 띄운 뒤 probe 가 0 이 될 때까지 기다렸다가 attach 를 돌린다.
+//!   herdr 처럼 명령을 주어 띄우는 인자가 없는 프로그램도 띄운 다음 붙여 세션을 잇는다.
+//! - attach 는 단계 하나를 `["a", "b"]` 로, 여럿을 `[["a"], ["b"]]` 로 적는다.
 //! - 켜고 끄는 것은 settings.json 의 enabledPlugins 에 둔다. 정의 파일은 사용자가 쓴 것이라 앱이 고쳐 쓰지 않는다.
 //! - 인자는 셸을 거치지 않고 배열 그대로 넘긴다. cmd.exe 를 거치면 경로 속 빈칸 · 기호가 깨진다.
+//!
+//! 구획: 정의 · 읽기 · 검사 · 자리표시 · 틀(herdr) · 열기 · 시험
 
 use std::collections::HashSet;
 use std::fs;
@@ -25,7 +32,9 @@ use crate::error::{Error, Result, msg};
 use crate::store::safe_id;
 
 pub const TERMINAL: &str = "terminal";
-const KNOWN: &[&str] = &["cwd", "claude", "session", "title"];
+const KNOWN: &[&str] = &["cwd", "claude", "session", "session_short", "title"];
+/// 앞 단계 출력의 JSON 값을 받는 자리표시의 머리. attach 의 둘째 단계부터 쓴다.
+const OUT: &str = "out.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -38,12 +47,17 @@ pub struct Plugin {
 	pub exe: String,
 	/// 이미 켜 둔 것이 있는지 묻는 인자. 0 으로 끝나면 있다고 본다.
 	pub probe: Vec<String>,
-	/// 켜 둔 것에 새 창으로 붙이는 인자
-	pub attach: Vec<String>,
+	/// 켜 둔 것에 이 세션이 이미 떠 있으면 0 으로 끝나며 그리로 옮기는 인자. 같은 세션을 두 곳에서 이으면 대화가 갈라진다.
+	pub focus: Vec<String>,
+	/// 켜 둔 것에 새 창으로 붙이는 단계들. 하나면 `["a", "b"]` 로 적어도 된다.
+	#[serde(deserialize_with = "steps")]
+	pub attach: Vec<Vec<String>>,
 	/// 새로 띄우는 인자
 	pub launch: Vec<String>,
 	/// launch 를 Windows 터미널 새 탭 안에서 띄운다. 화면이 있어야 도는 프로그램(TUI)은 창이 따로 없으면 바로 끝난다.
 	pub host_wt: bool,
+	/// launch 로 띄운 뒤 켜질 때까지 기다렸다가 attach 를 돌린다. 띄우는 인자로 명령을 줄 수 없는 프로그램에 쓴다.
+	pub attach_after_launch: bool,
 	/// 설정 화면에 보이는 설명
 	pub note: String,
 }
@@ -71,6 +85,21 @@ pub struct PluginList {
 	pub plugins: Vec<PluginView>,
 }
 
+/// attach 를 `["a", "b"]`(한 단계) 로도 `[["a"], ["b"]]`(여러 단계) 로도 받는다. 단계가 하나뿐이던 옛 정의를 그대로 읽으려는 것이다.
+fn steps<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<Vec<String>>, D::Error> {
+	#[derive(Deserialize)]
+	#[serde(untagged)]
+	enum Steps {
+		Many(Vec<Vec<String>>),
+		One(Vec<String>),
+	}
+	Ok(match Steps::deserialize(d)? {
+		Steps::Many(v) => v,
+		Steps::One(v) if v.is_empty() => Vec::new(),
+		Steps::One(v) => vec![v],
+	})
+}
+
 pub struct Vars {
 	pub cwd: String,
 	pub claude: String,
@@ -78,13 +107,33 @@ pub struct Vars {
 	pub title: String,
 }
 
+/// 앞 단계의 출력. 검사할 때는 무엇이 올지 모르므로 Any 로 두고 {out.…} 를 빈 값으로 채운다.
+enum Out<'a> {
+	None,
+	Any,
+	Json(&'a serde_json::Value),
+}
+
 impl Vars {
-	fn get(&self, name: &str) -> Option<&str> {
+	fn get(&self, name: &str, out: &Out) -> Option<String> {
+		if let Some(path) = name.strip_prefix(OUT) {
+			return match out {
+				Out::None => None,
+				Out::Any => Some(String::new()),
+				Out::Json(v) => match path.split('.').try_fold(*v, |v, k| v.get(k))? {
+					serde_json::Value::String(s) => Some(s.clone()),
+					serde_json::Value::Null | serde_json::Value::Object(_) | serde_json::Value::Array(_) => None,
+					other => Some(other.to_string()),
+				},
+			};
+		}
 		match name {
-			"cwd" => Some(&self.cwd),
-			"claude" => Some(&self.claude),
-			"session" => Some(&self.session),
-			"title" => Some(&self.title),
+			"cwd" => Some(self.cwd.clone()),
+			"claude" => Some(self.claude.clone()),
+			"session" => Some(self.session.clone()),
+			// herdr 의 에이전트 이름처럼 짧은 영문 소문자 · 숫자만 받는 곳에 쓴다. 세션 ID 는 UUID 라 앞 8자로도 겹치지 않는다.
+			"session_short" => Some(self.session.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect::<String>().to_ascii_lowercase()),
+			"title" => Some(self.title.clone()),
 			_ => None,
 		}
 	}
@@ -124,7 +173,7 @@ fn view(file: &Path, enabled: &[String], seen: &mut HashSet<String>) -> PluginVi
 	}
 	let exe_path = resolve_exe(&def.exe);
 	let problem = read_error.unwrap_or_else(|| check(&def, exe_path.is_some(), seen));
-	let resumes = [&def.launch, &def.attach].iter().any(|a| a.iter().any(|s| s.contains("{session}")));
+	let resumes = def.attach.iter().chain([&def.launch]).any(|a| a.iter().any(|s| s.contains("{session}")));
 	let warning = if problem.is_empty() && def.kind == TERMINAL && !resumes {
 		"인자에 {session} 이 없어 claude 세션을 잇지 않고 프로그램만 엽니다. 프로그램 도움말에서 명령을 실행하는 인자를 찾아 launch 에 적으세요.".to_string()
 	} else {
@@ -156,10 +205,26 @@ fn check(def: &Plugin, exe_found: bool, seen: &mut HashSet<String>) -> String {
 	if def.probe.is_empty() != def.attach.is_empty() {
 		return "probe 와 attach 는 함께 적거나 함께 비웁니다".into();
 	}
+	if !def.focus.is_empty() && def.probe.is_empty() {
+		return "focus 는 probe · attach 와 함께 씁니다".into();
+	}
+	if def.attach_after_launch && def.attach.is_empty() {
+		return "attachAfterLaunch 는 probe · attach 와 함께 씁니다".into();
+	}
+	if def.attach.iter().any(|s| s.is_empty()) {
+		return "attach 에 빈 단계가 있습니다".into();
+	}
 	let dummy = Vars { cwd: String::new(), claude: String::new(), session: String::new(), title: String::new() };
-	for arg in def.probe.iter().chain(&def.attach).chain(&def.launch) {
-		if let Err(name) = expand(arg, &dummy) {
-			return format!("모르는 자리표시입니다: {{{name}}} (쓸 수 있는 것: {})", KNOWN.iter().map(|k| format!("{{{k}}}")).collect::<Vec<_>>().join(" "));
+	// {out.…} 은 앞 단계가 있는 attach 의 둘째 단계부터만 쓴다.
+	let plain = def.probe.iter().chain(&def.focus).chain(&def.launch).chain(def.attach.iter().take(1).flatten()).map(|a| (a, Out::None));
+	let chained = def.attach.iter().skip(1).flatten().map(|a| (a, Out::Any));
+	for (arg, out) in plain.chain(chained) {
+		if let Err(name) = expand(arg, &dummy, &out) {
+			return if name.starts_with(OUT) {
+				format!("{{{name}}} 은 attach 의 둘째 단계부터 씁니다")
+			} else {
+				format!("모르는 자리표시입니다: {{{name}}} (쓸 수 있는 것: {} · attach 둘째 단계부터 {{out.경로}})", KNOWN.iter().map(|k| format!("{{{k}}}")).collect::<Vec<_>>().join(" "))
+			};
 		}
 	}
 	if !exe_found {
@@ -184,18 +249,20 @@ pub fn resolve_exe(exe: &str) -> Option<PathBuf> {
 	std::env::split_paths(&path).flat_map(move |d| names.iter().map(move |n| d.join(n))).find(|c| c.is_file())
 }
 
+/* ---------- 자리표시 ---------- */
+
 /// 자리표시를 한 번에 채운다. 차례로 replace 하면 채운 값(경로) 안의 `{session}` 같은 글자까지 다시 바뀐다.
-/// 이름 꼴(영문 · 숫자 · _)이 아닌 중괄호는 글자 그대로 둔다. 모르는 이름이면 그 이름을 돌려준다.
-fn expand(arg: &str, v: &Vars) -> std::result::Result<String, String> {
+/// 이름 꼴(영문 · 숫자 · _ · .)이 아닌 중괄호는 글자 그대로 둔다. 모르는 이름이면 그 이름을 돌려준다.
+fn expand(arg: &str, v: &Vars, prev: &Out) -> std::result::Result<String, String> {
 	let mut out = String::new();
 	let mut rest = arg;
 	while let Some(i) = rest.find('{') {
 		out.push_str(&rest[..i]);
 		let tail = &rest[i..];
 		match tail.find('}') {
-			Some(j) if j > 1 && tail[1..j].chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+			Some(j) if j > 1 && tail[1..j].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') => {
 				let name = &tail[1..j];
-				out.push_str(v.get(name).ok_or_else(|| name.to_string())?);
+				out.push_str(&v.get(name, prev).ok_or_else(|| name.to_string())?);
 				rest = &tail[j + 1..];
 			}
 			_ => {
@@ -208,8 +275,18 @@ fn expand(arg: &str, v: &Vars) -> std::result::Result<String, String> {
 	Ok(out)
 }
 
+fn fill_with(args: &[String], v: &Vars, prev: &Out) -> Result<Vec<String>> {
+	args.iter()
+		.map(|a| {
+			expand(a, v, prev).map_err(|name| {
+				Error::Msg(if name.starts_with(OUT) { format!("앞 단계의 출력에서 {{{name}}} 을 찾지 못했습니다") } else { format!("모르는 자리표시입니다: {{{name}}}") })
+			})
+		})
+		.collect()
+}
+
 pub fn fill(args: &[String], v: &Vars) -> Result<Vec<String>> {
-	args.iter().map(|a| expand(a, v).map_err(|name| Error::Msg(format!("모르는 자리표시입니다: {{{name}}}")))).collect()
+	fill_with(args, v, &Out::None)
 }
 
 /// 「터미널에서 잇기」에 쓸 플러그인. 켜진 것 중 파일 이름 순으로 첫 터미널 플러그인이다.
@@ -227,23 +304,40 @@ pub fn terminal(root: &Path, enabled: &[String]) -> Result<Option<(Plugin, PathB
 
 /* ---------- 틀 ---------- */
 
-/// herdr 틀. 2026-10-28 : 이 PC 에서 herdr 0.9.5 가 PATH 에 있는 것만 확인했다.
-/// 켜 둔 herdr 에 창을 붙이는 명령 · 명령을 주어 띄우는 인자는 확인하지 못해 비워 둔다. 사용자가 도움말을 보고 채운다.
+fn args(a: &[&str]) -> Vec<String> {
+	a.iter().map(|s| s.to_string()).collect()
+}
+
+/// herdr 틀. 2026-10-29 : herdr 0.9.5 의 `herdr --skill` · 묶음별 도움말을 보고, 따로 띄운 시험 세션에서 아래 명령을 돌려 확인했다.
+/// - probe `workspace list` : 서버가 없으면 server_not_running 으로 1, 있으면 0.
+/// - focus `agent focus docket-<세션 앞 8자>` : 이 세션의 claude 가 이미 떠 있으면 그 탭으로 옮기고 0. 없으면 agent_not_found 로 1.
+///   먼저 보지 않으면 같은 이름의 agent start 가 agent_name_taken 으로 실패해 빈 탭만 남는다.
+/// - attach ① `tab create --focus` 는 새 탭을 만들고 `.result.root_pane.pane_id` 를 돌려준다. 작업공간이 하나도 없으면 1 이다.
+///   ② `agent start … --kind claude -- --resume` 은 그 패인의 셸에서 claude 를 띄운다. 패인 셸이 cmd · PowerShell 어느 것이든
+///   따옴표를 herdr 가 다루고, herdr 가 claude 로 알아보아 상태를 보여 준다. 다만 claude 는 herdr 가 PATH 에서 찾는다 ({claude} 를 쓰지 않는다).
+///   탭을 만들자마자 불러도 셸이 뜨기를 기다려 5초 남짓에 끝났다.
+/// - launch 는 비운다. herdr 는 띄우는 인자로 명령을 받지 않는다 — 맨 `herdr` 로 화면을 띄우고 attachAfterLaunch 로 붙인다.
 fn herdr() -> Plugin {
 	Plugin {
 		id: "herdr".into(),
 		name: "herdr".into(),
 		kind: TERMINAL.into(),
 		exe: "herdr".into(),
-		probe: Vec::new(),
-		attach: Vec::new(),
+		probe: args(&["workspace", "list"]),
+		focus: args(&["agent", "focus", "docket-{session_short}"]),
+		attach: vec![
+			args(&["tab", "create", "--cwd", "{cwd}", "--label", "{title}", "--focus"]),
+			args(&["agent", "start", "docket-{session_short}", "--kind", "claude", "--pane", "{out.result.root_pane.pane_id}", "--", "--resume", "{session}"]),
+		],
 		launch: Vec::new(),
 		host_wt: true,
-		note: "herdr --help 로 인자를 확인해 채웁니다. launch: 프로젝트 폴더에서 {claude} --resume {session} 을 돌리며 띄우는 인자 · probe: 켜 둔 herdr 가 있으면 0 으로 끝나는 인자 · attach: 켜 둔 herdr 에 그 명령을 새 창으로 붙이는 인자.".into(),
+		attach_after_launch: true,
+		note: "켜 둔 herdr 에 이슈마다 새 탭 「#번호 제목」을 만들어 claude --resume 으로 세션을 잇습니다. 그 세션이 이미 떠 있으면 그 탭으로 옮깁니다. herdr 가 꺼져 있으면 Windows 터미널에 띄운 뒤 붙입니다. claude 는 herdr 가 PATH 에서 찾습니다.".into(),
 	}
 }
 
 /// 틀을 plugins/<id>.json 으로 쓴다. 이미 있으면 덮지 않는다. 사용자가 고쳐 둔 인자를 지우지 않으려는 것이다.
+/// 다만 probe · focus · attach · launch 가 모두 빈 정의는 인자를 채우기 전에 만든 빈 틀이라 새 틀로 바꾼다.
 pub fn create_preset(root: &Path, id: &str) -> Result<PathBuf> {
 	let def = match id {
 		"herdr" => herdr(),
@@ -252,11 +346,19 @@ pub fn create_preset(root: &Path, id: &str) -> Result<PathBuf> {
 	let d = dir(root);
 	fs::create_dir_all(&d)?;
 	let path = d.join(format!("{id}.json"));
-	if path.exists() {
+	if path.exists() && !is_blank(&path) {
 		return msg(format!("이미 있습니다: {}", path.display()));
 	}
 	fs::write(&path, serde_json::to_vec_pretty(&def)?)?;
 	Ok(path)
+}
+
+/// 인자를 하나도 채우지 않은 정의인지. 읽지 못하는 파일은 빈 것으로 보지 않는다 — 사용자가 고치던 중일 수 있다.
+fn is_blank(path: &Path) -> bool {
+	fs::read(path)
+		.ok()
+		.and_then(|b| serde_json::from_slice::<Plugin>(&b).ok())
+		.is_some_and(|p| p.probe.is_empty() && p.focus.is_empty() && p.attach.is_empty() && p.launch.is_empty())
 }
 
 /* ---------- 열기 ---------- */
@@ -268,35 +370,107 @@ const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 /// probe 가 이보다 오래 걸리면 켜 둔 것이 없다고 본다. 화면 명령이 오래 묶이지 않게 짧게 둔다.
 #[cfg(windows)]
 const PROBE_LIMIT: Duration = Duration::from_secs(3);
+/// attach 의 마지막 단계가 이보다 오래 돌면 붙는 중으로 보고 기다리지 않는다.
 #[cfg(windows)]
 const ATTACH_LIMIT: Duration = Duration::from_secs(3);
-
-/// 창 없이 돌려 끝나기를 잠깐 기다린다. 끝났으면 성공 여부, 아직 돌면 None.
+/// attach 의 앞 단계는 끝나야 다음 단계에 출력을 넘긴다. 이보다 오래 걸리면 실패로 본다.
 #[cfg(windows)]
-fn run_hidden(exe: &Path, args: &[String], cwd: &Path, limit: Duration, kill_late: bool) -> std::io::Result<Option<bool>> {
+const STEP_LIMIT: Duration = Duration::from_secs(10);
+/// attachAfterLaunch 일 때 띄운 프로그램이 켜지기를 기다리는 시간. Windows 터미널 · herdr 서버가 처음 뜨는 데 몇 초 걸린다.
+#[cfg(windows)]
+const LAUNCH_WAIT: Duration = Duration::from_secs(20);
+
+#[cfg(windows)]
+struct Ran {
+	ok: bool,
+	stdout: String,
+	stderr: String,
+}
+
+/// 창 없이 돌려 끝나기를 잠깐 기다린다. 끝났으면 성공 여부와 출력, 아직 돌면 None.
+/// 출력은 따로 읽어 둔다. 기다리기만 하면 출력이 파이프를 채운 프로그램이 멈춰 끝나지 않는다.
+#[cfg(windows)]
+fn run_hidden(exe: &Path, args: &[String], cwd: &Path, limit: Duration, kill_late: bool) -> std::io::Result<Option<Ran>> {
+	use std::io::Read;
 	use std::os::windows::process::CommandExt;
 	use std::process::Stdio;
 	let mut child = std::process::Command::new(exe)
 		.args(args)
 		.current_dir(cwd)
 		.stdin(Stdio::null())
-		.stdout(Stdio::null())
-		.stderr(Stdio::null())
+		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
 		.creation_flags(CREATE_NO_WINDOW)
 		.spawn()?;
+	fn drain(r: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<String> {
+		std::thread::spawn(move || {
+			let mut b = Vec::new();
+			if let Some(mut r) = r {
+				let _ = r.read_to_end(&mut b);
+			}
+			String::from_utf8_lossy(&b).into_owned()
+		})
+	}
+	let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
 	let until = Instant::now() + limit;
 	loop {
 		if let Some(s) = child.try_wait()? {
-			return Ok(Some(s.success()));
+			return Ok(Some(Ran { ok: s.success(), stdout: out.join().unwrap_or_default(), stderr: err.join().unwrap_or_default() }));
 		}
 		if Instant::now() >= until {
 			if kill_late {
 				let _ = child.kill();
 			}
+			// 두고 가는 프로그램의 출력은 읽는 스레드가 끝까지 받아 버린다.
 			return Ok(None);
 		}
 		std::thread::sleep(Duration::from_millis(50));
 	}
+}
+
+/// 실패한 명령이 남긴 말. herdr 처럼 `{"error":{"message":…}}` 를 내면 그 말만, 아니면 앞부분을 쓴다.
+#[cfg(windows)]
+fn reason(r: &Ran) -> String {
+	let text = if r.stderr.trim().is_empty() { r.stdout.trim() } else { r.stderr.trim() };
+	if let Some(m) = serde_json::from_str::<serde_json::Value>(text).ok().and_then(|j| j.pointer("/error/message").and_then(|m| m.as_str()).map(str::to_string)) {
+		return m;
+	}
+	if text.is_empty() { "0 이 아닌 값으로 끝났습니다".into() } else { text.chars().take(300).collect() }
+}
+
+#[cfg(windows)]
+fn succeeds(exe: &Path, args: &[String], cwd: &Path) -> bool {
+	matches!(run_hidden(exe, args, cwd, PROBE_LIMIT, true), Ok(Some(r)) if r.ok)
+}
+
+#[cfg(windows)]
+enum Attach {
+	Done,
+	/// 첫 단계가 실패했다. 아직 아무것도 만들지 않았으므로 새로 띄워 다시 해 볼 수 있다.
+	NotStarted(String),
+	/// 둘째 단계부터 실패했다. 앞 단계가 만든 것(빈 탭 등)이 남아 있으니 새로 띄우지 않고 알린다.
+	Broken(String),
+}
+
+/// attach 의 단계를 차례로 돌린다. 앞 단계가 낸 JSON 을 다음 단계의 {out.…} 로 넘긴다.
+#[cfg(windows)]
+fn attach(p: &Plugin, exe: &Path, v: &Vars, cwd: &Path) -> Result<Attach> {
+	let mut prev: Option<serde_json::Value> = None;
+	for (i, step) in p.attach.iter().enumerate() {
+		let last = i + 1 == p.attach.len();
+		let out = prev.as_ref().map_or(Out::None, Out::Json);
+		let args = fill_with(step, v, &out)?;
+		let fail = |why: String| -> Result<Attach> { Ok(if i == 0 { Attach::NotStarted(why) } else { Attach::Broken(format!("{} 단계({}): {why}", i + 1, step.first().map_or("", |s| s.as_str()))) }) };
+		// 마지막 단계는 붙는 동안 오래 돌 수 있다(herdr 의 agent start 는 claude 가 뜰 때까지 5초 남짓). 아직 돌면 붙는 중으로 본다.
+		match run_hidden(exe, &args, cwd, if last { ATTACH_LIMIT } else { STEP_LIMIT }, !last) {
+			Ok(None) if last => return Ok(Attach::Done),
+			Ok(None) => return fail("응답이 없습니다".into()),
+			Ok(Some(r)) if !r.ok => return fail(reason(&r)),
+			Ok(Some(r)) => prev = serde_json::from_str(r.stdout.trim()).ok(),
+			Err(e) => return fail(e.to_string()),
+		}
+	}
+	Ok(Attach::Done)
 }
 
 /// 켜 둔 것이 있으면 붙이고, 없거나 붙이지 못하면 새로 띄운다. probe · attach 를 기다리므로 화면 스레드에서 부르지 않는다.
@@ -305,26 +479,46 @@ pub fn open(p: &Plugin, exe: &Path, v: &Vars) -> Result<()> {
 	{
 		use std::os::windows::process::CommandExt;
 		let cwd = Path::new(&v.cwd);
-		if !p.probe.is_empty() && !p.attach.is_empty() {
-			let running = matches!(run_hidden(exe, &fill(&p.probe, v)?, cwd, PROBE_LIMIT, true), Ok(Some(true)));
-			if running {
-				// 아직 돌고 있으면 붙는 중으로 본다. 0 이 아닌 값으로 끝났으면 새로 띄운다.
-				if let Ok(Some(true) | None) = run_hidden(exe, &fill(&p.attach, v)?, cwd, ATTACH_LIMIT, false) {
-					return Ok(());
-				}
+		let broken = |why: String| msg(format!("「{}」 에 붙이다가 멈췄습니다 · {why}", p.name));
+		let probe = fill(&p.probe, v)?;
+		if !p.probe.is_empty() && !p.attach.is_empty() && succeeds(exe, &probe, cwd) {
+			if !p.focus.is_empty() && succeeds(exe, &fill(&p.focus, v)?, cwd) {
+				return Ok(());
+			}
+			match attach(p, exe, v, cwd)? {
+				Attach::Done => return Ok(()),
+				Attach::Broken(why) => return broken(why),
+				Attach::NotStarted(_) => {} // 켜 둔 것이 붙일 상태가 아니다(herdr 는 작업공간이 하나도 없을 때). 새로 띄운다.
 			}
 		}
 		let args = fill(&p.launch, v)?;
-		if p.host_wt && std::process::Command::new("wt.exe").arg("-d").arg(cwd).arg(exe).args(&args).spawn().is_ok() {
+		let in_wt = p.host_wt && std::process::Command::new("wt.exe").arg("-d").arg(cwd).arg(exe).args(&args).spawn().is_ok();
+		if !in_wt {
+			std::process::Command::new(exe)
+				.args(&args)
+				.current_dir(cwd)
+				.creation_flags(CREATE_NEW_CONSOLE)
+				.spawn()
+				.map_err(|e| Error::Msg(format!("「{}」 을 띄우지 못했습니다: {e}", p.name)))?;
+		}
+		if !p.attach_after_launch || p.attach.is_empty() {
 			return Ok(());
 		}
-		std::process::Command::new(exe)
-			.args(&args)
-			.current_dir(cwd)
-			.creation_flags(CREATE_NEW_CONSOLE)
-			.spawn()
-			.map_err(|e| Error::Msg(format!("「{}」 을 띄우지 못했습니다: {e}", p.name)))?;
-		Ok(())
+		// 띄운 것이 켜지고 붙일 자리(herdr 는 첫 작업공간)를 만들 때까지 첫 단계를 다시 해 본다.
+		let until = Instant::now() + LAUNCH_WAIT;
+		let mut why = "켜지지 않았습니다".to_string();
+		while Instant::now() < until {
+			std::thread::sleep(Duration::from_millis(500));
+			if !succeeds(exe, &probe, cwd) {
+				continue;
+			}
+			match attach(p, exe, v, cwd)? {
+				Attach::Done => return Ok(()),
+				Attach::Broken(w) => return broken(w),
+				Attach::NotStarted(w) => why = w,
+			}
+		}
+		msg(format!("「{}」 을 띄웠지만 {}초 안에 세션을 붙이지 못했습니다 · {why} · 띄운 창에서 직접 이으세요", p.name, LAUNCH_WAIT.as_secs()))
 	}
 	#[cfg(not(windows))]
 	{
@@ -370,6 +564,57 @@ mod tests {
 		assert!(list[0].problem.starts_with("정의를 읽지 못했습니다"));
 		assert_eq!(list[1].def.id, "herdr");
 		assert!(list[1].enabled);
+		fs::remove_dir_all(&root).unwrap();
+	}
+
+	#[test]
+	fn out_reads_previous_step_json() {
+		let j: serde_json::Value = serde_json::from_str(r#"{"result":{"root_pane":{"pane_id":"w1:p2","n":3}}}"#).unwrap();
+		let v = Vars { session: "AB-12cd-34ef-5678".into(), ..vars() };
+		let args = vec!["--pane".to_string(), "{out.result.root_pane.pane_id}".into(), "{out.result.root_pane.n}".into(), "docket-{session_short}".into()];
+		assert_eq!(fill_with(&args, &v, &Out::Json(&j)).unwrap(), vec!["--pane", "w1:p2", "3", "docket-ab12cd34"]);
+		assert!(fill_with(&["{out.result.nope}".to_string()], &v, &Out::Json(&j)).is_err());
+		assert!(fill(&["{out.result}".to_string()], &v).is_err(), "첫 단계에는 앞 출력이 없다");
+	}
+
+	#[test]
+	fn herdr_preset_passes_check_and_resumes() {
+		let p = herdr();
+		assert_eq!(check(&p, true, &mut HashSet::new()), "");
+		assert!(p.attach.iter().flatten().any(|a| a.contains("{session}")));
+		// {out.…} 을 첫 단계에 쓰면 잡는다.
+		let bad = Plugin { attach: vec![vec!["{out.x}".into()]], ..herdr() };
+		assert!(check(&bad, true, &mut HashSet::new()).contains("둘째 단계"));
+	}
+
+	#[test]
+	fn attach_reads_one_or_many_steps() {
+		let one: Plugin = serde_json::from_str(r#"{"attach":["a","b"]}"#).unwrap();
+		assert_eq!(one.attach, vec![vec!["a".to_string(), "b".into()]]);
+		let many: Plugin = serde_json::from_str(r#"{"attach":[["a"],["b"]]}"#).unwrap();
+		assert_eq!(many.attach.len(), 2);
+		let none: Plugin = serde_json::from_str(r#"{"attach":[]}"#).unwrap();
+		assert!(none.attach.is_empty());
+	}
+
+	#[test]
+	fn preset_refreshes_only_blank_definition() {
+		let root = std::env::temp_dir().join(format!("docket-plugins-{}", crate::model::short_id()));
+		let d = dir(&root);
+		fs::create_dir_all(&d).unwrap();
+		let path = d.join("herdr.json");
+		// 인자를 채우기 전의 빈 틀은 새 틀로 바꾼다.
+		fs::write(&path, r#"{ "id": "herdr", "kind": "terminal", "exe": "herdr", "probe": [], "attach": [], "launch": [], "hostWt": true }"#).unwrap();
+		create_preset(&root, "herdr").unwrap();
+		assert!(!is_blank(&path));
+		// 손으로 채운 정의는 덮지 않는다.
+		let mine = r#"{ "id": "herdr", "kind": "terminal", "exe": "herdr", "launch": ["--x"] }"#;
+		fs::write(&path, mine).unwrap();
+		assert!(create_preset(&root, "herdr").is_err());
+		assert_eq!(fs::read_to_string(&path).unwrap(), mine);
+		// 읽지 못하는 파일도 덮지 않는다.
+		fs::write(&path, "{ not json").unwrap();
+		assert!(create_preset(&root, "herdr").is_err());
 		fs::remove_dir_all(&root).unwrap();
 	}
 }

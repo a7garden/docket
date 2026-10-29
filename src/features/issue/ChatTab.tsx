@@ -163,7 +163,7 @@ export function SessionBar({ issue, projectPath }: { issue: Issue; projectPath: 
 	if (!id) return null;
 	const openTitle = plugin
 		? plugin.attach.length > 0
-			? `켜 둔 ${plugin.name} 에 창으로 붙입니다. 없으면 새로 띄웁니다`
+			? `켜 둔 ${plugin.name} 에 새 탭으로 붙입니다. 없으면 새로 띄웁니다`
 			: `프로젝트 폴더에서 ${plugin.name} 를 띄웁니다`
 		: "프로젝트 폴더에서 claude --resume 으로 엽니다";
 	return (

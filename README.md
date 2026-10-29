@@ -112,15 +112,23 @@ Claude 에게는 메모나 이 앱을 저장소 파일 · 주석에 언급하지
 
 ```json
 { "id": "herdr", "name": "herdr", "kind": "terminal", "exe": "herdr",
-  "probe": [], "attach": [], "launch": [], "hostWt": true, "note": "" }
+  "probe": ["workspace", "list"],
+  "focus": ["agent", "focus", "docket-{session_short}"],
+  "attach": [["tab", "create", "--cwd", "{cwd}", "--label", "{title}", "--focus"],
+             ["agent", "start", "docket-{session_short}", "--kind", "claude",
+              "--pane", "{out.result.root_pane.pane_id}", "--", "--resume", "{session}"]],
+  "launch": [], "hostWt": true, "attachAfterLaunch": true, "note": "" }
 ```
 
 - `exe` 는 이름만 적으면 PATH 에서 찾는다(확장자를 빼면 `.exe` 를 붙여 본다).
-- 인자 안의 자리표시 `{cwd}` 프로젝트 폴더 · `{claude}` claude 실행 파일 · `{session}` 세션 ID · `{title}` `#번호 제목` 을 채운다. 셸을 거치지 않고 인자 배열 그대로 넘긴다.
-- `probe` 를 창 없이 돌려 3초 안에 0 으로 끝나면(켜 둔 것이 있으면) `attach` 로 붙이고, 아니거나 `attach` 가 실패하면 `launch` 로 새로 띄운다. `probe` · `attach` 를 비우면 늘 `launch` 다.
+- 인자 안의 자리표시 `{cwd}` 프로젝트 폴더 · `{claude}` claude 실행 파일 · `{session}` 세션 ID · `{session_short}` 세션 ID 앞 8자(영문 소문자 · 숫자) · `{title}` `#번호 제목` 을 채운다. 셸을 거치지 않고 인자 배열 그대로 넘긴다.
+- `probe` 를 창 없이 돌려 3초 안에 0 으로 끝나면(켜 둔 것이 있으면) `focus` 를 먼저 돌려 0 이면 거기서 끝내고(이 세션이 이미 떠 있다), 아니면 `attach` 로 붙인다. 켜 둔 것이 없거나 `attach` 의 첫 단계가 실패하면 `launch` 로 새로 띄운다. `probe` · `attach` 를 비우면 늘 `launch` 다.
+- `attach` 는 단계 하나면 `["a", "b"]`, 여럿이면 `[["a"], ["b"]]` 로 적는다. 둘째 단계부터는 `{out.경로}` 로 앞 단계가 낸 JSON 의 값을 받는다. 둘째 단계부터 실패하면 새로 띄우지 않고 herdr 가 낸 오류를 그대로 알린다(앞 단계가 만든 탭이 남아 있기 때문이다).
+- `attachAfterLaunch` 를 켜면 `launch` 로 띄운 뒤 20초 동안 `probe` 가 0 이 되기를 기다렸다가 `attach` 를 돌린다. herdr 처럼 띄우는 인자로 명령을 받지 않는 프로그램도 세션을 잇는다.
 - `hostWt` 를 켜면 `launch` 를 Windows 터미널 새 탭(`wt.exe -d {cwd}`) 안에서 띄운다. 화면이 있어야 도는 프로그램은 창이 따로 없으면 바로 끝난다.
 - 켠 플러그인을 쓸 수 없으면(실행 파일을 못 찾음 · 모르는 자리표시 · 정의를 읽지 못함) Windows 터미널로 넘어가지 않고 오류를 낸다. 켜 둔 연동이 몰래 빠지지 않게 하려는 것이다. 켠 터미널 플러그인이 둘이면 파일 이름 순으로 앞의 것을 쓴다.
-- 「herdr 정의 만들기」는 `plugins/herdr.json` 을 만든다(있으면 덮지 않는다). herdr 의 인자는 아직 비어 있다 — `herdr --help` 로 켜 둔 herdr 를 알아보는 명령(`probe`) · 창을 붙이는 명령(`attach`) · 명령을 주어 띄우는 인자(`launch`)를 확인해 채운다. `{session}` 이 어느 인자에도 없으면 설정 화면이 「세션을 잇지 않고 프로그램만 엽니다」라고 알린다.
+- 「herdr 정의 만들기」는 위 정의로 `plugins/herdr.json` 을 만든다. 켜 둔 herdr 에는 이슈마다 새 탭 「#번호 제목」을 만들어 `claude --resume` 으로 잇고, 그 세션이 이미 떠 있으면 그 탭으로 옮긴다. herdr 가 꺼져 있으면 Windows 터미널에 띄운 뒤 붙인다. claude 는 herdr 가 PATH 에서 찾는다(설정의 claude 경로를 쓰지 않는다).
+- 정의가 이미 있으면 덮지 않는다. 다만 인자(`probe` · `focus` · `attach` · `launch`)가 모두 빈 정의는 인자를 채우기 전에 만든 빈 틀이라 설정 화면에 「herdr 정의 새로 채우기」가 보이고, 누르면 새 틀로 바꾼다. `{session}` 이 어느 인자에도 없으면 설정 화면이 「세션을 잇지 않고 프로그램만 엽니다」라고 알린다.
 
 ## 개발
 

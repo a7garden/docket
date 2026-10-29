@@ -31,16 +31,19 @@ export interface Settings {
 	recipeAuto: boolean;
 }
 
-/** plugins/*.json 의 정의. 자리표시: {cwd} {claude} {session} {title} */
+/** plugins/*.json 의 정의. 자리표시: {cwd} {claude} {session} {session_short} {title} · attach 둘째 단계부터 {out.경로} */
 export interface Plugin {
 	id: string;
 	name: string;
 	kind: string;
 	exe: string;
 	probe: string[];
-	attach: string[];
+	focus: string[];
+	/** 단계마다 인자 배열 하나 */
+	attach: string[][];
 	launch: string[];
 	hostWt: boolean;
+	attachAfterLaunch: boolean;
 	note: string;
 }
 

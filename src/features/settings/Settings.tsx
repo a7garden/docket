@@ -324,7 +324,9 @@ export function Settings() {
 function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (id: string, on: boolean) => Promise<void> }) {
 	const { data, refetch } = usePlugins();
 	const plugins = data?.plugins ?? [];
-	const hasHerdr = plugins.some((p) => p.id === "herdr");
+	const herdr = plugins.find((p) => p.id === "herdr");
+	// 인자를 하나도 채우지 않은 정의는 앱이 새 틀로 바꿔 준다(plugins.rs create_preset). 손으로 채운 것은 건드리지 않는다.
+	const herdrBlank = !!herdr && !herdr.problem.startsWith("정의를 읽지 못했습니다") && [herdr.probe, herdr.focus, herdr.attach, herdr.launch].every((a) => a.length === 0);
 	return (
 		<Group id="plugins">
 			{plugins.length === 0 && (
@@ -342,14 +344,14 @@ function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (id: stri
 					<FolderOpen />
 					폴더 열기
 				</Button>
-				{!hasHerdr && (
+				{(!herdr || herdrBlank) && (
 					<Button
 						variant="outline"
 						size="sm"
 						onClick={async () => {
 							try {
 								await api.pluginCreatePreset("herdr");
-								toast.success("herdr 정의를 만들었습니다. 인자를 채운 뒤 켜세요.");
+								toast.success(herdrBlank ? "herdr 정의의 인자를 채웠습니다. 켜면 씁니다." : "herdr 정의를 만들었습니다. 켜면 씁니다.");
 								void refetch();
 							} catch (e) {
 								toast.error(errorText(e));
@@ -357,7 +359,7 @@ function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (id: stri
 						}}
 					>
 						<Plus />
-						herdr 정의 만들기
+						{herdrBlank ? "herdr 정의 새로 채우기" : "herdr 정의 만들기"}
 					</Button>
 				)}
 				<Button variant="ghost" size="sm" onClick={() => void refetch()}>
