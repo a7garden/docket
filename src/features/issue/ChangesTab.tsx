@@ -5,9 +5,11 @@ import { Empty, SectionTitle } from "@/components/bits";
 import { DiffView } from "@/components/DiffView";
 import { Markdown } from "@/components/Markdown";
 import { DeniedBox } from "@/components/Permissions";
+import { pluginActions } from "@/components/PluginResult";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
 import { fileUrl, joinPath } from "@/lib/format";
+import { usePluginMenus } from "@/lib/queries";
 import type { Issue, Shot } from "@/lib/types";
 
 /**
@@ -66,6 +68,7 @@ function sources(issue: Issue) {
 // 구현 중이라는 것은 창 머리의 상태와 아랫단의 실시간 활동이 이미 말한다. 여기서는 바뀐 파일만 보인다.
 export function ChangesTab({ issue, projectPath }: { issue: Issue; projectPath: string }) {
 	const r = issue.result;
+	const fileMenus = usePluginMenus("file");
 	const implementing = issue.run?.kind === "implement" || issue.run?.kind === "chat";
 	// 마지막으로 끝난 구현 · 수정 요청 · 대화에서 막힌 것. 결과의 「확인」 칸에 「권한이 없어 못 돌렸다」가 적혀 있을 때 바로 풀 수 있게 한다.
 	const last = [...issue.runs].reverse().find((x) => (x.kind === "implement" || x.kind === "chat") && x.status !== "running");
@@ -109,7 +112,7 @@ export function ChangesTab({ issue, projectPath }: { issue: Issue; projectPath: 
 						<SectionTitle>바뀐 파일</SectionTitle>
 						<span className="text-[12px] text-subtle">{sources(issue).join(" · ")}</span>
 					</div>
-					<DiffView changes={issue.changes} />
+					<DiffView changes={issue.changes} fileMenu={(path) => pluginActions(fileMenus, { projectId: issue.projectId, issueId: issue.id, file: path, changes: true, session: !!issue.sessionId })} />
 				</section>
 			)}
 		</div>

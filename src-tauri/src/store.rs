@@ -10,7 +10,8 @@
 //!   projects/<pid>/kb/                 지식베이스 · catalog.json · inbox/ · text/ (kb.rs)
 //!   projects/<pid>/glossary.json       어휘 사전 용어 목록 (glossary.rs)
 //!   trash/<시각>-<이름>/                  지운 것은 여기로 옮긴다
-//!   plugins/<id>.json                     플러그인 정의 (사용자가 쓴다 · plugins.rs)
+//!   plugins/<id>/plugin.json · <main>.wasm  플러그인 (설치하거나 사용자가 쓴다 · plugin_host) · 옛 정의 plugins/<id>.json
+//!   plugins-data/<id>/                    플러그인의 설정 칸 값 · 저장소 · 기록 (plugin_host)
 //! ```
 //!
 //! 프로젝트 폴더에는 쓰지 않는다. 소스 저장소에 이 앱의 흔적이 남지 않게 하는 것이 이 앱의 약속이다.
@@ -177,7 +178,7 @@ impl Store {
 		fs::create_dir_all(root.join("projects"))?;
 		fs::create_dir_all(root.join("trash"))?;
 		// 설정 화면의 「폴더 열기」가 처음부터 열리게 만들어 둔다.
-		fs::create_dir_all(crate::plugins::dir(&root))?;
+		fs::create_dir_all(crate::plugin_host::dir(&root))?;
 		Ok(Self { root, lock: Mutex::new(()) })
 	}
 

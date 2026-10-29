@@ -64,6 +64,8 @@ export function useDocketEvents() {
 				qc.setQueryData<Deliverable[]>(qk.deliverables(payload.projectId), (old) => old?.filter((x) => x.id !== payload.id));
 			}),
 		);
+		// 플러그인이 docket_notify 로 띄운 알림. 어느 플러그인이 띄웠는지 함께 보인다.
+		pending.push(listen<{ plugin: string; text: string }>("docket://plugin-notice", ({ payload }) => void toast(payload.text, { description: payload.plugin })));
 		pending.push(listen<RunEnvelope>("docket://run", ({ payload }) => useLive.getState().push(payload)));
 		pending.push(listen<Usage>("docket://usage", ({ payload }) => qc.setQueryData(qk.usage, payload)));
 		// 색인 진행은 자주 온다. 진행 칸만 바로 고치고, 한 단계가 끝날 때 목록을 다시 읽는다.

@@ -14,7 +14,11 @@ interface UpdateState {
 	progress: { done: number; total: number };
 	error: string;
 	checkedAt: number | null;
+	/** 설치를 눌러 UpdateConfirm 이 돌고 있는 실행을 보고 있다. 실행이 없으면 바로 깔고 끈다. */
+	confirming: boolean;
 	check: () => Promise<Update | null>;
+	/** 토스트 · 설정의 설치 단추가 부른다. 실행 수는 화면 쪽 훅에서만 알 수 있어 묻는 일은 UpdateConfirm 이 한다. */
+	requestInstall: () => void;
 	install: () => Promise<void>;
 }
 
@@ -25,6 +29,11 @@ export const useUpdate = create<UpdateState>()((set, get) => ({
 	progress: { done: 0, total: 0 },
 	error: "",
 	checkedAt: null,
+	confirming: false,
+	requestInstall: () => {
+		const { update, phase } = get();
+		if (update && phase !== "downloading") set({ confirming: true });
+	},
 	check: async () => {
 		if (get().phase === "checking" || get().phase === "downloading") return get().update;
 		set({ phase: "checking", error: "" });
@@ -69,18 +78,9 @@ export function useUpdater() {
 			.then((update) => {
 				if (!update) return;
 				toast(`새 판 ${update.version} 이 나왔습니다`, {
-					description: "설정 › 업데이트에서 바뀐 내용을 봅니다. 설치하면 앱이 꺼졌다 다시 켜지고, 돌던 Claude 실행은 멈춥니다.",
+					description: "설정 › 업데이트에서 바뀐 내용을 봅니다. 설치하면 앱이 꺼졌다 다시 켜집니다.",
 					duration: Infinity,
-					action: {
-						label: "설치",
-						onClick: () => {
-							const id = toast.loading(`${update.version} 받는 중`);
-							useUpdate
-								.getState()
-								.install()
-								.catch((e) => toast.error("업데이트하지 못했습니다", { id, description: String(e) }));
-						},
-					},
+					action: { label: "설치", onClick: () => useUpdate.getState().requestInstall() },
 				});
 			})
 			// 오프라인이거나 릴리즈가 아직 없으면 조용히 넘어간다. 다음에 켤 때 다시 본다.

@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import type { Issue } from "./types";
+import type { Issue, Tokens } from "./types";
 
 export function relTime(ms: number, now = Date.now()): string {
 	if (!ms) return "";
@@ -41,6 +41,15 @@ export function bytes(n: number): string {
 export function cost(usd: number): string {
 	if (!usd) return "";
 	return usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
+}
+
+/** 입력 · 캐시 작성 · 캐시 읽기 · 출력을 모두 더한 수. 0 이면(옛 기록) 빈 글이다. */
+export function tokens(t: Tokens | undefined): string {
+	const n = t ? t.input + t.output + t.cacheCreate + t.cacheRead : 0;
+	if (!n) return "";
+	if (n < 1000) return `${n}`;
+	if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+	return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 export function joinPath(...parts: string[]) {

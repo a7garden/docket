@@ -1,13 +1,13 @@
 /*
  * 설정 화면.
  * - 목차 SECTIONS · 화면 Settings (왼쪽 목차 + 본문 두 단)
- * - 구획: Claude · 자동 계획 · 지식베이스 · 산출물 · 플러그인(Plugins) · 화면 · 업데이트(Updates.tsx) · 저장 위치
- * - 틀: Group · Row (Updates.tsx 도 쓴다)
+ * - 구획: Claude · 자동 계획 · 지식베이스 · 산출물 · 플러그인(Plugins.tsx) · 화면 · 업데이트(Updates.tsx) · 저장 위치
+ * - 틀: Group · Row (Updates.tsx · Plugins.tsx 도 쓴다)
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, Plus, RefreshCw } from "lucide-react";
+import { FolderOpen } from "lucide-react";
 import { toast } from "sonner";
 import { Label } from "@/components/bits";
 import { Button } from "@/components/ui/button";
@@ -15,9 +15,10 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api, errorText } from "@/lib/api";
-import { qk, useAppInfo, usePlugins, useSettings } from "@/lib/queries";
-import type { PluginView, Settings as S } from "@/lib/types";
+import { qk, useAppInfo, useSettings } from "@/lib/queries";
+import type { Settings as S } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { Plugins } from "./Plugins";
 import { RunPicker } from "./RunPicker";
 import { Updates } from "./Updates";
 
@@ -315,68 +316,6 @@ export function Settings() {
 			</div>
 		</div>
 	);
-}
-
-/**
- * 플러그인 정의는 plugins/ 폴더의 json 으로만 고친다. 화면에 인자 칸을 두면 같은 정의를 두 곳에서 고치게 된다.
- * 여기서는 켜고 끄기 · 틀 만들기 · 문제 보기만 한다.
- */
-function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (id: string, on: boolean) => Promise<void> }) {
-	const { data, refetch } = usePlugins();
-	const plugins = data?.plugins ?? [];
-	const herdr = plugins.find((p) => p.id === "herdr");
-	// 인자를 하나도 채우지 않은 정의는 앱이 새 틀로 바꿔 준다(plugins.rs create_preset). 손으로 채운 것은 건드리지 않는다.
-	const herdrBlank = !!herdr && !herdr.problem.startsWith("정의를 읽지 못했습니다") && [herdr.probe, herdr.focus, herdr.attach, herdr.launch].every((a) => a.length === 0);
-	return (
-		<Group id="plugins">
-			{plugins.length === 0 && (
-				<p className="px-4 py-3.5 text-[12.5px] leading-relaxed break-keep text-subtle">
-					아직 플러그인이 없습니다. 플러그인 폴더에 json 정의를 두거나 아래에서 herdr 정의를 만듭니다. 켠 터미널 플러그인이 있으면 「터미널에서 잇기」가 그것으로 엽니다.
-				</p>
-			)}
-			{plugins.map((p) => (
-				<Row key={p.file} label={`${p.name} · ${p.kind || "종류 모름"}`} hint={pluginHint(p)} inline>
-					<Switch checked={enabled.includes(p.id)} onCheckedChange={(v) => void onToggle(p.id, v)} />
-				</Row>
-			))}
-			<div className="flex flex-wrap items-center gap-2 px-4 py-3">
-				<Button variant="outline" size="sm" disabled={!data?.dir} onClick={() => data?.dir && void api.open(data.dir).catch((e) => toast.error(errorText(e)))}>
-					<FolderOpen />
-					폴더 열기
-				</Button>
-				{(!herdr || herdrBlank) && (
-					<Button
-						variant="outline"
-						size="sm"
-						onClick={async () => {
-							try {
-								await api.pluginCreatePreset("herdr");
-								toast.success(herdrBlank ? "herdr 정의의 인자를 채웠습니다. 켜면 씁니다." : "herdr 정의를 만들었습니다. 켜면 씁니다.");
-								void refetch();
-							} catch (e) {
-								toast.error(errorText(e));
-							}
-						}}
-					>
-						<Plus />
-						{herdrBlank ? "herdr 정의 새로 채우기" : "herdr 정의 만들기"}
-					</Button>
-				)}
-				<Button variant="ghost" size="sm" onClick={() => void refetch()}>
-					<RefreshCw />
-					다시 읽기
-				</Button>
-			</div>
-		</Group>
-	);
-}
-
-function pluginHint(p: PluginView) {
-	const lines = [p.exePath || p.file];
-	if (p.problem) lines.push(`쓸 수 없음: ${p.problem}`);
-	else if (p.warning) lines.push(p.warning);
-	if (p.note) lines.push(p.note);
-	return lines.join(" · ");
 }
 
 function PathLine({ path }: { path?: string }) {

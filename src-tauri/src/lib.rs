@@ -6,7 +6,7 @@ mod glossary;
 mod kb;
 mod model;
 mod naming;
-mod plugins;
+mod plugin_host;
 mod recipe;
 mod runner;
 mod store;
@@ -58,6 +58,7 @@ pub fn run() {
 		.invoke_handler(tauri::generate_handler![
 			commands::app_info,
 			commands::usage_get,
+			commands::spend_summary,
 			commands::settings_get,
 			commands::settings_save,
 			commands::path_open,
@@ -94,6 +95,13 @@ pub fn run() {
 			commands::issue_set_session,
 			commands::plugins_list,
 			commands::plugin_create_preset,
+			commands::plugin_grant,
+			commands::plugin_inspect,
+			commands::plugin_install,
+			commands::plugin_uninstall,
+			commands::plugin_settings_get,
+			commands::plugin_settings_set,
+			commands::plugin_invoke,
 			commands::issue_complete,
 			commands::issue_drop,
 			commands::issue_reopen,

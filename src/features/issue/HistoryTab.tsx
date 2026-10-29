@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ChevronRight } from "lucide-react";
 import { Chip, SectionTitle } from "@/components/bits";
 import { RunEvents } from "@/components/RunLog";
-import { clock, cost, duration } from "@/lib/format";
+import { clock, cost, duration, tokens } from "@/lib/format";
 import { HISTORY_LABEL, RUN_KIND_LABEL } from "@/lib/status";
 import type { Issue, RunRecord } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -142,7 +142,7 @@ function RunRow({ issue, run, defaultOpen }: { issue: Issue; run: RunRecord; def
 				{(run.denials?.length ?? 0) > 0 && <span className="text-[12px] text-brand-text">막힘 {run.denials.length}</span>}
 				<span className="flex-1" />
 				<span className="tabular text-[12px] text-subtle">
-					{[clock(run.startedAt), duration(run.durationMs), run.numTurns ? `${run.numTurns}턴` : "", cost(run.costUsd)].filter(Boolean).join(" · ")}
+					{[clock(run.startedAt), duration(run.durationMs), run.numTurns ? `${run.numTurns}턴` : "", tokens(run.tokens) && `토큰 ${tokens(run.tokens)}`, cost(run.costUsd)].filter(Boolean).join(" · ")}
 				</span>
 			</button>
 			{open && (

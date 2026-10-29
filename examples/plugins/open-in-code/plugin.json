@@ -1,0 +1,15 @@
+{
+	"id": "open-in-code",
+	"name": "VS Code 로 열기",
+	"version": "1.0.0",
+	"apiVersion": 1,
+	"description": "이 이슈에서 바뀐 파일을 VS Code 로 엽니다.",
+	"main": "plugin.wasm",
+	"permissions": ["issue:read", "process:code"],
+	"contributes": {
+		"menus": [
+			{ "where": "issue", "command": "open", "label": "VS Code 로 열기", "when": "changes" },
+			{ "where": "file", "command": "open-file", "label": "VS Code 로 열기" }
+		]
+	}
+}

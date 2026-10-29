@@ -21,8 +21,10 @@ export interface Settings {
 	titleDelaySec: number;
 	useMcp: boolean;
 	theme: "system" | "dark" | "light";
-	/** 켠 플러그인 id. 정의는 앱 데이터의 plugins/*.json 에 있다. */
+	/** 켠 플러그인 id. 정의는 앱 데이터의 plugins/ 에 있다. */
 	enabledPlugins: string[];
+	/** 플러그인마다 허락한 권한. 매니페스트가 이보다 넓으면 다시 허락받기 전에는 부르지 않는다. */
+	pluginGrants: Record<string, string[]>;
 	/** 지식베이스의 색인 카드 · 고르기 다듬기 · 자동 갱신 판정 모델. 비우면 제목 모델, 그것도 비면 haiku. */
 	kbCardModel: string;
 	/** 대화 · 다시 계획 · 수정 요청 입력칸의 보내기 키. enter 면 Shift+Enter 로 줄을 바꾼다. */
@@ -31,11 +33,8 @@ export interface Settings {
 	recipeAuto: boolean;
 }
 
-/** plugins/*.json 의 정의. 자리표시: {cwd} {claude} {session} {session_short} {title} · attach 둘째 단계부터 {out.경로} */
-export interface Plugin {
-	id: string;
-	name: string;
-	kind: string;
+/** 터미널 기여. 자리표시: {cwd} {claude} {session} {session_short} {title} · attach 둘째 단계부터 {out.경로} */
+export interface PluginTerminal {
 	exe: string;
 	probe: string[];
 	focus: string[];
@@ -44,21 +43,76 @@ export interface Plugin {
 	launch: string[];
 	hostWt: boolean;
 	attachAfterLaunch: boolean;
-	note: string;
 }
 
-export interface PluginView extends Plugin {
+/** issue: 이슈 카드 · 상세 「더 보기」 · file: 바뀐 파일 머리 · project: 사이드바 프로젝트 */
+export type PluginPlace = "issue" | "file" | "project";
+
+export interface PluginMenu {
+	where: PluginPlace;
+	command: string;
+	label: string;
+	/** changes: 바뀐 파일이 있을 때 · session: 이어 갈 세션이 있을 때 · 비우면 늘 */
+	when: "" | "changes" | "session";
+}
+
+export interface PluginField {
+	key: string;
+	label: string;
+	type: "text" | "toggle" | "select";
+	options: string[];
+	default: unknown;
+	hint: string;
+}
+
+/** plugins/<id>/plugin.json (plugin_host/manifest.rs). 옛 정의(plugins/<id>.json)도 이 꼴로 읽어 온다. */
+export interface PluginManifest {
+	id: string;
+	name: string;
+	version: string;
+	apiVersion: number;
+	description: string;
+	main: string;
+	permissions: string[];
+	contributes: { menus: PluginMenu[]; events: string[]; settings: PluginField[]; terminal: PluginTerminal | null };
+}
+
+export interface PluginView extends PluginManifest {
 	file: string;
+	dir: string;
+	legacy: boolean;
 	enabled: boolean;
 	exePath: string;
+	/** 아직 허락하지 않은 권한. 비어야 부른다. */
+	missing: string[];
 	/** 있으면 쓰지 않는다 */
 	problem: string;
 	warning: string;
+	/** 최근 7일 동안 실패한 사건 · 메뉴 수 */
+	failures: number;
+	log: string;
 }
 
 export interface PluginList {
 	dir: string;
 	plugins: PluginView[];
+}
+
+export interface PluginInspect {
+	manifest: PluginManifest;
+	problem: string;
+	/** 같은 id 로 이미 있는 것의 판 */
+	installed: string;
+	source: string;
+}
+
+/** 메뉴 항목을 누르면 플러그인이 돌려주는 것. 화면이 그린다. */
+export interface PluginReply {
+	toast: string;
+	open: string;
+	copy: string;
+	markdown: string;
+	title: string;
 }
 
 export interface AppInfo {
@@ -86,6 +140,29 @@ export interface Usage {
 	overage: boolean;
 	/** 받은 시각(ms) */
 	seenAt: number;
+}
+
+/** claude 한 번 호출이 쓴 토큰 (result 줄의 usage) */
+export interface Tokens {
+	input: number;
+	output: number;
+	cacheCreate: number;
+	cacheRead: number;
+}
+
+/** 사용량 장부의 묶음 하나. group 은 plan · implement(되돌리기 포함) · chat · document · quick(제목 · 색인 카드 · 판정 · 작성법) · total */
+export interface SpendRow {
+	group: string;
+	calls: number;
+	tokens: Tokens;
+	costUsd: number;
+}
+
+/** 최근 days 일 동안 이 앱이 claude 를 부른 양. 호출이 없던 묶음은 rows 에 없다 */
+export interface Spend {
+	days: number;
+	rows: SpendRow[];
+	total: SpendRow;
 }
 
 export interface Project {
@@ -292,6 +369,8 @@ export interface RunRecord {
 	endedAt: number;
 	status: "running" | "ok" | "error" | "stopped";
 	costUsd: number;
+	/** 이 기능 전의 기록은 모두 0 이다 */
+	tokens: Tokens;
 	durationMs: number;
 	numTurns: number;
 	model: string;

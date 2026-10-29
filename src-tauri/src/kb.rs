@@ -882,7 +882,7 @@ async fn index_project(app: &AppHandle, pid: &str, stop: &AtomicBool) -> Result<
 					return Ok(());
 				}
 				let prompt = card_prompt(&cat.files[fi], &text, &batch);
-				let answer = runner::quick_call(exe.clone(), &model, CARD_SYSTEM, prompt, &dir, dir.join("cards.last.jsonl"), 180).await;
+				let answer = runner::quick_call(exe.clone(), (pid, "card"), &model, CARD_SYSTEM, prompt, &dir, dir.join("cards.last.jsonl"), 180).await;
 				let f = &mut cat.files[fi];
 				let failed = match answer {
 					Some((a, cost)) => {
@@ -940,7 +940,7 @@ pub async fn find(app: &AppHandle, p: &Project, settings: &Settings, query: &str
 		return hits.into_iter().take(k).collect();
 	}
 	let Some(exe) = runner::resolve_claude(&settings.claude_path) else { return hits.into_iter().take(k).collect() };
-	let answer = runner::quick_call(exe, &card_model(settings), RERANK_SYSTEM, rerank_prompt(query, &hits, k), &dir, dir.join("rerank.last.jsonl"), 60).await;
+	let answer = runner::quick_call(exe, (&p.id, "rerank"), &card_model(settings), RERANK_SYSTEM, rerank_prompt(query, &hits, k), &dir, dir.join("rerank.last.jsonl"), 60).await;
 	let picked: Option<Vec<usize>> = answer
 		.and_then(|(a, _)| json_in(&a))
 		.and_then(|v| v.as_array().map(|a| a.iter().filter_map(|x| x.as_u64()).map(|x| x as usize).collect()));
@@ -1148,7 +1148,7 @@ async fn auto_update(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 	}
 	let pairs: Vec<(&Deliverable, &String)> = cands.iter().zip(descs.iter()).collect();
 	let dir = store.kb_dir(pid);
-	let answer = runner::quick_call(exe, &card_model(&settings), JUDGE_SYSTEM, judge_prompt(&brief, &pairs), &store.project_dir(pid), dir.join("judge.last.jsonl"), 120)
+	let answer = runner::quick_call(exe, (pid, "judge"), &card_model(&settings), JUDGE_SYSTEM, judge_prompt(&brief, &pairs), &store.project_dir(pid), dir.join("judge.last.jsonl"), 120)
 		.await
 		.ok_or_else(|| Error::Msg("판정 호출이 실패했습니다".into()))?;
 	let Some(Value::Array(items)) = json_in(&answer.0) else { return Err(Error::Msg("판정 답을 읽지 못했습니다".into())) };

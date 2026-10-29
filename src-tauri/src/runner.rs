@@ -742,20 +742,20 @@ pub async fn claude_version(exe: &Path) -> String {
 }
 
 /// 이슈 세션을 터미널에서 잇는다. 세션 기록은 폴더별로 저장되므로 프로젝트 폴더에서 띄워야 찾는다.
-/// 켠 터미널 플러그인이 있으면 그 정의대로 연다(켜 둔 것에 붙이거나 새로 띄운다 · plugins::open).
-/// 없으면 Windows 터미널이 있을 때 새 탭으로, 없을 때 새 콘솔 창으로 띄운다.
-pub fn open_terminal(exe: &Path, cwd: &Path, session_id: &str, plugin: Option<(&crate::plugins::Plugin, &Path)>, title: &str) -> Result<()> {
+/// 켠 터미널 플러그인이 있으면 그 정의대로 연다(켜 둔 것에 붙이거나 새로 띄운다 · plugin_host::terminal::open).
+/// 없으면 Windows 터미널이 있을 때 새 탭으로, 없을 때 새 콘솔 창으로 띄운다. `plugin` 은 이름 · 터미널 정의 · 실행 파일이다.
+pub fn open_terminal(exe: &Path, cwd: &Path, session_id: &str, plugin: Option<(&str, &crate::plugin_host::terminal::Terminal, &Path)>, title: &str) -> Result<()> {
 	if !cwd.is_dir() {
 		return msg(format!("프로젝트 폴더를 찾을 수 없습니다: {}", cwd.display()));
 	}
-	if let Some((p, plugin_exe)) = plugin {
-		let vars = crate::plugins::Vars {
+	if let Some((name, t, plugin_exe)) = plugin {
+		let vars = crate::plugin_host::terminal::Vars {
 			cwd: cwd.to_string_lossy().to_string(),
 			claude: exe.to_string_lossy().to_string(),
 			session: session_id.to_string(),
 			title: title.to_string(),
 		};
-		return crate::plugins::open(p, plugin_exe, &vars);
+		return crate::plugin_host::terminal::open(name, t, plugin_exe, &vars);
 	}
 	#[cfg(windows)]
 	{
@@ -1145,6 +1145,9 @@ struct Spec {
 	log: PathBuf,
 	root: String,
 	run_id: String,
+	/// 사용량 장부(usage::spend)에 적을 프로젝트 id · 실행 종류.
+	project: String,
+	kind: &'static str,
 }
 
 struct Outcome {
@@ -1225,6 +1228,10 @@ async fn exec(spec: Spec, ctl: &RunCtl, mut emit: impl FnMut(&RunEvent, &Parser)
 	let stderr_text = tokio::time::timeout(Duration::from_secs(2), stderr_task).await.ok().and_then(|r| r.ok()).unwrap_or_default();
 	if let Some(mut f) = log {
 		let _ = f.flush().await;
+	}
+	// 실패한 호출도 쓴 토큰은 쓴 것이다. result 줄이 왔으면 성패와 상관없이 장부에 적는다.
+	if let Some(r) = parser.result.as_ref() {
+		crate::usage::spend(&spec.project, spec.kind, &parser.model, r);
 	}
 
 	if stopped {
@@ -1703,15 +1710,18 @@ fn kb_add_dir(args: &mut Vec<String>, store: &Store, pid: &str) {
 
 /* ---------- 이슈 작업 ---------- */
 
-fn record(run_id: &str, kind: RunKind, prompt: &str) -> RunRecord {
-	let kind = match kind {
+fn kind_name(kind: RunKind) -> &'static str {
+	match kind {
 		RunKind::Plan => "plan",
 		RunKind::Implement => "implement",
 		RunKind::Document => "document",
 		RunKind::Chat => "chat",
 		RunKind::Revert => "revert",
-	};
-	RunRecord { id: run_id.into(), kind: kind.into(), started_at: now_ms(), status: "running".into(), prompt: prompt.into(), ..Default::default() }
+	}
+}
+
+fn record(run_id: &str, kind: RunKind, prompt: &str) -> RunRecord {
+	RunRecord { id: run_id.into(), kind: kind_name(kind).into(), started_at: now_ms(), status: "running".into(), prompt: prompt.into(), ..Default::default() }
 }
 
 fn finish(rec: &mut RunRecord, o: &Outcome) {
@@ -1723,6 +1733,7 @@ fn finish(rec: &mut RunRecord, o: &Outcome) {
 	rec.denials = o.parser.denials.clone();
 	if let Some(r) = o.parser.result.as_ref() {
 		rec.cost_usd = r.get("total_cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
+		rec.tokens = Tokens::from_result(r);
 		rec.duration_ms = r.get("duration_ms").and_then(|x| x.as_u64()).unwrap_or(0);
 		rec.num_turns = r.get("num_turns").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
 	}
@@ -2156,6 +2167,8 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 			log: log.clone(),
 			root: project.path.clone(),
 			run_id: run_id.to_string(),
+			project: pid.to_string(),
+			kind: kind_name(job.kind()),
 		};
 		let o = exec(spec, ctl, |ev, parser| {
 			let _ = app.emit(
@@ -2272,6 +2285,17 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 		Ok(())
 	})?;
 	emit_issue(app, &decided);
+	// 플러그인 사건도 잠금이 풀린 여기서 쏜다. 대화 · 프로젝트 대화 · 중지는 사건이 아니다 — 답마다 쏘면 너무 잦고 알림함이 이미 맡는다.
+	let event = match kind {
+		_ if outcome.stopped || kind == RunKind::Chat || view.issue.talk => None,
+		_ if !outcome.ok => Some("failed"),
+		RunKind::Plan => Some("planned"),
+		RunKind::Revert => Some("reverted"),
+		_ => Some("implemented"),
+	};
+	if let Some(e) = event {
+		crate::plugin_host::dispatch(app, e, crate::plugin_host::api::Target { project_id: pid.to_string(), issue_id: iid.to_string(), ..Default::default() });
+	}
 	// 메모는 위 update_issue 가 끝난 뒤에 만든다. store 의 잠금은 다시 들어갈 수 없어 그 안에서 create_issue 를 부르면 멈춘다.
 	if kind == RunKind::Chat && view.issue.talk && outcome.ok && !outcome.stopped {
 		let memos = memo_blocks(&outcome.parser.result_text()).1;
@@ -2494,6 +2518,8 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		log: store.deliverable_run_log(pid, did, run_id)?,
 		root: project.path.clone(),
 		run_id: run_id.to_string(),
+		project: pid.to_string(),
+		kind: "document",
 	};
 	let mut outcome = exec(spec, ctl, |ev, _| {
 		let _ = app.emit(
@@ -2602,6 +2628,7 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 	}
 	if v.deliverable.versions.len() > before_n {
 		crate::kb::touch(app, pid);
+		crate::plugin_host::dispatch(app, "deliverable", crate::plugin_host::api::Target { project_id: pid.to_string(), issue_id: origin.clone(), deliverable_id: did.to_string(), ..Default::default() });
 	}
 	if !outcome.stopped {
 		attention(app);
@@ -2644,13 +2671,18 @@ fn clean_title(text: &str) -> String {
 /// 끝나지 않는 호출이 순회를 붙잡지 않게 secs 에서 끊는다. 미래를 버리면 kill_on_drop 으로 claude 도 꺼진다.
 /// 성공하면 답 글과 비용(USD)을 돌려준다.
 /// model 이 비면 --model 을 빼 CLI 기본 모델로 돈다. 작성법 뽑기는 구현 모델을 쓰는데, 그 칸은 비어 있을 수 있다.
-pub async fn quick_call(exe: PathBuf, model: &str, system: &str, prompt: String, cwd: &Path, log: PathBuf, secs: u64) -> Option<(String, f64)> {
+/// meter 는 사용량 장부에 적을 (프로젝트 id, 종류)다 — title · card · rerank · judge · learn.
+/// 2026.10.29 : --safe-mode 를 더했다. 이 호출은 글 한 덩이만 받는데도 사용자 전역 CLAUDE.md · 플러그인 · 훅 · 자동 메모리가 실려
+///   제목 한 번에 9,492 토큰이 들었다. 붙이니 779 토큰으로 줄고 구독 로그인 그대로 답이 왔다(CLI 2.1.311 실측).
+///   --bare 는 쓰지 않는다. 그 모드는 ANTHROPIC_API_KEY 만 받고 구독(OAuth) 로그인을 읽지 않는다.
+pub async fn quick_call(exe: PathBuf, meter: (&str, &'static str), model: &str, system: &str, prompt: String, cwd: &Path, log: PathBuf, secs: u64) -> Option<(String, f64)> {
 	let mut args: Vec<String> = [
 		"-p", "--output-format", "stream-json", "--verbose",
 		"--tools", "",
 		"--no-session-persistence",
 		"--disable-slash-commands",
 		"--strict-mcp-config",
+		"--safe-mode",
 		"--permission-mode", "default",
 		"--system-prompt", system,
 	]
@@ -2659,7 +2691,17 @@ pub async fn quick_call(exe: PathBuf, model: &str, system: &str, prompt: String,
 	if !model.trim().is_empty() {
 		args.extend(["--model".into(), model.trim().to_string()]);
 	}
-	let spec = Spec { exe, cwd: cwd.to_path_buf(), args, prompt, log, root: cwd.to_string_lossy().to_string(), run_id: "quick".into() };
+	let spec = Spec {
+		exe,
+		cwd: cwd.to_path_buf(),
+		args,
+		prompt,
+		log,
+		root: cwd.to_string_lossy().to_string(),
+		run_id: "quick".into(),
+		project: meter.0.to_string(),
+		kind: meter.1,
+	};
 	let ctl = RunCtl::new();
 	match tokio::time::timeout(Duration::from_secs(secs), exec(spec, &ctl, |_, _| {})).await {
 		Ok(o) if o.ok => {
@@ -2678,7 +2720,7 @@ async fn make_title(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 	let seen = view.issue.note_updated_at;
 	let exe = resolve_claude(&settings.claude_path).ok_or_else(|| Error::Msg("claude 실행 파일을 찾지 못했습니다".into()))?;
 	let dir = PathBuf::from(&view.dir);
-	let title = match quick_call(exe, settings.title_model.trim(), TITLE_SYSTEM, title_prompt(&view.note), &dir, dir.join("title.jsonl"), 90).await {
+	let title = match quick_call(exe, (pid, "title"), settings.title_model.trim(), TITLE_SYSTEM, title_prompt(&view.note), &dir, dir.join("title.jsonl"), 90).await {
 		Some((t, _)) => clean_title(&t),
 		None => String::new(),
 	};
@@ -3097,6 +3139,8 @@ mod tests {
 			log: issue_dir.join("plan.jsonl"),
 			root: root.clone(),
 			run_id: "plan".into(),
+			project: String::new(),
+			kind: "test",
 		};
 		let mut tools = Vec::new();
 		let o = exec(spec, &ctl, |ev, _| {
@@ -3126,6 +3170,8 @@ mod tests {
 			log: issue_dir.join("chat.jsonl"),
 			root: root.clone(),
 			run_id: "chat".into(),
+			project: String::new(),
+			kind: "test",
 		};
 		let (mut said, mut tools) = (String::new(), Vec::new());
 		let o = exec(spec, &ctl, |ev, _| match ev {
@@ -3156,6 +3202,8 @@ mod tests {
 			log: issue_dir.join("impl.jsonl"),
 			root: root.clone(),
 			run_id: "impl".into(),
+			project: String::new(),
+			kind: "test",
 		};
 		let o = exec(spec, &ctl, |_, _| {}).await;
 		assert!(o.ok, "구현 실패: {}", o.error);
@@ -3179,6 +3227,8 @@ mod tests {
 			log: issue_dir.join("revert.jsonl"),
 			root: root.clone(),
 			run_id: "revert".into(),
+			project: String::new(),
+			kind: "test",
 		};
 		let o = exec(spec, &ctl, |_, _| {}).await;
 		assert!(o.ok, "되돌리기 실패: {}", o.error);
@@ -3223,6 +3273,8 @@ mod doc_tests {
 			log: base.join("run.jsonl"),
 			root: root.clone(),
 			run_id: "t".into(),
+			project: String::new(),
+			kind: "test",
 		};
 		let o = exec(spec, &RunCtl::new(), |_, _| {}).await;
 		assert!(o.ok, "실패: {}", o.error);
@@ -3277,6 +3329,8 @@ mod perm_tests {
 			log: dir.join("read.jsonl"),
 			root: root.clone(),
 			run_id: "read".into(),
+			project: String::new(),
+			kind: "test",
 		};
 		let o = exec(spec, &RunCtl::new(), |_, _| {}).await;
 		assert!(o.ok, "실패: {}", o.error);

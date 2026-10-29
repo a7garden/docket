@@ -5,6 +5,7 @@ import { FolderPlus } from "lucide-react";
 import { Sidebar, pickProject } from "@/components/Sidebar";
 import { Mark, TitleBar } from "@/components/TitleBar";
 import { Button } from "@/components/ui/button";
+import { PluginResultDialog } from "@/components/PluginResult";
 import { Toaster } from "@/components/ui/sonner";
 import { Board } from "@/features/board/Board";
 import { ClaudeConfig } from "@/features/claude/ClaudeConfig";
@@ -14,6 +15,7 @@ import { IssueSheet } from "@/features/issue/IssueSheet";
 import { Knowledge } from "@/features/knowledge/Knowledge";
 import { ProjectHeader } from "@/features/project/ProjectHeader";
 import { Settings } from "@/features/settings/Settings";
+import { UpdateConfirm } from "@/features/settings/UpdateConfirm";
 import { Talks } from "@/features/talk/Talks";
 import { useDocketEvents } from "@/lib/events";
 import { useUpdater } from "@/lib/updater";
@@ -103,6 +105,8 @@ export default function App() {
 				</main>
 			</div>
 			{/* 2026.10.29 : 오른쪽 아래 → 위 가운데. 오른쪽 아래의 진행 버튼을 가렸다. 제목 줄(h-9 · 36px)을 덮지 않게 8px 아래에 띄운다. */}
+			<PluginResultDialog />
+			<UpdateConfirm />
 			<Toaster position="top-center" offset={{ top: 44 }} mobileOffset={{ top: 44 }} theme={theme} />
 		</div>
 	);

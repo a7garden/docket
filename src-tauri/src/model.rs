@@ -42,8 +42,10 @@ pub struct Settings {
 	pub use_mcp: bool,
 	/// system · dark · light
 	pub theme: String,
-	/// 켠 플러그인의 id. 정의는 plugins/*.json 에 있고, 켜고 끄는 것만 여기 둔다. 사용자가 쓴 정의 파일을 앱이 고쳐 쓰지 않게 하려는 것이다.
+	/// 켠 플러그인의 id. 정의는 plugins/ 에 있고, 켜고 끄는 것만 여기 둔다. 사용자가 쓴 정의 파일을 앱이 고쳐 쓰지 않게 하려는 것이다.
 	pub enabled_plugins: Vec<String>,
+	/// 플러그인마다 사용자가 허락한 권한. 매니페스트의 권한이 이보다 넓으면 다시 허락받기 전에는 부르지 않는다 (plugin_host).
+	pub plugin_grants: std::collections::BTreeMap<String, Vec<String>>,
 	/// 지식베이스의 색인 카드 · 고르기 다듬기 · 자동 갱신 판정에 쓸 모델. 비우면 제목 모델, 그것도 비면 haiku 다.
 	/// 파일마다 부르는 호출이라 가벼운 모델을 둔다.
 	pub kb_card_model: String,
@@ -73,6 +75,7 @@ impl Default for Settings {
 			use_mcp: false,
 			theme: "dark".into(),
 			enabled_plugins: Vec::new(),
+			plugin_grants: Default::default(),
 			kb_card_model: String::new(),
 			send_key: "ctrlEnter".into(),
 			recipe_auto: true,
@@ -426,6 +429,8 @@ pub struct RunRecord {
 	/// running · ok · error · stopped
 	pub status: String,
 	pub cost_usd: f64,
+	/// result 줄의 usage. 이 기능 전의 기록은 0 이다.
+	pub tokens: Tokens,
 	pub duration_ms: u64,
 	pub num_turns: u32,
 	pub model: String,
@@ -447,6 +452,32 @@ pub struct RunRecord {
 	pub kb_hits: Vec<KbHit>,
 	/// 어휘 사전에서 프롬프트에 붙인 용어 이름. 다른 프로젝트 것이면 `용어 · 프로젝트` 꼴이다.
 	pub glossary_terms: Vec<String>,
+}
+
+/// claude 한 번 호출이 쓴 토큰. stream-json 끝의 result 줄 `usage` 에서 꺼낸다.
+/// 캐시 작성 · 읽기를 따로 두는 까닭: 같은 토큰 수라도 값이 크게 다르고, 어디서 캐시가 깨지는지 봐야 줄일 데를 안다.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Tokens {
+	pub input: u64,
+	pub output: u64,
+	pub cache_create: u64,
+	pub cache_read: u64,
+}
+
+impl Tokens {
+	/// result 줄에서 꺼낸다. 문서에 없는 출력이라 칸이 빠지면 0 으로 둔다.
+	pub fn from_result(r: &serde_json::Value) -> Tokens {
+		let n = |k: &str| r.get("usage").and_then(|u| u.get(k)).and_then(|x| x.as_u64()).unwrap_or(0);
+		Tokens { input: n("input_tokens"), output: n("output_tokens"), cache_create: n("cache_creation_input_tokens"), cache_read: n("cache_read_input_tokens") }
+	}
+
+	pub fn add(&mut self, o: &Tokens) {
+		self.input += o.input;
+		self.output += o.output;
+		self.cache_create += o.cache_create;
+		self.cache_read += o.cache_read;
+	}
 }
 
 /// 권한 때문에 막힌 도구 호출 한 건.

@@ -280,7 +280,7 @@ async fn learn(app: &AppHandle, pid: &str, did: &str) -> Result<()> {
 	let exe = runner::resolve_claude(&settings.claude_path).ok_or_else(|| Error::Msg("claude 실행 파일을 찾지 못했습니다. 설정에서 경로를 지정하세요.".into()))?;
 	let dir = PathBuf::from(&view.dir);
 	let model = runner::pick_model(&settings, "", RunKind::Document).to_string();
-	let (answer, cost) = runner::quick_call(exe, &model, SYSTEM, prompt(&view, &material, &known), &dir, dir.join("learn.last.jsonl"), 300)
+	let (answer, cost) = runner::quick_call(exe, (pid, "learn"), &model, SYSTEM, prompt(&view, &material, &known), &dir, dir.join("learn.last.jsonl"), 300)
 		.await
 		.ok_or_else(|| Error::Msg("작성법 뽑기 호출이 실패했습니다. 산출물 폴더의 learn.last.jsonl 에 응답이 남아 있습니다.".into()))?;
 	let got = read_answer(&answer);

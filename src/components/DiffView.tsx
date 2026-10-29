@@ -23,7 +23,8 @@ function count(changes: FileChange[]) {
 }
 
 /** 같은 파일을 여러 번 고쳤으면 한 묶음으로 보인다. 고친 순서는 그대로 둔다. */
-export function DiffView({ changes }: { changes: FileChange[] }) {
+/** `fileMenu` 는 파일 머리 우클릭 메뉴에 덧붙일 항목이다 (플러그인이 더한 것 등). */
+export function DiffView({ changes, fileMenu }: { changes: FileChange[]; fileMenu?: (path: string) => ActionList }) {
 	const groups = useMemo(() => {
 		const map = new Map<string, FileChange[]>();
 		for (const c of changes) {
@@ -37,13 +38,13 @@ export function DiffView({ changes }: { changes: FileChange[] }) {
 	return (
 		<div className="flex flex-col gap-2">
 			{groups.map(([rel, list]) => (
-				<FileDiff key={rel} rel={rel} list={list} />
+				<FileDiff key={rel} rel={rel} list={list} extra={fileMenu?.(list[0].path)} />
 			))}
 		</div>
 	);
 }
 
-function FileDiff({ rel, list }: { rel: string; list: FileChange[] }) {
+function FileDiff({ rel, list, extra }: { rel: string; list: FileChange[]; extra?: ActionList }) {
 	const [open, setOpen] = useState(true);
 	const [all, setAll] = useState(false);
 	const { added, removed } = count(list);
@@ -58,6 +59,8 @@ function FileDiff({ rel, list }: { rel: string; list: FileChange[] }) {
 		{ label: "저장소 기준 경로 복사", icon: <Copy />, onSelect: () => void copy(rel, "경로") },
 		"sep",
 		{ label: open ? "접기" : "펼치기", icon: <ChevronRight />, onSelect: () => setOpen((v) => !v) },
+		"sep",
+		...(extra ?? []),
 	];
 	return (
 		<div className="surface overflow-hidden rounded-lg">

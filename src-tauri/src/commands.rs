@@ -13,7 +13,8 @@ use tauri_plugin_opener::OpenerExt;
 use crate::claude_files::{self, Resource, TextFile};
 use crate::error::{Error, Result, msg};
 use crate::model::*;
-use crate::{glossary, kb, plugins, recipe, usage};
+use crate::plugin_host::{self, api::Target};
+use crate::{glossary, kb, recipe, usage};
 use crate::runner::{self, RunEvent, emit_deliverable, emit_issue};
 use crate::store::{Store, settle, title_of};
 
@@ -71,6 +72,12 @@ pub async fn app_info(app: AppHandle) -> Result<AppInfo> {
 #[tauri::command]
 pub fn usage_get() -> Option<usage::Usage> {
 	usage::get()
+}
+
+/// 최근 days 일 동안 이 앱이 claude 를 부른 횟수 · 토큰 · 비용을 실행 종류별로 더한다.
+#[tauri::command]
+pub fn spend_summary(days: u32) -> usage::Spend {
+	usage::spend_summary(days.clamp(1, 90))
 }
 
 #[tauri::command]
@@ -367,11 +374,11 @@ pub async fn issue_open_terminal(app: AppHandle, project_id: String, issue_id: S
 	let settings = store.settings()?;
 	let exe = runner::resolve_claude(&settings.claude_path)
 		.ok_or_else(|| Error::Msg("claude 실행 파일을 찾지 못했습니다. 설정에서 경로를 지정하세요.".into()))?;
-	let plugin = plugins::terminal(&store.root, &settings.enabled_plugins)?;
+	let plugin = plugin_host::terminal(&store.root, &settings)?;
 	let title = format!("#{} {}", v.issue.number, v.issue.title);
 	let session = v.issue.session_id;
 	tauri::async_runtime::spawn_blocking(move || {
-		runner::open_terminal(&exe, Path::new(&project.path), &session, plugin.as_ref().map(|(p, e)| (p, e.as_path())), &title)
+		runner::open_terminal(&exe, Path::new(&project.path), &session, plugin.as_ref().map(|(n, t, e)| (n.as_str(), t, e.as_path())), &title)
 	})
 	.await
 	.map_err(|e| Error::Msg(e.to_string()))?
@@ -380,17 +387,68 @@ pub async fn issue_open_terminal(app: AppHandle, project_id: String, issue_id: S
 /* ---------- 플러그인 ---------- */
 
 #[tauri::command]
-pub fn plugins_list(store: State<Store>) -> Result<plugins::PluginList> {
-	Ok(plugins::PluginList {
-		dir: plugins::dir(&store.root).to_string_lossy().to_string(),
-		plugins: plugins::load(&store.root, &store.settings()?.enabled_plugins),
+pub fn plugins_list(store: State<Store>) -> Result<plugin_host::PluginList> {
+	Ok(plugin_host::PluginList {
+		dir: plugin_host::dir(&store.root).to_string_lossy().to_string(),
+		plugins: plugin_host::load(&store.root, &store.settings()?),
 	})
 }
 
-/// 미리 만든 틀을 plugins/ 에 쓴다. 이미 있으면 덮지 않는다.
+/// 미리 만든 틀을 plugins/<id>/ 에 쓴다. 이미 있으면 덮지 않는다.
 #[tauri::command]
 pub fn plugin_create_preset(store: State<Store>, id: String) -> Result<String> {
-	Ok(plugins::create_preset(&store.root, &id)?.to_string_lossy().to_string())
+	Ok(plugin_host::create_preset(&store, &id)?.to_string_lossy().to_string())
+}
+
+/// 매니페스트의 권한을 허락하고 켠다. 화면이 권한 목록을 보이고 사용자가 고른 뒤에 부른다.
+#[tauri::command]
+pub fn plugin_grant(store: State<Store>, id: String) -> Result<Settings> {
+	plugin_host::grant(&store, &id)
+}
+
+/// 설치하기 전에 꾸러미(zip · plugin.json)를 읽어 권한 · 문제를 본다.
+#[tauri::command]
+pub fn plugin_inspect(store: State<Store>, path: String) -> Result<plugin_host::install::Inspect> {
+	plugin_host::install::inspect(&store, &store.settings()?, Path::new(&path))
+}
+
+#[tauri::command]
+pub fn plugin_install(store: State<Store>, path: String) -> Result<Settings> {
+	plugin_host::install::install(&store, Path::new(&path))
+}
+
+#[tauri::command]
+pub fn plugin_uninstall(store: State<Store>, id: String) -> Result<Settings> {
+	plugin_host::install::uninstall(&store, &id)
+}
+
+#[tauri::command]
+pub fn plugin_settings_get(store: State<Store>, id: String) -> Result<serde_json::Value> {
+	let v = plugin_host::find(&store.root, &store.settings()?, &id)?;
+	Ok(plugin_host::settings_get(&store.root, &v.manifest))
+}
+
+#[tauri::command]
+pub fn plugin_settings_set(store: State<Store>, id: String, values: serde_json::Value) -> Result<serde_json::Value> {
+	let v = plugin_host::find(&store.root, &store.settings()?, &id)?;
+	plugin_host::settings_set(&store.root, &v.manifest, &values)
+}
+
+/// 플러그인이 더한 메뉴 항목을 눌렀다. 플러그인이 바깥 프로그램을 기다릴 수 있어 async 로 두고 따로 돌린다.
+#[tauri::command]
+pub async fn plugin_invoke(
+	app: AppHandle,
+	plugin_id: String,
+	command: String,
+	place: String,
+	project_id: String,
+	issue_id: Option<String>,
+	file: Option<String>,
+) -> Result<plugin_host::api::Reply> {
+	let target = Target { project_id, issue_id: issue_id.unwrap_or_default(), file: file.unwrap_or_default(), ..Default::default() };
+	tauri::async_runtime::spawn_blocking(move || plugin_host::invoke(&app, &plugin_id, &command, &place, target))
+		.await
+		.map_err(|e| Error::Msg(e.to_string()))?
 }
 
 /// 이슈 세션 기록에서 앱이 돌리지 않은 차례만 꺼낸다. 앱이 돌린 차례는 실행 기록으로 이미 보인다.
@@ -448,13 +506,14 @@ pub fn issue_complete(app: AppHandle, project_id: String, issue_id: String) -> R
 		i.log("done", "");
 		Ok(())
 	})?;
+	plugin_host::dispatch(&app, "done", Target { project_id: project_id.clone(), issue_id: issue_id.clone(), ..Default::default() });
 	tauri::async_runtime::spawn(kb::after_complete(app.clone(), project_id, issue_id));
 	Ok(v)
 }
 
 #[tauri::command]
 pub fn issue_drop(app: AppHandle, project_id: String, issue_id: String) -> Result<IssueView> {
-	change(&app, &project_id, &issue_id, |i| {
+	let v = change(&app, &project_id, &issue_id, |i| {
 		if i.run.is_some() {
 			return msg("실행 중에는 보류할 수 없습니다. 먼저 중지하세요.");
 		}
@@ -462,7 +521,9 @@ pub fn issue_drop(app: AppHandle, project_id: String, issue_id: String) -> Resul
 		i.auto_plan = false;
 		i.log("drop", "");
 		Ok(())
-	})
+	})?;
+	plugin_host::dispatch(&app, "dropped", Target { project_id, issue_id, ..Default::default() });
+	Ok(v)
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { relTime } from "@/lib/format";
-import { useUsage } from "@/lib/queries";
-import type { Usage, UsageWindow } from "@/lib/types";
+import { cost, relTime, tokens } from "@/lib/format";
+import { useSpend, useUsage } from "@/lib/queries";
+import type { SpendRow, Usage, UsageWindow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 
@@ -89,6 +89,46 @@ function Bar({ w, now, className }: { w: UsageWindow; now: number; className?: s
 	);
 }
 
+const SPEND_DAYS = 7;
+
+const GROUP_LABEL: Record<string, string> = {
+	plan: "계획",
+	implement: "구현 · 되돌리기",
+	chat: "대화",
+	document: "산출물",
+	quick: "제목 · 카드 · 판정",
+	total: "합계",
+};
+
+/**
+ * 사용률 몇 % 가 어디서 왔는지 보이려고, 이 앱이 claude 를 부른 양을 실행 종류별로 더해 보인다.
+ * 장부(spend.jsonl)가 비었으면 그리지 않는다 — 이 기능 전의 실행은 장부에 없다.
+ */
+function SpendTable() {
+	const { data } = useSpend(SPEND_DAYS);
+	if (!data?.total.calls) return null;
+	const row = (r: SpendRow, strong = false) => (
+		<tr key={r.group} className={cn(strong && "font-medium text-foreground")}>
+			<td className="py-0.5">{GROUP_LABEL[r.group] ?? r.group}</td>
+			<td className="tabular py-0.5 text-right">{r.calls}회</td>
+			<td className="tabular py-0.5 text-right">{tokens(r.tokens) || "0"}</td>
+			<td className="tabular py-0.5 text-right">{cost(r.costUsd) || "$0"}</td>
+		</tr>
+	);
+	return (
+		<div className="flex flex-col gap-1 border-t border-border px-3 py-2">
+			<div className="text-[12.5px] font-medium">이 앱이 쓴 양 · 최근 {data.days}일</div>
+			<table className="w-full text-[11.5px] text-muted-foreground">
+				<tbody>
+					{data.rows.map((r) => row(r))}
+					{data.rows.length > 1 && row(data.total, true)}
+				</tbody>
+			</table>
+			<span className="text-[11px] text-subtle">토큰은 입력 · 캐시 작성 · 캐시 읽기 · 출력을 더한 값 · 금액은 API 요금으로 어림한 값입니다</span>
+		</div>
+	);
+}
+
 function Detail({ usage, now }: { usage: Usage; now: number }) {
 	return (
 		<div className="flex flex-col">
@@ -112,6 +152,7 @@ function Detail({ usage, now }: { usage: Usage; now: number }) {
 					);
 				})}
 			</ul>
+			<SpendTable />
 			<div className="border-t border-border px-3 py-2 text-[11.5px] text-subtle">
 				{relTime(usage.seenAt, now)} 실행에서 받은 값입니다{usage.overage && " · 추가 사용분으로 도는 중"}
 			</div>

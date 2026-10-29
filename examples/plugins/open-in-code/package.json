@@ -1,0 +1,14 @@
+{
+	"name": "docket-plugin-open-in-code",
+	"private": true,
+	"version": "1.0.0",
+	"description": "docket 플러그인 예제 — 바뀐 파일을 VS Code 로 연다 (TS → wasm)",
+	"scripts": {
+		"build": "esbuild src/index.ts --bundle --format=cjs --target=es2020 --outfile=dist/index.js && extism-js dist/index.js -i src/index.d.ts -o plugin.wasm",
+		"pack": "npm run build && tar -a -cf open-in-code.zip plugin.json plugin.wasm"
+	},
+	"devDependencies": {
+		"@extism/js-pdk": "^1.1.1",
+		"esbuild": "^0.25.0"
+	}
+}

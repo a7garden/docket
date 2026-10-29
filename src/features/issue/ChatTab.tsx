@@ -13,7 +13,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
-import { attachmentPath, clock, cost, duration, fileUrl, isImage, relTime } from "@/lib/format";
+import { attachmentPath, clock, cost, duration, fileUrl, isImage, relTime, tokens } from "@/lib/format";
 import { useIssues, useSettings, useTerminalPlugin } from "@/lib/queries";
 import { RUN_KIND_LABEL } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
@@ -162,7 +162,7 @@ export function SessionBar({ issue, projectPath }: { issue: Issue; projectPath: 
 	const plugin = useTerminalPlugin();
 	if (!id) return null;
 	const openTitle = plugin
-		? plugin.attach.length > 0
+		? (plugin.contributes.terminal?.attach.length ?? 0) > 0
 			? `켜 둔 ${plugin.name} 에 새 탭으로 붙입니다. 없으면 새로 띄웁니다`
 			: `프로젝트 폴더에서 ${plugin.name} 를 띄웁니다`
 		: "프로젝트 폴더에서 claude --resume 으로 엽니다";
@@ -323,7 +323,7 @@ function StepTurn({ issue, root, run }: { issue: Issue; root: string; run: RunRe
 				<Chip tone={live ? "run" : run.status === "error" ? "danger" : "muted"}>{status}</Chip>
 				<span className="h-px flex-1 bg-border" />
 				<span className="tabular text-[12px]">
-					{[clock(run.startedAt), duration(run.durationMs), cost(run.costUsd)].filter(Boolean).join(" · ")}
+					{[clock(run.startedAt), duration(run.durationMs), tokens(run.tokens) && `토큰 ${tokens(run.tokens)}`, cost(run.costUsd)].filter(Boolean).join(" · ")}
 				</span>
 			</button>
 			{open && (

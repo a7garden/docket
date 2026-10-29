@@ -1,5 +1,5 @@
 // 미리보기 전용 가짜 데이터. 배포 빌드에는 들어가지 않는다 (preview.html 은 vite build 입력이 아니다).
-import type { AppInfo, Deliverable, GlossaryView, Issue, KbHit, KbSection, KbView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Turn, Usage } from "@/lib/types";
+import type { AppInfo, Deliverable, GlossaryView, Issue, KbHit, KbSection, KbView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Spend, Tokens, Turn, Usage } from "@/lib/types";
 
 const now = Date.now();
 const min = 60_000;
@@ -25,36 +25,109 @@ export const usage: Usage = {
 	seenAt: now - 4 * min,
 };
 
-export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr"], kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true };
+/** 실행 기록의 토큰. 비용(천분의 일 달러)에 비례해 어림한 가짜 값이다. 0 이면 옛 기록처럼 비어 보인다. */
+const tok = (k: number): Tokens => ({ input: k ? 6 : 0, output: k * 25, cacheCreate: k * 90, cacheRead: k * 700 });
+
+export const spend: Spend = {
+	days: 7,
+	rows: [
+		{ group: "plan", calls: 14, tokens: { input: 120, output: 61_000, cacheCreate: 412_000, cacheRead: 1_430_000 }, costUsd: 3.1 },
+		{ group: "implement", calls: 9, tokens: { input: 90, output: 140_000, cacheCreate: 610_000, cacheRead: 3_450_000 }, costUsd: 6.84 },
+		{ group: "chat", calls: 31, tokens: { input: 210, output: 52_000, cacheCreate: 380_000, cacheRead: 2_170_000 }, costUsd: 2.2 },
+		{ group: "quick", calls: 212, tokens: { input: 424, output: 9_800, cacheCreate: 171_000, cacheRead: 0 }, costUsd: 0.09 },
+	],
+	total: { group: "total", calls: 266, tokens: { input: 844, output: 262_800, cacheCreate: 1_573_000, cacheRead: 7_050_000 }, costUsd: 12.23 },
+};
+
+export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr", "change-summary", "slack-notify"], pluginGrants: { "change-summary": ["issue:read"], "slack-notify": ["issue:read", "http:hooks.slack.com"] }, kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true };
 
 const KB_OFF = { enabled: false, folders: [], includeDeliverables: true, topK: 8, rerank: false, exclude: [], keep: [] };
 const GL_OFF = { enabled: false, include: [] };
 
+const PLUGINS = "C:\\Users\\me\\AppData\\Roaming\\docket\\plugins";
+const at = (...p: string[]) => [PLUGINS, ...p].join("\\");
+const pluginBase = { version: "1.0.0", apiVersion: 1, description: "", main: "plugin.wasm", legacy: false, enabled: true, exePath: "", missing: [], problem: "", warning: "", failures: 0 };
+const noContrib = { menus: [], events: [], settings: [], terminal: null };
+
 export const plugins: PluginList = {
-	dir: "C:\\Users\\me\\AppData\\Roaming\\docket\\plugins",
+	dir: PLUGINS,
 	plugins: [
 		{
+			...pluginBase,
+			id: "change-summary",
+			name: "변경 요약",
+			description: "바뀐 파일마다 고친 곳과 크기를 표로 보입니다.",
+			permissions: ["issue:read"],
+			contributes: { ...noContrib, menus: [{ where: "issue", command: "summary", label: "변경 요약 보기", when: "changes" }] },
+			file: at("change-summary", "plugin.json"),
+			dir: at("change-summary"),
+			log: "",
+		},
+		{
+			...pluginBase,
 			id: "herdr",
 			name: "herdr",
-			kind: "terminal",
-			exe: "herdr",
-			probe: ["workspace", "list"],
-			focus: ["agent", "focus", "docket-{session_short}"],
-			attach: [
-				["tab", "create", "--cwd", "{cwd}", "--label", "{title}", "--focus"],
-				["agent", "start", "docket-{session_short}", "--kind", "claude", "--pane", "{out.result.root_pane.pane_id}", "--", "--resume", "{session}"],
-			],
-			launch: [],
-			hostWt: true,
-			attachAfterLaunch: true,
-			note: "켜 둔 herdr 에 이슈마다 새 탭 「#번호 제목」을 만들어 claude --resume 으로 세션을 잇습니다.",
-			file: "C:\\Users\\me\\AppData\\Roaming\\docket\\plugins\\herdr.json",
-			enabled: true,
+			version: "",
+			main: "",
+			legacy: true,
+			description: "켜 둔 herdr 에 이슈마다 새 탭 「#번호 제목」을 만들어 claude --resume 으로 세션을 잇습니다.",
+			permissions: ["process:herdr"],
+			contributes: {
+				...noContrib,
+				terminal: {
+					exe: "herdr",
+					probe: ["workspace", "list"],
+					focus: ["agent", "focus", "docket-{session_short}"],
+					attach: [
+						["tab", "create", "--cwd", "{cwd}", "--label", "{title}", "--focus"],
+						["agent", "start", "docket-{session_short}", "--kind", "claude", "--pane", "{out.result.root_pane.pane_id}", "--", "--resume", "{session}"],
+					],
+					launch: [],
+					hostWt: true,
+					attachAfterLaunch: true,
+				},
+			},
+			file: at("herdr.json"),
+			dir: "",
 			exePath: "C:\\Users\\me\\.herdr\\bin\\herdr.exe",
-			problem: "",
-			warning: "",
+			log: "",
+		},
+		{
+			...pluginBase,
+			id: "open-in-code",
+			name: "VS Code 로 열기",
+			enabled: false,
+			missing: ["issue:read", "process:code"],
+			description: "이 이슈에서 바뀐 파일을 VS Code 로 엽니다.",
+			permissions: ["issue:read", "process:code"],
+			contributes: { ...noContrib, menus: [{ where: "issue", command: "open", label: "VS Code 로 열기", when: "changes" }, { where: "file", command: "open-file", label: "VS Code 로 열기", when: "" }] },
+			file: at("open-in-code", "plugin.json"),
+			dir: at("open-in-code"),
+			log: "",
+		},
+		{
+			...pluginBase,
+			id: "slack-notify",
+			name: "Slack 알림",
+			version: "0.3.0",
+			failures: 2,
+			description: "구현이 끝나거나 실패하면 Slack 채널에 한 줄을 보냅니다.",
+			permissions: ["issue:read", "http:hooks.slack.com"],
+			contributes: { ...noContrib, events: ["implemented", "failed"], settings: [{ key: "webhook", label: "웹훅 주소", type: "text", options: [], default: "", hint: "Slack 앱의 Incoming Webhook 주소" }, { key: "mention", label: "실패하면 @here", type: "toggle", options: [], default: false, hint: "" }] },
+			file: at("slack-notify", "plugin.json"),
+			dir: at("slack-notify"),
+			log: "",
 		},
 	],
+};
+
+/** 「변경 요약 보기」가 돌려주는 것 */
+export const pluginReply = {
+	toast: "",
+	open: "",
+	copy: "",
+	title: "변경 요약 · #4",
+	markdown: ["| 파일 | 꼴 | 어디서 |", "| - | - | - |", "| calc.py | 고침 | 구현 |", "| test_calc.py | 만듦 | 구현 |", "", "2개 파일 · 마지막 구현 2026-10-29 14:20"].join("\n"),
 };
 
 export const projects: Project[] = [
@@ -128,7 +201,7 @@ export const issues: Issue[] = [
 		status: "planning",
 		note: "mul 이 큰 수에서 느리다\n\n10만 자리 곱셈에서 몇 초씩 걸린다.",
 		run: { kind: "plan", phase: "running", runId: "r-live-plan", queuedAt: now - 2 * min },
-		runs: [{ id: "r-live-plan", kind: "plan", startedAt: now - 2 * min, endedAt: 0, status: "running", costUsd: 0, durationMs: 0, numTurns: 0, model: "", effort: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		runs: [{ id: "r-live-plan", kind: "plan", startedAt: now - 2 * min, endedAt: 0, status: "running", costUsd: 0, tokens: tok(0), durationMs: 0, numTurns: 0, model: "", effort: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
 		// 계획이 도는 동안 넣어 둔 질문. 계획이 끝나면 한 차례로 묶여 나간다.
 		queue: [
 			{ id: "q1", text: "카라추바 곱셈도 후보로 같이 따져 줘", edit: false, images: [], at: now - min },
@@ -199,7 +272,7 @@ export const issues: Issue[] = [
 		note: "div 에 0 을 넣으면 죽는다\n\nZeroDivisionError 대신 None 을 돌려주면 좋겠다.",
 		plan: planOf("div · mod 의 0 나누기를 None 으로 막는다", "b 가 0 이면 None 을 돌려준다. 지금 저장소에서 div · mod 를 부르는 곳은 없다."),
 		sessionId: "s1",
-		runs: [{ id: "r-plan", kind: "plan", startedAt: now - 16 * min, endedAt: now - 14 * min, status: "ok", costUsd: 0.21, durationMs: 98_000, numTurns: 9, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		runs: [{ id: "r-plan", kind: "plan", startedAt: now - 16 * min, endedAt: now - 14 * min, status: "ok", costUsd: 0.21, tokens: tok(210), durationMs: 98_000, numTurns: 9, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
 		history: [
 			{ at: now - 30 * min, kind: "created", text: "" },
 			{ at: now - 16 * min, kind: "plan", text: "" },
@@ -212,7 +285,7 @@ export const issues: Issue[] = [
 		note: "sub 함수 추가",
 		plan: planOf("sub 를 add 와 같은 꼴로 더한다", "calc.py 에 sub(a, b) 를 더한다."),
 		run: { kind: "implement", phase: "running", runId: "r-live-impl", queuedAt: now - 3 * min },
-		runs: [{ id: "r-live-impl", kind: "implement", startedAt: now - 3 * min, endedAt: 0, status: "running", costUsd: 0, durationMs: 0, numTurns: 0, model: "", effort: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		runs: [{ id: "r-live-impl", kind: "implement", startedAt: now - 3 * min, endedAt: 0, status: "running", costUsd: 0, tokens: tok(0), durationMs: 0, numTurns: 0, model: "", effort: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
 		changes: [
 			{
 				path: `${ROOT}\\calc.py`,
@@ -260,9 +333,9 @@ export const issues: Issue[] = [
 			},
 		],
 		runs: [
-			{ id: "r-plan4", kind: "plan", startedAt: now - 20 * min, endedAt: now - 18 * min, status: "ok", costUsd: 0.12, durationMs: 61_000, numTurns: 6, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] },
-			{ id: "r-impl", kind: "implement", startedAt: now - 8 * min, endedAt: now - 6 * min, status: "ok", costUsd: 0.18, durationMs: 83_000, numTurns: 8, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "편집 · 허용 목록", allowed: [], deniedRules: ["Bash(git push:*)", "Bash(git commit:*)"], commands: ["cd \"D:/work/calc\" && python -I -c \"from calc import add; print(add(2, 3))\""], denials: [{ tool: "Bash", target: "cd \"D:/work/calc\" && python -I -c \"from calc import add; print(add(2, 3))\"", reason: "ask", suggest: ["Bash(python:*)"] }] },
-			{ id: "r-chat4", kind: "chat", startedAt: now - 5 * min, endedAt: now - 4 * min, status: "ok", costUsd: 0.04, durationMs: 21_000, numTurns: 2, model: "claude-opus-5-5", effort: "high", error: "", prompt: "add 말고 다른 함수에도 같은 오타가 있나?\n있으면 어디인지만 알려 줘.", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] },
+			{ id: "r-plan4", kind: "plan", startedAt: now - 20 * min, endedAt: now - 18 * min, status: "ok", costUsd: 0.12, tokens: tok(120), durationMs: 61_000, numTurns: 6, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] },
+			{ id: "r-impl", kind: "implement", startedAt: now - 8 * min, endedAt: now - 6 * min, status: "ok", costUsd: 0.18, tokens: tok(180), durationMs: 83_000, numTurns: 8, model: "claude-opus-5-5", effort: "high", error: "", prompt: "", mode: "편집 · 허용 목록", allowed: [], deniedRules: ["Bash(git push:*)", "Bash(git commit:*)"], commands: ["cd \"D:/work/calc\" && python -I -c \"from calc import add; print(add(2, 3))\""], denials: [{ tool: "Bash", target: "cd \"D:/work/calc\" && python -I -c \"from calc import add; print(add(2, 3))\"", reason: "ask", suggest: ["Bash(python:*)"] }] },
+			{ id: "r-chat4", kind: "chat", startedAt: now - 5 * min, endedAt: now - 4 * min, status: "ok", costUsd: 0.04, tokens: tok(40), durationMs: 21_000, numTurns: 2, model: "claude-opus-5-5", effort: "high", error: "", prompt: "add 말고 다른 함수에도 같은 오타가 있나?\n있으면 어디인지만 알려 줘.", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] },
 		],
 		sessionId: "8c1f3d52-6b7e-4a09-9d1e-2f6a4b7c0e31",
 		history: [
@@ -279,7 +352,7 @@ export const issues: Issue[] = [
 		status: "inbox",
 		note: "pow 함수 추가 (음수 지수 포함)",
 		error: "Claude 가 결과 없이 끝났습니다 (종료 코드 1)\nAPI Error: 529 overloaded",
-		runs: [{ id: "r-fail", kind: "plan", startedAt: now - 40 * min, endedAt: now - 39 * min, status: "error", costUsd: 0, durationMs: 4_000, numTurns: 0, model: "", effort: "", error: "API Error: 529 overloaded", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
+		runs: [{ id: "r-fail", kind: "plan", startedAt: now - 40 * min, endedAt: now - 39 * min, status: "error", costUsd: 0, tokens: tok(0), durationMs: 4_000, numTurns: 0, model: "", effort: "", error: "API Error: 529 overloaded", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
 		updatedAt: now - 39 * min,
 	}),
 	base("i0000000002", 2, {
@@ -299,6 +372,7 @@ const talkRun = (id: string, at: number, prompt: string) => ({
 	endedAt: at + 40_000,
 	status: "ok" as const,
 	costUsd: 0.06,
+	tokens: tok(60),
 	durationMs: 40_000,
 	numTurns: 4,
 	model: "claude-opus-5-5",

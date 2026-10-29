@@ -2,6 +2,7 @@ import { type ReactNode, useState } from "react";
 import { Archive, Check, FileStack, FolderOpen, Play, RotateCcw, Square, Trash2, Undo2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { type Action, type ActionList, attempt } from "@/components/ActionMenu";
+import { pluginActions } from "@/components/PluginResult";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -13,6 +14,7 @@ import {
 	AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { api } from "@/lib/api";
+import { usePluginMenus } from "@/lib/queries";
 import { useUi } from "@/lib/store";
 import type { Issue } from "@/lib/types";
 
@@ -83,6 +85,7 @@ export function useIssueActions(issue: Issue): { items: ActionList; dialogs: Rea
 	const [revert, setRevert] = useState(false);
 	const setView = useUi((s) => s.setView);
 	const openDeliverable = useUi((s) => s.openDeliverable);
+	const menus = usePluginMenus("issue");
 	const { projectId: p, id } = issue;
 
 	const items: ActionList = [
@@ -107,6 +110,8 @@ export function useIssueActions(issue: Issue): { items: ActionList; dialogs: Rea
 		!issue.run && issue.status !== "dropped" && issue.status !== "done" && { label: "보류", icon: <Archive />, onSelect: () => void attempt(() => api.issueDrop(p, id)) },
 		// 결과 확인 · 완료 단계는 상세 창 아래 칸에도 단추가 있다. 승인 대기 중 대화로 고친 것처럼 그 밖의 단계는 메뉴에서만 되돌린다.
 		!issue.run && issue.changes.length > 0 && { label: "구현 되돌리기", icon: <Undo2 />, onSelect: () => setRevert(true) },
+		"sep",
+		...pluginActions(menus, { projectId: p, issueId: id, changes: issue.changes.length > 0, session: !!issue.sessionId }),
 		"sep",
 		{ label: "지우기", icon: <Trash2 />, destructive: true, disabled: !!issue.run, onSelect: () => setConfirm(true) },
 	];

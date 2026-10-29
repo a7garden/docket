@@ -26,6 +26,7 @@ Rust(Tauri 2) · React 19 · shadcn/ui(Radix) · Tailwind 4.
 - 실행 중인 작업은 제목 줄의 「Claude 실행 N」을 눌러 모든 프로젝트에 걸쳐 보고, 하나씩 또는 모두 중지한다. 보드의 실행 중 카드에도 중지 단추가 있다.
 - 실행 중에 창을 닫으면 무엇이 돌고 있는지 보여 주고 「중지하고 닫기」를 묻는다. 앱이 띄운 claude 는 Windows 작업 개체(Job Object)에 들어가 있어, 앱이 어떻게 끝나든(강제 종료 포함) 함께 꺼진다. 앱이 모르는 수정이 저장소에 남지 않게 하려는 것이다. 앱이 띄운 터미널 · 탐색기는 작업 개체 밖이라 앱을 닫아도 남는다.
 - 제목 줄에 Claude 구독 사용량(「5시간 9% · 7일 32%」)이 보인다. 누르면 창마다 막대 · 다시 차는 시각 · 받은 때를 보인다. 따로 묻지 않고 실행이 돌 때 claude 가 함께 보내는 값(`rate_limit_event`)을 받아 두므로, 값은 마지막으로 claude 를 돌린 때의 것이다. 앱 밖에서 쓴 양은 다음 실행 때 반영된다. 80% 를 넘으면 노란색, 95% 를 넘거나 한도에 걸리면 빨간색이다. API 키로 쓰면 이 값이 오지 않아 보이지 않는다.
+  같은 창 아래에 「이 앱이 쓴 양 · 최근 7일」이 보인다. 앱이 claude 를 부를 때마다 장부(`spend.jsonl`)에 한 줄씩 적은 것을 계획 · 구현(되돌리기 포함) · 대화 · 산출물 · 제목과 색인 카드와 판정으로 묶어 부른 횟수 · 토큰(입력 · 캐시 작성 · 캐시 읽기 · 출력의 합) · 비용을 보인다. 비용은 claude 가 API 요금으로 어림한 값이라 구독 청구액이 아니다. 실행마다의 토큰은 이력 탭 · 대화 탭의 실행 줄에도 보인다.
 - 계획 · 구현 · 대화 답이 끝나면 알림이 뜨고, 창이 뒤에 있으면 작업 표시줄에서 깜빡인다. 그 대상을 이미 열어 보고 있으면 띄우지 않는다. **알림함**: 제목 줄의 종 단추가 모든 프로젝트에서 끝났는데 아직 열어 보지 않은 것(대화 답 · 계획 나옴 · 구현 끝 · 실패 · 산출물 새 판)을 수와 목록으로 보인다. 누르면 그 대화 · 이슈 · 산출물로 가고, 열면 읽음이 된다(창이 뒤에 있을 때 연 것은 앞으로 가져올 때 읽음이 된다). 「모두 읽음」 · 줄 우클릭 「읽음으로」도 있다. 대화 목록에는 읽지 않은 답에 점이 찍힌다. 중지한 실행 · 반영할 것이 없어 건너뛴 자동 갱신 · 터미널에서 이어 간 차례는 넣지 않는다. 읽음 표시는 이 PC 의 화면 저장소에만 두고, 처음 켠 때보다 먼저 끝난 실행은 읽은 것으로 본다. 결정할 이슈 수는 그대로 사이드바 뱃지가 센다.
 - **그림 · 목업 · 결과 화면**: 계획 · 결과 · 대화의 마크다운은 그림을 띄운다. `attachments/` · `shots/` 는 이슈 폴더 기준이고, 나머지 상대 경로는 저장소 기준이다. 절대 경로도 된다. 저장소 안 그림은 그릴 때 그 파일 하나만 asset 범위에 연다(등록한 프로젝트 안의 그림 확장자만). ```html 블록은 화면 목업으로 그린다. `sandbox="allow-scripts"` iframe 이라 스크립트는 돌지만 앱 API 에 닿지 않고, 네트워크는 CSP 로 막는다. ```svg 블록은 그림으로 그린다. 화면 · 배치 · 흐름이 바뀌는 계획 · 대화에만 목업을 넣으라고 Claude 에게 지시한다. 화면이 바뀐 구현이면 Claude 가 방법(playwright · Edge 헤드리스 등)을 골라 결과 화면을 이슈 폴더의 `shots/` 에 찍고, 앱이 결과에 적힌 그림만 `shots/<실행>/` 으로 모아 변경 탭 「결과 화면」에 보인다. 찍기 명령은 지금 권한 체계를 따른다. 막히면 변경 탭에서 「허용」한다. 이슈 폴더 · 임시 폴더에 쓴 파일은 바꾼 파일로 남기지 않는다.
 
@@ -59,7 +60,7 @@ Rust(Tauri 2) · React 19 · shadcn/ui(Radix) · Tailwind 4.
   - 다른 프로젝트의 사전을 골라 함께 쓴다. 복사하지 않고 실행 때마다 읽으므로 그쪽에서 고친 것이 바로 반영된다. 같은 용어가 있으면 이 프로젝트의 것이 앞서고, 고른 프로젝트가 다시 고른 사전까지는 따라가지 않는다.
   - 지식베이스도 켜 두었으면 찾을 때 메모에 나온 용어의 비슷한 말을 덧붙여 찾는다. 붙인 용어는 실행 기록에 남아 이력 탭에서 「어휘 N」을 펼쳐 본다.
 - **Claude 설정**: 전역(`~/.claude`)과 프로젝트의 지침(CLAUDE.md · CLAUDE.local.md · AGENTS.md) · 스킬 · 에이전트 · 명령 · 규칙을 찾아보고 고치고 만들고 지운다. 저장할 때 원래 파일의 줄바꿈(CRLF · LF)과 BOM 을 지키고, 열어 둔 사이 다른 곳에서 바뀌었으면 덮어쓰기 전에 묻는다. 지운 것은 앱 데이터의 휴지통 폴더로 옮긴다.
-- **설정**: claude 실행 파일 · 계획 · 구현 · 대화 모델과 effort(기본은 모두 CLI 기본값. 산출물 작성 · 되돌리기는 구현 값을 쓴다) · MCP 서버 사용 · 자동 계획 · 플러그인 켜기 · 테마. 프로젝트마다 구현 권한(편집만 허용 / 모두 허용, 묻지 않고 허용할 명령 · 저장소를 보고 고른 명령 후보, 막을 명령 · 경로, 계획 때 이력 조회, 전역 · 저장소 설정에서 함께 걸리는 규칙 보기), 산출물 폴더 · 기본 이름 규칙 · 빈칸 처리 · 지난 판을 옮길 폴더를 따로 둔다.
+- **설정**: claude 실행 파일 · 계획 · 구현 · 대화 모델과 effort(기본은 모두 CLI 기본값. 산출물 작성 · 되돌리기는 구현 값을 쓴다) · MCP 서버 사용 · 자동 계획 · 플러그인 설치 · 켜기 · 권한 허락 · 설정 칸 · 테마. 프로젝트마다 구현 권한(편집만 허용 / 모두 허용, 묻지 않고 허용할 명령 · 저장소를 보고 고른 명령 후보, 막을 명령 · 경로, 계획 때 이력 조회, 전역 · 저장소 설정에서 함께 걸리는 규칙 보기), 산출물 폴더 · 기본 이름 규칙 · 빈칸 처리 · 지난 판을 옮길 폴더를 따로 둔다.
 
 ## 데이터는 프로젝트 밖에 둔다
 
@@ -69,12 +70,14 @@ Rust(Tauri 2) · React 19 · shadcn/ui(Radix) · Tailwind 4.
 docket/
   settings.json · projects.json
   usage.json                              마지막으로 받은 구독 사용량
+  spend.jsonl                             claude 호출마다 토큰 · 비용 한 줄 (90일만 남긴다)
   projects/<프로젝트>/issues/<이슈>/        issue.json · note.md · attachments/ · runs/<실행>.jsonl
   projects/<프로젝트>/deliverables/<산출물>/ meta.json · refs/(템플릿 · .text/ 뽑은 글자) · v1/<파일> · runs/
   projects/<프로젝트>/kb/                   catalog.json(파일 · 구획 · 카드) · inbox/(넣은 자료) · text/(뽑은 글자)
   projects/<프로젝트>/glossary.json          어휘 사전 용어 목록
   trash/                                  지운 것
-  plugins/<id>.json                       플러그인 정의 (사용자가 쓴다)
+  plugins/<id>/                           플러그인 (plugin.json · plugin.wasm · 옛 정의는 plugins/<id>.json)
+  plugins-data/<id>/                      플러그인의 설정 칸 값 · 저장소 · 기록
 ```
 
 프로젝트 설정에서 산출물 폴더를 정하면 판 파일만 그 폴더(+산출물마다 하위 폴더)에 둔다. 정보 · 템플릿 · 작성 기록은 그대로 앱 데이터에 남는다.
@@ -91,6 +94,7 @@ Claude 에게는 메모나 이 앱을 저장소 파일 · 주석에 언급하지
 - npm 으로 깔면 PATH 에는 `claude.cmd` 만 보이므로 그 옆의 `claude.exe` 를 찾아 직접 부른다.
 - 제목 짓기는 `--tools ""`(도구 없음) · `--no-session-persistence` · 짧은 `--system-prompt` 로 글 한 줄만 받는다. 이슈 폴더에서 띄워 저장소 지침을 읽지 않고, 파일을 고치지 않으므로 프로젝트의 실행 줄에 서지 않는다. 동시에 둘까지만 띄우고, 응답은 이슈 폴더의 `title.jsonl` 에 남는다.
 - 지식베이스의 색인 카드 · 고르기 다듬기 · 자동 갱신 판정도 같은 꼴(도구 없음 · 세션 남기지 않음)로 앱 데이터 폴더에서 띄우고, 답 글에서 JSON 을 꺼낸다. 마지막 호출의 응답은 `kb/*.last.jsonl` 에 남는다.
+  이 짧은 호출(작성법 뽑기 포함)은 모두 `--safe-mode` 로 띄워 사용자 전역 CLAUDE.md · 플러그인 · 훅 · 자동 메모리를 싣지 않는다. 글 한 덩이만 받는 호출인데 그것들이 실려 제목 한 번에 9.5k 토큰쯤 들었다(빼면 0.8k). `--bare` 는 구독 로그인을 읽지 않아 쓰지 않는다.
   산출물 작성법 뽑기도 같은 꼴로 산출물 폴더에서 띄우되 모델은 구현 모델(비면 CLI 기본)이다. 뽑아 둔 글자를 프롬프트에 실어 보내 저장소를 읽지 않고, 동시에 둘까지만 띄운다. 응답은 산출물 폴더의 `learn.last.jsonl` 에 남는다. 지식베이스를 켠 프로젝트의 계획 · 대화 · 산출물 작성은 `kb/` 를 `--add-dir` 로 열어 뽑은 글자를 Read 로 읽게 한다.
 - PDF 글자는 앱이 스스로를 `--docket-pdf-text` 인자로 한 번 더 띄워 뽑는다. 깨진 PDF 에서 패닉해도 그 파일만 건너뛴다(릴리즈는 `panic = "abort"`).
 - 계획 · 문서 작성은 `--tools Read,Grep,Glob` 로 읽기만 허락하고, 결과는 `--json-schema` 로 받는다. 프로젝트 설정에서 켜 두면(기본) git · svn 의 조회 명령(log · diff · status · show · cat …)도 연다.
@@ -110,28 +114,119 @@ Claude 에게는 메모나 이 앱을 저장소 파일 · 주석에 언급하지
 
 ## 플러그인
 
-앱 데이터의 `plugins/*.json` 에 둔 정의로 바깥 프로그램과 잇는다. 설정 › 플러그인에서 목록 · 문제를 보고 켜고 끈다. 정의는 파일로만 고친다(켜고 끄는 것만 `settings.json` 의 `enabledPlugins` 에 남는다).
-지금 종류는 `terminal` 하나다. 켜 두면 「터미널에서 잇기」가 그것으로 열고, 버튼 이름도 「<이름> 에서 잇기」로 바뀐다.
+사용자가 만들어 설치하는 확장이다. 플러그인은 앱의 네 자리에 끼어든다.
 
-```json
-{ "id": "herdr", "name": "herdr", "kind": "terminal", "exe": "herdr",
-  "probe": ["workspace", "list"],
-  "focus": ["agent", "focus", "docket-{session_short}"],
-  "attach": [["tab", "create", "--cwd", "{cwd}", "--label", "{title}", "--focus"],
-             ["agent", "start", "docket-{session_short}", "--kind", "claude",
-              "--pane", "{out.result.root_pane.pane_id}", "--", "--resume", "{session}"]],
-  "launch": [], "hostWt": true, "attachAfterLaunch": true, "note": "" }
+| 기여 (`contributes`) | 언제 | 하는 일 |
+| - | - | - |
+| `menus` | 이슈 카드 우클릭 · 상세 「더 보기」(`issue`) · 바뀐 파일 머리(`file`) · 사이드바 프로젝트(`project`)에서 누를 때 | 코드의 `on_command` 를 부르고, 돌려준 알림 · 열기 · 복사 · 마크다운 창을 앱이 그린다 |
+| `events` | 계획 끝남 `planned` · 구현 끝남 `implemented` · 실패 `failed` · 되돌림 `reverted` · 완료 `done` · 보류 `dropped` · 산출물 새 판 `deliverable` | 코드의 `on_event` 를 부른다. 기다리지 않고 쏘기만 한다 |
+| `settings` | 설정 › 플러그인 | 글 · 켜기 · 고르기 칸을 그리고, 값을 입력의 `settings` 로 넘긴다 |
+| `terminal` | 「터미널에서 잇기」 | 아래 「터미널 기여」대로 바깥 터미널에서 세션을 잇는다. 코드가 없어도 된다 |
+
+코드는 [Extism](https://extism.org) 플러그인(`.wasm`)이다. TS(js-pdk) · Rust · Go 로 짜서 `.wasm` 하나로 빌드한다. 앱은 그것을 샌드박스에서 돌린다.
+- 화면에서는 돌지 않는다. 화면에 끼어드는 것은 위 선언과 돌려준 값뿐이다.
+- 밖으로 나가는 길은 허락한 권한의 호스트 함수와 허락한 호스트로 가는 HTTP 뿐이다.
+- WASI 는 켜되 폴더 · 환경 변수 · 표준 출력을 주지 않는다.
+- 한 번 부르는 데 30초, 메모리 64MiB 를 넘으면 끊는다.
+
+### 꼴 · 설치
+
+```text
+plugins/<id>/plugin.json    매니페스트
+plugins/<id>/plugin.wasm    코드 (메뉴 · 사건이 없으면 없어도 된다)
+plugins-data/<id>/          settings.json(설정 칸 값) · kv.json(storage) · log.jsonl(실패 · docket_log)
 ```
 
-- `exe` 는 이름만 적으면 PATH 에서 찾는다(확장자를 빼면 `.exe` 를 붙여 본다).
+```json
+{ "id": "open-in-code", "name": "VS Code 로 열기", "version": "1.0.0", "apiVersion": 1, "main": "plugin.wasm",
+  "description": "이 이슈에서 바뀐 파일을 VS Code 로 엽니다.",
+  "permissions": ["issue:read", "process:code"],
+  "contributes": {
+    "menus": [{ "where": "issue", "command": "open", "label": "VS Code 로 열기", "when": "changes" }],
+    "events": [], "settings": [{ "key": "webhook", "label": "웹훅 주소", "type": "text" }] } }
+```
+
+- 설정 › 플러그인의 「설치」에서 zip(맨 위나 한 단계 아래 폴더에 `plugin.json`) 이나 `plugin.json` 을 고른다.
+  - 권한 · 기여를 보이고 허락받은 뒤, `plugin.json` 과 `main` 파일 둘만 `plugins/<id>/` 로 옮겨 켠다.
+  - 같은 id 가 있으면 휴지통으로 옮기고 바꾼다. zip 항목은 폴더 밖을 가리키면 읽지 않는다.
+- 「지우기」는 플러그인과 그 데이터를 휴지통으로 옮긴다. 매니페스트는 화면에서 고치지 않는다.
+- `when` 이 `changes` 면 바뀐 파일이 있을 때, `session` 이면 세션이 있을 때만 누를 수 있다.
+- 사건 · 메뉴가 실패하면 `log.jsonl` 에 남기고, 설정 줄에 「최근 7일 실패 N건」을 보인다.
+  - 사건 실패는 이슈 이력과 알림에 올리지 않는다. 이슈를 건드리면 보드 순서가 바뀌고, 사건마다 실패하면 알림이 쏟아진다.
+  - 사용자가 누른 메뉴의 실패는 오류 알림으로도 띄운다.
+- 예제: `examples/plugins/open-in-code` (TS → wasm). 타입은 `examples/plugins/docket-plugin.d.ts`.
+  - 빌드: `npm install` 뒤 `npm run build`. [extism-js](https://github.com/extism/js-pdk) 와 binaryen 이 PATH 에 있어야 한다.
+  - 앱 저장소에서는 이 빌드를 돌려 보지 않았다.
+
+### 권한
+
+설치할 때 허락한 권한은 `settings.json` 의 `pluginGrants` 에 남는다. 매니페스트의 권한이 이보다 넓어지면 「권한 허락」을 다시 누르기 전에는 부르지 않는다. 설치한 뒤 파일만 바꿔 권한을 몰래 늘리지 못하게 하려는 것이다.
+
+| 권한 | 열리는 것 |
+| - | - |
+| (없음) | `docket_log`. 입력에는 프로젝트 id · 이름과 이슈 id · 번호만 실린다 |
+| `issue:read` | 입력에 이슈 · 산출물 내용(메모 · 계획 · 결과 · 바뀐 파일 · 오류)과 프로젝트 경로가 실린다. `docket_issue_get` |
+| `notify` | `docket_notify` 앱 안 알림 |
+| `open` | `docket_open` · 돌려주는 값의 `open` (파일 · 폴더 · http(s) 주소를 기본 프로그램으로) |
+| `storage` | `docket_kv_get` · `docket_kv_set` (자기 `kv.json` · 1MB 까지) |
+| `process:<이름>` | `docket_run` 으로 그 이름의 실행 파일만(PATH 에서 `.exe` · `.cmd` · `.bat`). 25초가 지나면 끈다 |
+| `http:<호스트>` | Extism 의 HTTP 요청을 그 호스트로만 (`*.example.com` 꼴 가능) |
+
+- **`process:<이름>` 은 실행 파일만 묶고 인자는 거르지 않는다.** `cmd` · `powershell` · `node` 처럼 무엇이든 돌릴 수 있는 프로그램을 허락하면 사실상 모든 것을 허락하는 셈이다. 허락 창이 그런 이름을 빨갛게 보인다.
+- `issue:read` 와 `http:` 를 함께 허락하면 플러그인은 읽은 메모 · 경로를 그 호스트로 보낼 수 있다.
+
+### 입력 · 돌려주는 값
+
+`on_event` · `on_command` 모두 JSON 글 하나를 받는다.
+
+```json
+{ "apiVersion": 1, "event": "implemented", "command": "", "where": "",
+  "plugin": { "id": "slack-notify", "version": "1.0.0" },
+  "project": { "id": "…", "name": "calc", "path": "D:\\work\\calc" },
+  "issue": { "id": "…", "number": 4, "title": "더하기 고치기", "status": "review",
+             "changes": [{ "path": "D:\\work\\calc\\calc.py", "rel": "calc.py", "kind": "edit" }] },
+  "deliverable": null, "file": "", "settings": { "webhook": "https://hooks.slack.com/…" } }
+```
+
+`on_command` 는 `{ "toast", "open", "copy", "markdown", "title" }` 를 돌려준다(모두 비어도 된다). `markdown` 은 앱의 마크다운 표시로 창에 그리고, 원시 HTML 은 그리지 않는다.
+호스트 함수의 입력 · 출력 꼴은 `examples/plugins/docket-plugin.d.ts` 와 `src-tauri/src/plugin_host/api.rs` 머리말에 있다.
+
+### 하지 못하는 것
+
+| 하고 싶은 것 | 되지 않는 까닭 | 대신 |
+| - | - | - |
+| 보드에 열 · 탭 · 배지 그리기, 화면에 스크립트 띄우기 | 화면 기여는 선언형만 받는다. 주 창은 앱의 모든 명령을 부를 수 있어 플러그인 스크립트를 들이면 그 권한을 빌려 쓴다 | 메뉴 + 마크다운 창 |
+| 사건에서 완료 · 승인 막기 | 사건은 기다리지 않는다. 플러그인이 느리거나 죽어도 이슈 흐름이 멈추지 않게 한다 | 실패를 알림으로 보내 사람이 판단 |
+| Claude 프롬프트 · 권한 바꾸기 | 권한 판정은 앱이 맡는다 | 어휘 사전 · 지식베이스 · 저장소 지침 |
+| Claude 의 도구 호출마다 검사 | Claude Code 가 하는 일이다 | Claude Code hooks (`settings.json`) |
+| 메모 만들기 · 이슈 고치기 · 타이머 | API 1판에 쓰기 권한과 주기 사건이 없다 | — |
+
+### 터미널 기여
+
+`contributes.terminal`, 또는 옛 정의 `plugins/<id>.json`(`kind: "terminal"` 인 2026-10-29 전의 꼴. 터미널 기여 하나짜리로 읽고, 이미 켜 둔 것이라 권한을 허락한 것으로 본다).
+켜 두면 「터미널에서 잇기」가 그것으로 열고, 버튼 이름도 「<이름> 에서 잇기」로 바뀐다. 실행 파일은 권한에 `process:<이름>` 으로 적는다.
+
+```json
+{ "id": "herdr", "name": "herdr", "version": "1.0.0", "apiVersion": 1, "permissions": ["process:herdr"],
+  "contributes": { "terminal": {
+    "exe": "herdr",
+    "probe": ["workspace", "list"],
+    "focus": ["agent", "focus", "docket-{session_short}"],
+    "attach": [["tab", "create", "--cwd", "{cwd}", "--label", "{title}", "--focus"],
+               ["agent", "start", "docket-{session_short}", "--kind", "claude",
+                "--pane", "{out.result.root_pane.pane_id}", "--", "--resume", "{session}"]],
+    "launch": [], "hostWt": true, "attachAfterLaunch": true } } }
+```
+
+- `exe` 는 이름만 적으면 PATH 에서 찾는다(확장자를 빼면 `.exe` · `.cmd` · `.bat` 를 붙여 본다).
 - 인자 안의 자리표시 `{cwd}` 프로젝트 폴더 · `{claude}` claude 실행 파일 · `{session}` 세션 ID · `{session_short}` 세션 ID 앞 8자(영문 소문자 · 숫자) · `{title}` `#번호 제목` 을 채운다. 셸을 거치지 않고 인자 배열 그대로 넘긴다.
 - `probe` 를 창 없이 돌려 3초 안에 0 으로 끝나면(켜 둔 것이 있으면) `focus` 를 먼저 돌려 0 이면 거기서 끝내고(이 세션이 이미 떠 있다), 아니면 `attach` 로 붙인다. 켜 둔 것이 없거나 `attach` 의 첫 단계가 실패하면 `launch` 로 새로 띄운다. `probe` · `attach` 를 비우면 늘 `launch` 다.
 - `attach` 는 단계 하나면 `["a", "b"]`, 여럿이면 `[["a"], ["b"]]` 로 적는다. 둘째 단계부터는 `{out.경로}` 로 앞 단계가 낸 JSON 의 값을 받는다. 둘째 단계부터 실패하면 새로 띄우지 않고 herdr 가 낸 오류를 그대로 알린다(앞 단계가 만든 탭이 남아 있기 때문이다).
 - `attachAfterLaunch` 를 켜면 `launch` 로 띄운 뒤 20초 동안 `probe` 가 0 이 되기를 기다렸다가 `attach` 를 돌린다. herdr 처럼 띄우는 인자로 명령을 받지 않는 프로그램도 세션을 잇는다.
 - `hostWt` 를 켜면 `launch` 를 Windows 터미널 새 탭(`wt.exe -d {cwd}`) 안에서 띄운다. 화면이 있어야 도는 프로그램은 창이 따로 없으면 바로 끝난다.
-- 켠 플러그인을 쓸 수 없으면(실행 파일을 못 찾음 · 모르는 자리표시 · 정의를 읽지 못함) Windows 터미널로 넘어가지 않고 오류를 낸다. 켜 둔 연동이 몰래 빠지지 않게 하려는 것이다. 켠 터미널 플러그인이 둘이면 파일 이름 순으로 앞의 것을 쓴다.
-- 「herdr 정의 만들기」는 위 정의로 `plugins/herdr.json` 을 만든다. 켜 둔 herdr 에는 이슈마다 새 탭 「#번호 제목」을 만들어 `claude --resume` 으로 잇고, 그 세션이 이미 떠 있으면 그 탭으로 옮긴다. herdr 가 꺼져 있으면 Windows 터미널에 띄운 뒤 붙인다. claude 는 herdr 가 PATH 에서 찾는다(설정의 claude 경로를 쓰지 않는다).
-- 정의가 이미 있으면 덮지 않는다. 다만 인자(`probe` · `focus` · `attach` · `launch`)가 모두 빈 정의는 인자를 채우기 전에 만든 빈 틀이라 설정 화면에 「herdr 정의 새로 채우기」가 보이고, 누르면 새 틀로 바꾼다. `{session}` 이 어느 인자에도 없으면 설정 화면이 「세션을 잇지 않고 프로그램만 엽니다」라고 알린다.
+- 켠 플러그인을 쓸 수 없으면(실행 파일을 못 찾음 · 모르는 자리표시 · 정의를 읽지 못함 · 권한을 다시 허락해야 함) Windows 터미널로 넘어가지 않고 오류를 낸다. 켜 둔 연동이 몰래 빠지지 않게 하려는 것이다. 켠 터미널 플러그인이 둘이면 폴더 · 파일 이름 순으로 앞의 것을 쓴다.
+- 「herdr 정의 만들기」는 위 정의로 `plugins/herdr/plugin.json` 을 만든다. 켜 둔 herdr 에는 이슈마다 새 탭 「#번호 제목」을 만들어 `claude --resume` 으로 잇고, 그 세션이 이미 떠 있으면 그 탭으로 옮긴다. herdr 가 꺼져 있으면 Windows 터미널에 띄운 뒤 붙인다. claude 는 herdr 가 PATH 에서 찾는다(설정의 claude 경로를 쓰지 않는다).
+- 정의가 이미 있으면 덮지 않는다. 다만 인자(`probe` · `focus` · `attach` · `launch`)가 모두 빈 옛 정의는 인자를 채우기 전에 만든 빈 틀이라 설정 화면에 「herdr 정의 새로 채우기」가 보이고, 누르면 그것을 휴지통으로 옮기고 새 틀을 쓴다. `{session}` 이 어느 인자에도 없으면 설정 화면이 「세션을 잇지 않고 프로그램만 엽니다」라고 알린다.
 
 ## 개발
 
@@ -171,7 +266,7 @@ cd src-tauri && cargo check
 | `src-tauri/src/model.rs` | 설정 · 프로젝트 · 이슈 · 산출물 모델. `src/lib/types.ts` 와 짝 |
 | `src-tauri/src/store.rs` | 앱 데이터 폴더 읽기 · 쓰기 (원자적 쓰기 · 휴지통 · 끊긴 실행 정리) |
 | `src-tauri/src/runner.rs` | Claude 실행 · 작업 줄 · stream-json 해석 · 프롬프트 · 자동 계획 |
-| `src-tauri/src/plugins.rs` | 플러그인 정의 읽기 · 검사 · 자리표시 채우기 · 터미널 플러그인으로 열기 |
+| `src-tauri/src/plugin_host/` | 플러그인 목록 · 사건 · 메뉴(mod) · 매니페스트 검사(manifest) · wasm 샌드박스(wasm) · 입력과 호스트 함수(api) · 설치(install) · 터미널 기여(terminal) |
 | `src-tauri/src/claude_files.rs` | 지침 · 스킬 · 에이전트 · 명령 · 규칙 찾기 · 읽기 · 쓰기 |
 | `src-tauri/src/kb.rs` | 지식베이스 훑기 · 색인 카드 · BM25 찾기 · 실행에 붙이기 · 산출물 자동 갱신 |
 | `src-tauri/src/extract.rs` | 오피스 · html · PDF 에서 글자 뽑기 |
