@@ -156,11 +156,16 @@ pub struct ProjectKb {
 	pub top_k: u32,
 	/// 로컬로 고른 후보를 Claude 에 한 번 더 넘겨 다시 고른다. 실행마다 호출이 하나 붙는다.
 	pub rerank: bool,
+	/// 넣지 않을 것. 전체 경로면 그 파일 · 폴더 아래 전부, 아니면 참조 폴더 · 넣은 자료 안의 폴더 · 파일 이름에 그 말이 든 것(「이전판」).
+	/// 낡은 문서가 근거로 붙지 않게 사람이 정하는 목록이다. 비어 있으면 모두 넣는다.
+	pub exclude: Vec<String>,
+	/// 판 묶기에서 옛 판으로 빠졌지만 사람이 「다시 넣기」로 되살린 파일(전체 경로)
+	pub keep: Vec<String>,
 }
 
 impl Default for ProjectKb {
 	fn default() -> Self {
-		Self { enabled: false, folders: Vec::new(), include_deliverables: true, top_k: 8, rerank: false }
+		Self { enabled: false, folders: Vec::new(), include_deliverables: true, top_k: 8, rerank: false, exclude: Vec::new(), keep: Vec::new() }
 	}
 }
 

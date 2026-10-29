@@ -139,6 +139,10 @@ export interface ProjectKb {
 	includeDeliverables: boolean;
 	topK: number;
 	rerank: boolean;
+	/** 넣지 않을 것. 전체 경로면 그 파일 · 폴더 아래, 아니면 참조 폴더 · 넣은 자료 안의 폴더 · 파일 이름에 그 말이 든 것 */
+	exclude: string[];
+	/** 판 묶기에서 빠졌지만 「다시 넣기」로 되살린 파일(전체 경로) */
+	keep: string[];
 }
 
 /** 지식베이스에서 찾은 구획. 실행 기록에 남은 것은 excerpt 가 비어 있다. */
@@ -169,6 +173,10 @@ export interface KbFileView {
 	cards: number;
 	/** 비어 있지 않으면 색인하지 않은 까닭 */
 	skipped: string;
+	/** exclude: 제외 목록에 걸림 · version: 새 판이 있어 뺌(판 묶기) */
+	held: "" | "exclude" | "version";
+	/** 판 묶기에서 「다시 넣기」로 되살린 파일 */
+	kept: boolean;
 	cardError: string;
 }
 

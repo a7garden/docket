@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronRight, FolderPlus, Loader2, RefreshCw, Search, Square, Upload, X } from "lucide-react";
+import { ChevronRight, FolderPlus, Layers, Loader2, RefreshCw, Search, Square, Undo2, Upload, X } from "lucide-react";
 import { toast } from "sonner";
 import { attempt, ContextActions, fileActions } from "@/components/ActionMenu";
 import { Chip, Empty, SectionTitle } from "@/components/bits";
@@ -28,7 +28,9 @@ function baseName(path: string) {
  * 프로젝트 지식베이스. 참조 폴더 · 넣은 자료 · 산출물을 모아 두면, 계획 · 대화 · 산출물 작성 때 앱이 가까운 구획을 찾아 Claude 에게 붙인다.
  * 구획마다 Claude 가 한 번 적어 둔 색인 카드(요약 · 핵심어 · 비슷한 말)로 뜻이 같은 다른 말도 찾는다.
  *
- * 목차: Knowledge(켜기 · 자료 · 실행에 붙이기) → Status(색인 상태) → Finder(찾아보기) → Files · FileRow · Cards(파일 목록과 카드)
+ * 낡은 자료는 넣기 전에 거른다 — 빼는 것(Exclude)은 사람이 정하고, 같은 문서의 옛 판은 앱이 판 묶기로 빼며 파일 줄의 「다시 넣기」로 되살린다.
+ *
+ * 목차: Knowledge(켜기 · 자료 · 실행에 붙이기) → Exclude(빼는 것) → Status(색인 상태) → Finder(찾아보기) → Files · FileRow · Cards(파일 목록과 카드)
  */
 export function Knowledge({ project }: { project: Project }) {
 	const qc = useQueryClient();
@@ -136,6 +138,11 @@ export function Knowledge({ project }: { project: Project }) {
 									))}
 								</ul>
 							)}
+							<Exclude kb={kb.kb} save={save} />
+							<p className="text-[12.5px] leading-relaxed break-keep text-subtle">
+								같은 폴더에 한 문서의 판이 여럿이면(<span className="mono">_v4</span> · <span className="mono">_v14</span> · <span className="mono">_20261027</span> · <span className="mono">(1)</span>) 가장 높은 판만 넣고, 같은 판의 PDF 사본은 원본 형식이 있으면 넣지 않습니다.
+								판 표시가 없는 파일은 그대로 넣습니다. 잘못 빠진 파일은 아래 목록에서 「다시 넣기」를 누릅니다.
+							</p>
 							<p className="text-[12.5px] leading-relaxed break-keep text-subtle">
 								파일 · 폴더를 이 화면에 끌어다 놓으면 앱 데이터에 복사해 넣습니다. 형식은 가리지 않고 받고, 읽지 못하는 것은 아래 목록에 까닭을 보입니다.
 								<br />
@@ -188,6 +195,44 @@ export function Knowledge({ project }: { project: Project }) {
 					놓으면 지식베이스에 넣습니다
 				</div>
 			)}
+		</div>
+	);
+}
+
+/** 빼는 것. 지난 판 폴더(「이전판」) · 낡은 문서를 넣지 않게 사람이 정한다. */
+function Exclude({ kb, save }: { kb: ProjectKb; save: (patch: Partial<ProjectKb>) => Promise<void> }) {
+	const [v, setV] = useState("");
+	const add = async () => {
+		const x = v.trim();
+		if (!x) return;
+		await save({ exclude: [...kb.exclude, x] });
+		setV("");
+	};
+	return (
+		<div className="flex flex-col gap-1.5">
+			<div className="flex flex-wrap items-center gap-1.5">
+				<span className="mr-1 text-subtle">빼는 것</span>
+				{kb.exclude.map((x) => (
+					<span key={x} className="mono inline-flex h-6 items-center gap-0.5 rounded-full bg-hover pr-0.5 pl-2.5 text-[12px]">
+						{x}
+						<Button size="icon-xs" variant="ghost" aria-label={`${x} 빼기 취소`} onClick={() => void save({ exclude: kb.exclude.filter((e) => e !== x) })}>
+							<X />
+						</Button>
+					</span>
+				))}
+				<form
+					className="flex"
+					onSubmit={(e) => {
+						e.preventDefault();
+						void add();
+					}}
+				>
+					<Input value={v} onChange={(e) => setV(e.target.value)} placeholder="폴더 · 파일 이름 조각이나 전체 경로" className="h-7 w-64 text-[12.5px]" />
+				</form>
+			</div>
+			<span className="text-[12px] leading-relaxed break-keep text-subtle">
+				이름 조각(<span className="mono">이전판</span>)은 참조 폴더 · 넣은 자료 안에서 그 말이 든 폴더 · 파일을 모두 뺍니다. 전체 경로는 그 파일이나 그 폴더 아래를 뺍니다. 뺀 파일의 카드는 지우지 않아 다시 넣어도 비용이 들지 않습니다.
+			</span>
 		</div>
 	);
 }
@@ -286,16 +331,27 @@ function FileRow({ project, kb, f }: { project: Project; kb: KbView; f: KbFileVi
 	const [open, setOpen] = useState(false);
 	const inbox = f.source === "inbox" && isUnder(f.path, kb.inboxDir);
 	const remove = async () => qc.setQueryData(qk.kb(project.id), await api.kbInboxDelete(project.id, f.path));
-	const state = f.skipped ? f.skipped : f.cardError ? f.cardError : `구획 ${f.sections} · 카드 ${f.cards}`;
+	// 판 묶기에서 빠진 옛 판을 되살리거나, 되살린 것을 다시 판 묶기에 맡긴다.
+	const setKeep = async (on: boolean) => qc.setQueryData(qk.kb(project.id), await api.kbSave(project.id, { ...kb.kb, keep: on ? [...kb.kb.keep, f.path] : kb.kb.keep.filter((k) => k !== f.path) }));
+	const state = f.skipped ? f.skipped : f.cardError ? f.cardError : `${f.kept ? "다시 넣음 · " : ""}구획 ${f.sections} · 카드 ${f.cards}`;
 	return (
 		<ContextActions
 			items={[
 				...fileActions(f.path),
+				(f.held === "version" || f.kept) && "sep",
+				f.held === "version" && { label: "다시 넣기", icon: <Undo2 />, onSelect: () => void attempt(() => setKeep(true)) },
+				f.kept && { label: "판 묶기에 맡기기", icon: <Layers />, onSelect: () => void attempt(() => setKeep(false)) },
 				inbox && "sep",
 				inbox && { label: "빼기", icon: <X />, destructive: true, onSelect: () => void attempt(remove) },
 			]}
 		>
-			<div className="border-b border-border last:border-b-0">
+			<div className="relative border-b border-border last:border-b-0">
+				{f.held === "version" && (
+					<Button size="xs" variant="ghost" className="absolute top-2 right-2 z-10" onClick={() => void attempt(() => setKeep(true))}>
+						<Undo2 />
+						다시 넣기
+					</Button>
+				)}
 				<button
 					type="button"
 					disabled={!!f.skipped}
@@ -309,7 +365,16 @@ function FileRow({ project, kb, f }: { project: Project; kb: KbView; f: KbFileVi
 					</span>
 					<span className="w-20 text-[12px] text-subtle">{SOURCE[f.source] ?? f.source}</span>
 					<span className="tabular w-16 text-right text-[12px] text-subtle">{bytes(f.size)}</span>
-					<span className={cn("w-56 truncate text-right text-[12px]", f.skipped || f.cardError ? "text-danger" : "text-subtle")} title={state}>
+					<span
+						className={cn(
+							"truncate text-right text-[12px]",
+							// 「다시 넣기」 단추 자리만큼 줄여 다른 줄과 열을 맞춘다 (w-32 + mr-24 = w-56)
+							f.held === "version" ? "mr-24 w-32" : "w-56",
+							// 일부러 뺀 것(제외 · 옛 판)은 오류가 아니라 흐리게 보인다
+							f.held ? "text-subtle" : f.skipped || f.cardError ? "text-danger" : "text-subtle",
+						)}
+						title={state}
+					>
 						{state}
 					</span>
 				</button>

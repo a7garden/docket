@@ -27,7 +27,7 @@ export const usage: Usage = {
 
 export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr"], kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true };
 
-const KB_OFF = { enabled: false, folders: [], includeDeliverables: true, topK: 8, rerank: false };
+const KB_OFF = { enabled: false, folders: [], includeDeliverables: true, topK: 8, rerank: false, exclude: [], keep: [] };
 const GL_OFF = { enabled: false, include: [] };
 
 export const plugins: PluginList = {
@@ -58,7 +58,7 @@ export const plugins: PluginList = {
 };
 
 export const projects: Project[] = [
-	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"] }, glossary: { enabled: true, include: ["pdoc00000001"] } },
+	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"], exclude: ["이전판"] }, glossary: { enabled: true, include: ["pdoc00000001"] } },
 	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: KB_OFF, glossary: GL_OFF },
 	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: KB_OFF, glossary: GL_OFF },
 ];
@@ -510,12 +510,14 @@ export const kb: KbView = {
 	inboxDir: `${DATA}\\projects\\${P}\\kb\\inbox`,
 	exts: ["md", "markdown", "txt", "csv", "tsv", "json", "yaml", "yml", "xml", "html", "htm", "sql", "docx", "xlsx", "pptx", "hwpx", "pdf"],
 	files: [
-		{ path: "D:\\work\\calc\\docs\\요구사항.hwpx", source: "folder", label: "", size: 182_000, sections: 14, cards: 14, skipped: "", cardError: "" },
-		{ path: "D:\\work\\calc\\docs\\계산 규칙.md", source: "folder", label: "", size: 6_200, sections: 5, cards: 3, skipped: "", cardError: "" },
-		{ path: `${DATA}\\projects\\${P}\\kb\\inbox\\회의록_1027.pdf`, source: "inbox", label: "", size: 1_204_000, sections: 9, cards: 0, skipped: "", cardError: "" },
-		{ path: "D:\\work\\calc\\산출물\\함수_설명서_v2_20261028.md", source: "deliverable", label: "함수 설명서", size: 905, sections: 2, cards: 2, skipped: "", cardError: "" },
-		{ path: "D:\\work\\calc\\docs\\옛_양식.hwp", source: "folder", label: "", size: 30_100, sections: 0, cards: 0, skipped: "지원하지 않는 형식", cardError: "" },
-		{ path: "D:\\work\\calc\\docs\\스캔본.pdf", source: "folder", label: "", size: 2_400_000, sections: 0, cards: 0, skipped: "글자 없음 (스캔 PDF 일 수 있음)", cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\요구사항_v3_20261020.hwpx", source: "folder", label: "", size: 182_000, sections: 14, cards: 14, skipped: "", held: "", kept: false, cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\계산 규칙.md", source: "folder", label: "", size: 6_200, sections: 5, cards: 3, skipped: "", held: "", kept: false, cardError: "" },
+		{ path: `${DATA}\\projects\\${P}\\kb\\inbox\\회의록_1027.pdf`, source: "inbox", label: "", size: 1_204_000, sections: 9, cards: 0, skipped: "", held: "", kept: false, cardError: "" },
+		{ path: "D:\\work\\calc\\산출물\\함수_설명서_v2_20261028.md", source: "deliverable", label: "함수 설명서", size: 905, sections: 2, cards: 2, skipped: "", held: "", kept: false, cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\옛_양식.hwp", source: "folder", label: "", size: 30_100, sections: 0, cards: 0, skipped: "지원하지 않는 형식", held: "", kept: false, cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\스캔본.pdf", source: "folder", label: "", size: 2_400_000, sections: 0, cards: 0, skipped: "글자 없음 (스캔 PDF 일 수 있음)", held: "", kept: false, cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\요구사항_v1_20260901.hwpx", source: "folder", label: "", size: 171_000, sections: 13, cards: 13, skipped: "새 판이 있어 넣지 않음 · 요구사항_v3_20261020.hwpx", held: "version", kept: false, cardError: "" },
+		{ path: "D:\\work\\calc\\docs\\이전판\\계산 규칙_v1.md", source: "folder", label: "", size: 5_100, sections: 0, cards: 0, skipped: "제외 목록에 있어 넣지 않음", held: "exclude", kept: false, cardError: "" },
 	],
 	sections: 30,
 	cards: 19,
@@ -529,7 +531,7 @@ export const kb: KbView = {
 
 export const kbHits: KbHit[] = [
 	{ path: "D:\\work\\calc\\docs\\계산 규칙.md", textPath: "", source: "folder", label: "", section: "나눗셈", why: "0 으로 나눌 때 None 을 돌려주는 규칙을 다룬다.", excerpt: "## 나눗셈\n0 으로 나누면 오류 대신 None 을 돌려준다.\n호출하는 쪽이 None 을 보고 안내 문구를 띄운다.", score: 7.4 },
-	{ path: "D:\\work\\calc\\docs\\요구사항.hwpx", textPath: "", source: "folder", label: "", section: "3. 계산 기능", why: "사칙연산 함수의 입력 · 출력 요구를 정리한다.", excerpt: "덧셈 · 뺄셈 · 곱셈 · 나눗셈을 제공한다.\t입력은 정수와 실수", score: 4.1 },
+	{ path: "D:\\work\\calc\\docs\\요구사항_v3_20261020.hwpx", textPath: "", source: "folder", label: "", section: "3. 계산 기능", why: "사칙연산 함수의 입력 · 출력 요구를 정리한다.", excerpt: "덧셈 · 뺄셈 · 곱셈 · 나눗셈을 제공한다.\t입력은 정수와 실수", score: 4.1 },
 ];
 
 export const glossary: GlossaryView = {

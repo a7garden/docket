@@ -1,10 +1,12 @@
 [package]
 name = "docket"
-version = "0.2.2"
+version = "0.2.3"
 description = "포스트잇처럼 적은 개발 이슈를 Claude 가 계획하고 구현하는 작업대"
 authors = ["a7garden"]
 license = "MIT"
 edition = "2024"
+# 2026.10.29 : 최신 stable 을 하한으로 둔다. 배포본은 CI(@stable)가 빌드하고, 직접 빌드할 때만 이 판이 필요하다.
+rust-version = "1.99"
 
 [lib]
 # Windows 에서 bin 이름과 겹치지 않도록 _lib 를 붙인다 (cargo#8519).

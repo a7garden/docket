@@ -7,6 +7,9 @@
 //!   뜻은 같은데 낱말이 다른 경우(「회신」 ↔ 「결과 통보」)를 카드의 비슷한 말이 메운다.
 //! - 찾기는 로컬 BM25 다. 카드와 원문에 점수를 매기고 카드에 무게를 더 준다. 찾을 때는 Claude 를 부르지 않는다.
 //!   「고르기 다듬기」를 켜면 후보를 Claude 에 한 번 넘겨 다시 고른다.
+//! - 낡은 자료: 같은 문서의 옛 판이 함께 걸리는 것이 가장 흔한 오염이라, 넣기 전에 거른다. 같은 폴더에서 판 표시를 뗀 이름이 같은 파일은
+//!   가장 높은 판만 넣고(판 묶기), 사람이 정한 제외 목록에 걸린 것도 넣지 않는다. 그래도 붙은 자료는 「지금 코드 · 메모가 먼저, 어긋나면 밝힌다」고 일러 붙인다.
+//!   수정 시각으로는 가리지 않는다 — 받아 오거나 복사한 파일은 그날 시각이 되고, 같은 날 만든 v1 · v6 도 있다.
 //! - 자동 갱신: 이슈를 완료하면 「자동 갱신」을 켠 산출물 가운데 그 코드 변경과 관련 있는 것을 Claude 가 가리고, 고른 것만 새 판을 쓴다.
 //!
 //! ```text
@@ -19,7 +22,7 @@
 //!
 //! 목차
 //! 1. 색인 목록(catalog) — 모양 · 읽고 쓰기
-//! 2. 훑기 · 글자 사본 · 구획 나누기
+//! 2. 훑기 · 제외 · 판 묶기 · 글자 사본 · 구획 나누기
 //! 3. 낱말 나누기 · BM25 찾기 · 발췌
 //! 4. 색인 카드 만들기
 //! 5. 색인 순회 · 진행 상황
@@ -44,7 +47,7 @@ use crate::error::{Error, Result};
 use crate::extract;
 use crate::model::*;
 use crate::runner;
-use crate::store::{Store, write_atomic};
+use crate::store::{Store, same_path, write_atomic};
 
 /// 한 번에 훑는 파일 수. 넘으면 나머지는 넣지 않고 화면에 알린다. 큰 폴더(저장소 전체 등)를 잘못 골랐을 때 색인이 끝나지 않는 것을 막는다.
 const MAX_FILES: usize = 5000;
@@ -102,6 +105,8 @@ pub struct KbFile {
 	pub sections: Vec<Section>,
 	/// 비어 있지 않으면 색인하지 않은 까닭
 	pub skipped: String,
+	/// exclude: 제외 목록 · version: 판 묶기. 이때는 지난 구획 · 카드를 지우지 않고 둔다 — 다시 넣을 때 카드를 새로 만들지 않게.
+	pub held: String,
 	pub card_error: String,
 	pub card_tries: u32,
 }
@@ -171,6 +176,8 @@ pub(crate) fn json_in(text: &str) -> Option<Value> {
 
 struct Found {
 	path: PathBuf,
+	/// 훑기 시작한 폴더(참조 폴더 · inbox). 제외 목록의 이름 조각은 이 안쪽 경로에만 맞춘다.
+	root: PathBuf,
 	source: &'static str,
 	label: String,
 	did: String,
@@ -214,10 +221,133 @@ fn walk(root: &Path, source: &'static str, out: &mut Vec<Found>) -> bool {
 			if out.len() >= MAX_FILES {
 				return true;
 			}
-			out.push(Found { path: e.path(), source, label: String::new(), did: String::new() });
+			out.push(Found { path: e.path(), root: root.to_path_buf(), source, label: String::new(), did: String::new() });
 		}
 	}
 	false
+}
+
+/// 제외 목록에 걸리는지. 전체 경로는 그 파일이거나 그 아래, 이름 조각은 훑기 시작한 폴더 안쪽의 폴더 · 파일 이름에만 맞춘다 —
+/// 「workspace」 같은 말이 참조 폴더 바깥 경로에 걸려 통째로 빠지지 않게. 대소문자는 가리지 않는다.
+fn excluded(path: &Path, root: &Path, rules: &[String]) -> bool {
+	let norm = |s: &str| s.replace('/', "\\").trim_end_matches('\\').to_lowercase();
+	let full = norm(&path.to_string_lossy());
+	let rel: Vec<String> = path
+		.strip_prefix(root)
+		.map(|r| r.components().map(|c| c.as_os_str().to_string_lossy().to_lowercase()).collect())
+		.unwrap_or_default();
+	rules.iter().any(|r| {
+		if Path::new(r).is_absolute() {
+			let r = norm(r);
+			full == r || full.starts_with(&format!("{r}\\"))
+		} else {
+			let r = r.trim().to_lowercase();
+			!r.is_empty() && rel.iter().any(|c| c.contains(&r))
+		}
+	})
+}
+
+/// 파일 이름 끝의 판 표시. 이름 끝에서 `_` · `-` · 빈칸으로 끊은 조각을 하나씩 뗀다.
+#[derive(Debug, Default, PartialEq)]
+struct Mark {
+	/// 판 표시를 뗀 이름(소문자). 같은 폴더에서 이것이 같으면 한 문서의 판으로 본다.
+	base: String,
+	/// v14 · v1.1
+	version: Option<Vec<u64>>,
+	/// 20261027 (여덟 자리)
+	date: Option<u64>,
+	/// 「 (1)」 — 내려받기 · 복사로 생긴 사본
+	copy: bool,
+}
+
+/// 판의 순서 (판 번호 · 날짜)
+type Rank = (Option<Vec<u64>>, Option<u64>);
+
+fn parse_version(t: &str) -> Option<Vec<u64>> {
+	let v = t.strip_prefix('v')?;
+	let parts: Vec<u64> = v.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
+	(!parts.is_empty()).then_some(parts)
+}
+
+fn mark(stem: &str) -> Mark {
+	let mut m = Mark::default();
+	let mut rest = stem.trim();
+	while let Some(at) = rest.rfind(['_', '-', ' ']) {
+		let tok = rest[at + 1..].to_lowercase();
+		if tok.is_empty() || matches!(tok.as_str(), "최종" | "최종본" | "수정" | "수정본" | "final") {
+			// 순서를 말해 주지 않는 표시는 떼기만 한다
+		} else if m.version.is_none()
+			&& let Some(v) = parse_version(&tok)
+		{
+			m.version = Some(v);
+		} else if m.date.is_none() && tok.len() == 8 && tok.starts_with("20") && tok.bytes().all(|b| b.is_ascii_digit()) {
+			m.date = tok.parse().ok();
+		} else if tok.len() > 2 && tok.starts_with('(') && tok.ends_with(')') && tok[1..tok.len() - 1].bytes().all(|b| b.is_ascii_digit()) {
+			m.copy = true;
+		} else {
+			break;
+		}
+		rest = rest[..at].trim_end();
+	}
+	m.base = rest.to_lowercase();
+	m
+}
+
+/// 같은 판에 형식이 여럿이면 남길 순서. 원본 형식은 제목 구조가 살아 있어 구획이 잘 나뉘고, PDF 는 내보낸 사본인 때가 많다.
+fn format_rank(path: &Path) -> u8 {
+	match path.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref() {
+		Some("docx" | "hwpx" | "pptx" | "xlsx") => 0,
+		Some("pdf") => 2,
+		_ => 1,
+	}
+}
+
+/// 판 묶기. 같은 폴더에서 판 표시를 뗀 이름이 같은 파일을 한 문서로 보고, 넣지 않을 파일과 그 까닭을 낸다.
+/// 확실할 때만 뺀다 — 판 번호로(판 번호가 없으면 이름 속 날짜로) 낮은 판 · 같은 판의 다른 형식 · 원본이 곁에 있는 사본.
+/// 판 표시가 없는 파일은 순서를 알 수 없어 판으로는 빼지 않는다. 읽는 형식이 아닌 파일은 묶지 않는다 — 읽지 못하는 새 판이 읽히는 옛 판을 가리지 않게.
+fn older_versions(paths: &[&Path]) -> HashMap<usize, String> {
+	let marks: Vec<Mark> = paths.iter().map(|p| mark(&p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())).collect();
+	let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+	for (i, p) in paths.iter().enumerate() {
+		let readable = p.extension().is_some_and(|e| extract::KB_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()));
+		if readable && !marks[i].base.is_empty() {
+			let dir = p.parent().map(|d| d.to_string_lossy().to_lowercase()).unwrap_or_default();
+			groups.entry((dir, marks[i].base.clone())).or_default().push(i);
+		}
+	}
+	let rank = |i: usize| (marks[i].version.clone(), marks[i].date);
+	let name = |i: usize| file_name(&paths[i].to_string_lossy());
+	let mut out = HashMap::new();
+	for g in groups.values().filter(|g| g.len() > 1) {
+		// 1. 낮은 판. 판 번호가 있는 것끼리, 없으면 날짜만 있는 것끼리 견준다.
+		let by_version = g.iter().any(|&i| marks[i].version.is_some());
+		let comparable = |i: usize| if by_version { marks[i].version.is_some() } else { marks[i].date.is_some() };
+		// 같은 판이 여럿이면 까닭에 적을 이름으로 남을 것(원본 형식 · 사본 아님)을 고른다.
+		let pick = |i: usize| (rank(i), std::cmp::Reverse((marks[i].copy, format_rank(paths[i]))));
+		if let Some(top) = g.iter().copied().filter(|&i| comparable(i)).max_by_key(|&i| pick(i)) {
+			for &i in g.iter().filter(|&&i| comparable(i) && rank(i) < rank(top)) {
+				out.insert(i, format!("새 판이 있어 넣지 않음 · {}", name(top)));
+			}
+		}
+		// 2. 남은 것 가운데 판이 같은 것끼리 하나만 남긴다.
+		let alive: Vec<usize> = g.iter().copied().filter(|i| !out.contains_key(i)).collect();
+		let mut same: HashMap<Rank, Vec<usize>> = HashMap::new();
+		for &i in &alive {
+			same.entry(rank(i)).or_default().push(i);
+		}
+		for s in same.values().filter(|s| s.len() > 1) {
+			let best = s.iter().copied().min_by_key(|&i| (marks[i].copy, format_rank(paths[i]), name(i).chars().count())).unwrap();
+			let ext = |i: usize| paths[i].extension().map(|e| e.to_string_lossy().to_lowercase());
+			for &i in s.iter().filter(|&&i| i != best) {
+				if ext(i) != ext(best) {
+					out.insert(i, format!("같은 판의 다른 형식을 넣어 넣지 않음 · {}", name(best)));
+				} else if marks[i].copy && !marks[best].copy {
+					out.insert(i, format!("원본이 있어 넣지 않음 · {}", name(best)));
+				}
+			}
+		}
+	}
+	out
 }
 
 /// 제목 줄(# …)에서 끊고, 길면 빈 줄에서, 그래도 길면 줄 머리에서 끊는다. 뽑은 엑셀 · 슬라이드는 「## 시트」 · 「## 슬라이드」가 제목 줄이다.
@@ -305,7 +435,7 @@ fn refresh(app: &AppHandle, pid: &str) -> Result<Catalog> {
 			if let Ok(path) = store.version_path(pid, &d.id, last.n)
 				&& path.is_file()
 			{
-				found.push(Found { path, source: "deliverable", label: d.title.clone(), did: d.id.clone() });
+				found.push(Found { root: PathBuf::new(), path, source: "deliverable", label: d.title.clone(), did: d.id.clone() });
 			}
 		}
 	}
@@ -314,17 +444,40 @@ fn refresh(app: &AppHandle, pid: &str) -> Result<Catalog> {
 	}
 	truncated |= walk(&dir.join("inbox"), "inbox", &mut found);
 
-	let mut files = Vec::new();
 	let mut seen = HashSet::new();
-	for f in found {
-		let key = f.path.to_string_lossy().to_string();
-		if !seen.insert(key.to_lowercase()) {
-			continue;
+	found.retain(|f| seen.insert(f.path.to_string_lossy().to_lowercase()));
+
+	// 넣지 않을 것을 먼저 가린다. 산출물은 이미 최신 판만 들어와 가리지 않는다.
+	// 판 묶기는 제외한 것 · 사람이 다시 넣은 것을 빼고 견준다 — 다시 넣은 옛 판이 새 판을 밀어내지 않게.
+	let mut held: HashMap<usize, (&str, String)> = HashMap::new();
+	for (i, f) in found.iter().enumerate() {
+		if f.source != "deliverable" && excluded(&f.path, &f.root, &p.kb.exclude) {
+			held.insert(i, ("exclude", "제외 목록에 있어 넣지 않음".into()));
 		}
+	}
+	let kept = |f: &Found| p.kb.keep.iter().any(|k| same_path(k, &f.path.to_string_lossy()));
+	let pool: Vec<usize> = (0..found.len()).filter(|i| found[*i].source != "deliverable" && !held.contains_key(i) && !kept(&found[*i])).collect();
+	let paths: Vec<&Path> = pool.iter().map(|&i| found[i].path.as_path()).collect();
+	for (j, why) in older_versions(&paths) {
+		held.insert(pool[j], ("version", why));
+	}
+
+	let mut files = Vec::new();
+	for (i, f) in found.into_iter().enumerate() {
+		let key = f.path.to_string_lossy().to_string();
 		let (mtime, size) = fs::metadata(&f.path).map(|m| (modified_ms(&m), m.len())).unwrap_or((0, 0));
-		let mut file = match by_path.remove(&key) {
-			Some(pf) if pf.mtime == mtime && pf.size == size && (!pf.skipped.is_empty() || Path::new(&pf.text_path).is_file()) => pf,
-			pf => build(&dir, &f.path, &key, mtime, size, pf),
+		let prev = by_path.remove(&key);
+		let mut file = if let Some((kind, why)) = held.remove(&i) {
+			// 넣지 않되 지난 구획 · 카드 · 사본은 남긴다. 찾기 · 카드 만들기는 skipped 를 보고 건너뛴다.
+			let mut pf = prev.unwrap_or_else(|| KbFile { path: key.clone(), ..Default::default() });
+			(pf.mtime, pf.size, pf.held, pf.skipped) = (mtime, size, kind.into(), why);
+			pf
+		} else {
+			match prev {
+				Some(pf) if pf.held.is_empty() && pf.mtime == mtime && pf.size == size && (!pf.skipped.is_empty() || Path::new(&pf.text_path).is_file()) => pf,
+				// 빠져 있던 것은 늘 다시 뽑는다. 빠진 동안 덮어 둔 까닭(비밀 파일 등)을 다시 가리고, 카드는 해시가 같으면 옮겨 온다.
+				pf => build(&dir, &f.path, &key, mtime, size, pf),
+			}
 		};
 		file.source = f.source.into();
 		file.label = f.label;
@@ -818,6 +971,8 @@ pub fn prompt_block(hits: &[KbHit]) -> String {
 	let mut s = String::from(
 		"## 지식베이스에서 찾은 자료\n\
 		이 프로젝트에 모아 둔 참고 문서에서 이번 일과 가까운 구획을 앱이 찾아 붙였다. 근거로 쓰되 관계없으면 무시한다. \
+		자료는 낡았을 수 있다 — 지금 코드 · 이 일의 메모 · 사용자의 말과 어긋나면 그쪽을 따르고, 어긋난 자료와 그 내용을 답에 밝힌다. \
+		아직 구현하지 않은 요구일 수도 있으니 어긋난다고 조용히 버리지 않는다. \
 		더 읽어야 하면 「글자 사본」을 Read 로 연다 — 원본이 docx · hwpx · pdf 여도 사본은 글이다. 근거로 쓴 자료는 원본 경로로 밝힌다.\n",
 	);
 	for h in hits {
@@ -1040,6 +1195,10 @@ pub struct KbFileView {
 	pub sections: usize,
 	pub cards: usize,
 	pub skipped: String,
+	/// exclude · version · 빈 글
+	pub held: String,
+	/// 판 묶기에서 「다시 넣기」로 되살린 파일
+	pub kept: bool,
 	pub card_error: String,
 }
 
@@ -1077,16 +1236,21 @@ pub fn status(app: &AppHandle, pid: &str) -> Result<KbView> {
 			sections: f.sections.len(),
 			cards: f.sections.iter().filter(|s| s.card.is_some()).count(),
 			skipped: f.skipped.clone(),
+			held: f.held.clone(),
+			kept: p.kb.keep.iter().any(|k| same_path(k, &f.path)),
 			card_error: f.card_error.clone(),
 		})
 		.collect();
+	// 빠진 파일은 카드를 남겨 두지만 찾기에 쓰이지 않으므로 세지 않는다.
+	let live = || files.iter().filter(|f| f.skipped.is_empty());
+	let (sections, cards) = (live().map(|f| f.sections).sum(), live().map(|f| f.cards).sum());
 	Ok(KbView {
 		kb: p.kb,
 		inbox_dir: dir.join("inbox").to_string_lossy().to_string(),
 		dir: dir.to_string_lossy().to_string(),
 		exts: extract::KB_EXTS.iter().map(|s| s.to_string()).collect(),
-		sections: files.iter().map(|f| f.sections).sum(),
-		cards: files.iter().map(|f| f.cards).sum(),
+		sections,
+		cards,
 		pending: pending_cards(&cat),
 		files,
 		indexed_at: cat.indexed_at,
@@ -1180,6 +1344,64 @@ mod tests {
 		assert_eq!(json_in("```json\n[1, 2]\n```").unwrap(), serde_json::json!([1, 2]));
 		assert_eq!(json_in("답: {\"a\": 1} 끝").unwrap(), serde_json::json!({"a": 1}));
 		assert!(json_in("없음").is_none());
+	}
+
+	/// 이름 끝의 판 · 날짜 · 사본 표시를 떼고, 순서를 말해 주지 않는 이름은 그대로 둔다.
+	#[test]
+	fn marks_read_version_date_copy() {
+		let m = mark("산림인접건축_담당자매뉴얼_v14_20261027");
+		assert_eq!((m.base.as_str(), m.version, m.date, m.copy), ("산림인접건축_담당자매뉴얼", Some(vec![14]), Some(20261027), false));
+		let m = mark("01.LLM플랫폼 배포가이드_v1.1");
+		assert_eq!((m.base.as_str(), m.version), ("01.llm플랫폼 배포가이드", Some(vec![1, 1])));
+		let m = mark("검토의견서_TEST20260903_001 (1)");
+		assert_eq!((m.base.as_str(), m.copy), ("검토의견서_test20260903_001", true));
+		let m = mark("운영매뉴얼_v0.4_20261016_내부용");
+		assert_eq!((m.base.as_str(), m.version), ("운영매뉴얼_v0.4_20261016_내부용", None));
+	}
+
+	/// 낮은 판 · 같은 판의 다른 형식 · 원본이 곁에 있는 사본만 빼고, 판 표시가 없는 것과 다른 폴더의 것은 남긴다.
+	#[test]
+	fn older_versions_keep_only_the_latest() {
+		let names = [
+			r"D:\d\매뉴얼_v4_20261026.pptx",
+			r"D:\d\매뉴얼_v14_20261027.pptx",
+			r"D:\d\매뉴얼_v14_20261027.pdf",
+			r"D:\d\확인요청_v1_20261013.hwpx",
+			r"D:\d\확인요청_v6_20261013.hwpx",
+			r"D:\d\확인요청.hwpx",
+			r"D:\d\의견서 (1).pdf",
+			r"D:\d\의견서.pdf",
+			r"D:\d\보고_최종.docx",
+			r"D:\d\보고.docx",
+			r"D:\e\매뉴얼_v1.pptx",
+			r"D:\d\옛양식_v9.hwp",
+		];
+		let paths: Vec<&Path> = names.iter().map(Path::new).collect();
+		let out = older_versions(&paths);
+		let mut gone: Vec<usize> = out.keys().copied().collect();
+		gone.sort();
+		assert_eq!(gone, vec![0, 2, 3, 6], "{out:?}");
+		assert!(out[&0].contains("매뉴얼_v14_20261027.pptx"), "{out:?}");
+		assert!(out[&2].starts_with("같은 판의 다른 형식"), "{out:?}");
+	}
+
+	/// 이름 조각은 훑기 시작한 폴더 안쪽에만 맞추고, 전체 경로는 그 아래를 모두 뺀다.
+	#[test]
+	fn exclude_rules_match_inside_root() {
+		let root = Path::new(r"D:\workspace\docs");
+		let f = Path::new(r"D:\workspace\docs\설계\이전판\요구_v1.docx");
+		assert!(excluded(f, root, &["이전판".into()]));
+		assert!(excluded(f, root, &[r"d:/workspace/docs/설계".into()]));
+		assert!(!excluded(f, root, &["workspace".into()]));
+		assert!(!excluded(f, root, &[r"D:\workspace\docs\설".into()]));
+	}
+
+	/// 붙이는 자료에는 「지금 코드가 먼저 · 어긋나면 밝힌다」가 함께 간다.
+	#[test]
+	fn prompt_block_warns_about_stale() {
+		let b = prompt_block(&[KbHit { path: "a.md".into(), excerpt: "본문".into(), ..Default::default() }]);
+		assert!(b.contains("낡았을 수 있다") && b.contains("밝힌다"), "{b}");
+		assert!(prompt_block(&[]).is_empty());
 	}
 
 	#[test]

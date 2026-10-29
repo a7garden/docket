@@ -306,10 +306,21 @@ impl Store {
 				folders.push(f.to_string());
 			}
 		}
+		// 제외 · 다시 넣기 목록은 대소문자만 다른 것을 하나로 본다. 끝의 경로 구분자는 뗀다.
+		let tidy = |v: &[String]| {
+			let mut out: Vec<String> = Vec::new();
+			for x in v.iter().map(|x| x.trim().trim_end_matches(['/', '\\'])).filter(|x| !x.is_empty()) {
+				if !out.iter().any(|o| same_path(o, x)) {
+					out.push(x.to_string());
+				}
+			}
+			out
+		};
+		let (exclude, keep) = (tidy(&kb.exclude), tidy(&kb.keep));
 		let _g = self.guard();
 		let mut list: Vec<Project> = read_json(&self.projects_path())?;
 		let p = list.iter_mut().find(|p| p.id == pid).ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
-		p.kb = ProjectKb { folders, top_k: kb.top_k.clamp(1, 30), ..kb.clone() };
+		p.kb = ProjectKb { folders, top_k: kb.top_k.clamp(1, 30), exclude, keep, ..kb.clone() };
 		let out = p.clone();
 		write_json(&self.projects_path(), &list)?;
 		Ok(out)
