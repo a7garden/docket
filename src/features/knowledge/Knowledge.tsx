@@ -105,8 +105,7 @@ export function Knowledge({ project }: { project: Project }) {
 				<div className="flex max-w-4xl flex-col gap-7 pb-10">
 					{!on && (
 						<p className="rounded-md border border-border px-4 py-3 text-[13px] leading-relaxed break-keep text-muted-foreground">
-							켜면 아래 자료를 훑어 글자를 뽑고, 구획마다 Claude({kb.cardModel})가 색인 카드를 적어 둡니다. 그 뒤로 계획 · 대화 · 산출물을 쓸 때 메모나 질문과 가까운 구획을 찾아 Claude 에게 함께 넘깁니다.
-							카드를 만들 때 문서 내용이 Claude 로 가고 파일마다 호출 비용이 듭니다. 자료는 꺼 둔 채로도 넣어 둘 수 있습니다.
+							켜면 계획 · 대화 · 산출물을 쓸 때 메모나 질문과 가까운 구획을 찾아 Claude 에게 함께 넘깁니다. 색인 카드를 만들 때 문서 내용이 Claude({kb.cardModel})로 가고 파일마다 호출 비용이 듭니다.
 						</p>
 					)}
 

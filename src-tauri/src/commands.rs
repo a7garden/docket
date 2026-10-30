@@ -14,7 +14,7 @@ use crate::claude_files::{self, Resource, TextFile};
 use crate::error::{Error, Result, msg};
 use crate::model::*;
 use crate::plugin_host::{self, api::Target};
-use crate::{glossary, kb, recipe, usage};
+use crate::{glossary, kb, perf, recipe, usage};
 use crate::runner::{self, RunEvent, emit_deliverable, emit_issue};
 use crate::store::{Store, settle, title_of};
 
@@ -32,6 +32,8 @@ fn allowed_roots(store: &Store) -> Vec<PathBuf> {
 			if !p.deliverables_dir.is_empty() {
 				roots.push(PathBuf::from(&p.deliverables_dir));
 			}
+			// 상위 폴더 지침은 그 파일 하나씩만 연다. 폴더째 열면 D:\workspace 아래 다른 저장소까지 화면에서 고칠 수 있게 된다.
+			roots.extend(claude_files::parent_instructions(Path::new(&p.path)));
 			roots.push(PathBuf::from(p.path));
 		}
 	}
@@ -66,6 +68,12 @@ pub async fn app_info(app: AppHandle) -> Result<AppInfo> {
 		claude_version,
 		version: app.package_info().version.to_string(),
 	})
+}
+
+/// 화면 쪽 계측을 켤지. app_info 는 claude 버전을 묻느라 늦게 오므로 따로 둔다 — 첫 명령부터 재야 한다.
+#[tauri::command]
+pub fn perf_enabled() -> bool {
+	perf::on()
 }
 
 /// 산출물을 파일로 만들 때 쓰는 도구(Python 패키지 · LibreOffice · Office · Node · 한컴)가 있는지 본다. 설정 화면의 「점검」이 부른다.
@@ -141,9 +149,9 @@ pub fn asset_allow(app: AppHandle, path: String) -> Result<String> {
 
 /* ---------- 프로젝트 ---------- */
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn projects_list(store: State<Store>) -> Result<Vec<Project>> {
-	store.projects()
+	perf::command("projects_list", "", || store.projects())
 }
 
 #[tauri::command]
@@ -192,24 +200,24 @@ pub fn project_allow(store: State<Store>, project_id: String, rules: Vec<String>
 }
 
 /// 앱이 띄운 claude 에 실제로 걸리는 규칙: 전역 · 저장소 공유 · 저장소 개인 설정. 앱 자신의 규칙은 프로젝트에 있다.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn permissions_view(store: State<Store>, project_id: String) -> Result<Vec<claude_files::RuleSet>> {
 	Ok(claude_files::rule_sets(Path::new(&store.project(&project_id)?.path)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn permissions_suggest(store: State<Store>, project_id: String) -> Result<Vec<claude_files::Suggestion>> {
 	Ok(claude_files::suggest_commands(Path::new(&store.project(&project_id)?.path)))
 }
 
 /* ---------- 이슈 ---------- */
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn issues_list(store: State<Store>, project_id: String) -> Result<Vec<IssueView>> {
-	store.list_issues(&project_id)
+	perf::command("issues_list", &project_id, || store.list_issues(&project_id))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn issue_get(store: State<Store>, project_id: String, issue_id: String) -> Result<IssueView> {
 	store.get_issue(&project_id, &issue_id)
 }
@@ -222,8 +230,33 @@ pub fn issue_create(app: AppHandle, project_id: String, issue_id: Option<String>
 	}
 	let settings = store.settings()?;
 	let auto = auto_plan.unwrap_or(settings.auto_plan);
-	let v = store.create_issue(&project_id, issue_id.as_deref(), &note, auto, runner::new_title_mode(&settings), model.as_deref().unwrap_or(""), effort.as_deref().unwrap_or(""))?;
+	let v = store.create_issue(&project_id, issue_id.as_deref(), &note, auto, runner::new_title_mode(&settings), model.as_deref().unwrap_or(""), effort.as_deref().unwrap_or(""), None)?;
 	emit_issue(&app, &v);
+	Ok(v)
+}
+
+/// 이 메모에서 이어지는 새 메모를 만든다. 앞선 메모의 단계는 바꾸지 않고 이력 한 줄만 남긴다.
+/// 모델 · effort 는 앞선 메모의 것을 물려준다 — 같은 일을 잇는 것이라 사용자가 고른 값이 그대로 맞다.
+#[tauri::command]
+pub fn issue_follow_up(app: AppHandle, project_id: String, issue_id: String, note: String) -> Result<IssueView> {
+	let store = app.state::<Store>();
+	if note.trim().is_empty() {
+		return msg("메모가 비어 있습니다");
+	}
+	let src = store.raw_issue(&project_id, &issue_id)?;
+	if src.talk {
+		return msg("메모에서만 후속 메모를 만들 수 있습니다");
+	}
+	let settings = store.settings()?;
+	let from = IssueRef { id: src.id.clone(), number: src.number, title: src.title.clone() };
+	// 새 메모를 다 쓴 뒤에 앞선 메모를 고친다. store 의 잠금은 다시 들어갈 수 없어 한 번에 하나씩 부른다.
+	let v = store.create_issue(&project_id, None, &note, settings.auto_plan, runner::new_title_mode(&settings), &src.model, &src.effort, Some(from))?;
+	emit_issue(&app, &v);
+	let line = format!("#{} {}", v.issue.number, v.issue.title);
+	change(&app, &project_id, &issue_id, |i| {
+		i.log("follow", line);
+		Ok(())
+	})?;
 	Ok(v)
 }
 
@@ -253,9 +286,9 @@ pub fn issue_set_title(app: AppHandle, project_id: String, issue_id: String, tit
 //
 // 대화는 보드에 나오지 않는 이슈다. 보내기 · 중지 · 터미널 · 첨부 · 지우기는 issue_* 명령을 그대로 쓴다.
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn talks_list(store: State<Store>, project_id: String) -> Result<Vec<IssueView>> {
-	store.list_talks(&project_id)
+	perf::command("talks_list", &project_id, || store.list_talks(&project_id))
 }
 
 #[tauri::command]
@@ -263,6 +296,27 @@ pub fn talk_create(app: AppHandle, project_id: String, talk_id: String) -> Resul
 	let v = app.state::<Store>().create_talk(&project_id, &talk_id)?;
 	emit_issue(&app, &v);
 	Ok(v)
+}
+
+/// 앱 대화가 도는 가상의 프로젝트(앱 데이터 폴더 · 권한 칸). 프로젝트 목록에는 없어 따로 받는다.
+#[tauri::command]
+pub fn app_project(store: State<Store>) -> Result<Project> {
+	store.global_project()
+}
+
+/// 메모의 대화를 프로젝트 대화로 갈라 낸다. 메모는 그대로 남는다.
+/// 워크트리에서 돈 메모면 세션 기록이 그 폴더의 자리에 있어, 대화가 도는 프로젝트 폴더의 자리로 복사해 둔다.
+#[tauri::command]
+pub fn talk_promote(app: AppHandle, project_id: String, issue_id: String, talk_id: String) -> Result<IssueView> {
+	let store = app.state::<Store>();
+	let src = store.raw_issue(&project_id, &issue_id)?;
+	let project = store.project(&project_id)?;
+	let from = src.worktree.as_ref().map_or(project.path.as_str(), |w| w.path.as_str());
+	runner::copy_transcript(&src.session_id, from, &project.path);
+	let (talk, issue) = store.talk_from_issue(&project_id, &issue_id, &talk_id)?;
+	emit_issue(&app, &issue);
+	emit_issue(&app, &talk);
+	Ok(talk)
 }
 
 #[tauri::command]
@@ -467,18 +521,27 @@ pub async fn plugin_invoke(
 
 /// 이슈 세션 기록에서 앱이 돌리지 않은 차례만 꺼낸다. 앱이 돌린 차례는 실행 기록으로 이미 보인다.
 /// 앱의 실행 시간 안에 찍힌 차례를 앱 것으로 본다. 앱 실행 중에는 터미널을 열지 못하게 하므로 둘이 겹치지 않는다.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn issue_transcript(app: AppHandle, project_id: String, issue_id: String) -> Result<Vec<runner::Turn>> {
+	let key = format!("{project_id}/{issue_id}");
+	perf::command("issue_transcript", &key, || transcript(&app, &project_id, &issue_id))
+}
+
+fn transcript(app: &AppHandle, project_id: &str, issue_id: &str) -> Result<Vec<runner::Turn>> {
 	let store = app.state::<Store>();
-	let v = store.get_issue(&project_id, &issue_id)?;
-	let project = store.project(&project_id)?;
+	let v = store.get_issue(project_id, issue_id)?;
+	let project = store.project(project_id)?;
 	let Some(path) = runner::transcript_path(&project.path, &v.issue.session_id) else { return Ok(Vec::new()) };
 	let windows: Vec<(i64, i64)> = v.issue.runs.iter().map(|r| (r.started_at, if r.ended_at > 0 { r.ended_at } else { i64::MAX })).collect();
 	let mut turns = runner::read_turns(&path, &project.path)?;
 	turns.retain(|t| !windows.iter().any(|(a, b)| t.at >= *a && t.at <= *b));
+	// 메모에서 갈라 낸 대화의 세션에는 메모의 계획 · 구현 차례가 앞에 들어 있다. 터미널 차례로 보이거나 그 변경을 담지 않게 갈라 낸 뒤만 본다.
+	if v.issue.from_issue.is_some() {
+		turns.retain(|t| t.at >= v.issue.created_at);
+	}
 	// 터미널에서 고친 파일도 변경 탭에 있어야 되돌리기 · 산출물이 빠뜨리지 않는다. 새로 담을 것이 있을 때만 쓴다.
 	if runner::absorb_terminal(&mut v.issue.clone(), &turns) {
-		change(&app, &project_id, &issue_id, |i| {
+		change(app, project_id, issue_id, |i| {
 			runner::absorb_terminal(i, &turns);
 			Ok(())
 		})?;
@@ -486,7 +549,7 @@ pub fn issue_transcript(app: AppHandle, project_id: String, issue_id: String) ->
 	Ok(turns)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn issue_sessions(store: State<Store>, project_id: String) -> Result<Vec<runner::SessionInfo>> {
 	Ok(runner::recent_sessions(&store.project(&project_id)?.path, 12))
 }
@@ -628,7 +691,7 @@ pub fn attachment_delete(app: AppHandle, project_id: String, issue_id: String, n
 	Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_events(store: State<Store>, project_id: String, target: String, target_id: String, run_id: String) -> Result<Vec<RunEvent>> {
 	let project = store.project(&project_id)?;
 	let path = if target == "issue" {
@@ -645,9 +708,9 @@ pub fn run_events(store: State<Store>, project_id: String, target: String, targe
 
 /* ---------- 산출물 ---------- */
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn deliverables_list(store: State<Store>, project_id: String) -> Result<Vec<DeliverableView>> {
-	store.list_deliverables(&project_id)
+	perf::command("deliverables_list", &project_id, || store.list_deliverables(&project_id))
 }
 
 #[tauri::command]
@@ -1032,9 +1095,9 @@ pub fn deliverable_from_issue(app: AppHandle, project_id: String, issue_id: Stri
 
 /* ---------- 지식베이스 ---------- */
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn kb_status(app: AppHandle, project_id: String) -> Result<kb::KbView> {
-	kb::status(&app, &project_id)
+	perf::command("kb_status", &project_id, || kb::status(&app, &project_id))
 }
 
 /// 켜기 · 참조 폴더 · 산출물 포함 · 붙일 수 · 다듬기를 바꾼다. 켜 두었으면 바로 다시 훑는다.
@@ -1093,7 +1156,7 @@ pub fn kb_cards(app: AppHandle, project_id: String, path: String) -> Result<Vec<
 
 /* ---------- 어휘 사전 ---------- */
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn glossary_get(store: State<Store>, project_id: String) -> Result<glossary::GlossaryView> {
 	glossary::view(&store, &project_id)
 }
@@ -1114,13 +1177,14 @@ pub fn glossary_save_settings(store: State<Store>, project_id: String, glossary:
 
 /* ---------- Claude 설정 ---------- */
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resources_list(store: State<Store>, project_id: Option<String>) -> Result<Vec<Resource>> {
-	let root = match project_id.filter(|p| !p.is_empty()) {
-		Some(pid) => Some(PathBuf::from(store.project(&pid)?.path)),
+	let project = match project_id.filter(|p| !p.is_empty()) {
+		Some(pid) => Some(store.project(&pid)?),
 		None => None,
 	};
-	Ok(claude_files::list(root.as_deref()))
+	let root = project.as_ref().map(|p| PathBuf::from(&p.path));
+	Ok(claude_files::list(root.as_deref(), project.as_ref().map_or(&[][..], |p| &p.extra_dirs)))
 }
 
 #[tauri::command]

@@ -45,6 +45,8 @@ export interface Issue {
 	result?: { summary: string; verification: string; followups: string[] } | null;
 	/** 같은 파일은 한 줄. kind: edit · create · update */
 	changes?: { path: string; rel: string; kind: string }[];
+	/** 이 메모가 이어 받은 앞선 메모. 후속 메모가 아니면 null */
+	follows?: { id: string; number: number; title: string } | null;
 }
 
 /** on_command 가 돌려주는 것. 화면이 그린다 — 플러그인은 화면을 직접 만지지 않는다. */

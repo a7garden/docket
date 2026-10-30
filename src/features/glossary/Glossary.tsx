@@ -106,8 +106,7 @@ export function Glossary({ project }: { project: Project }) {
 				<div className="flex max-w-4xl flex-col gap-7 pb-10">
 					{!on && (
 						<p className="rounded-md border border-border px-4 py-3 text-[13px] leading-relaxed break-keep text-muted-foreground">
-							켜면 계획 · 대화 · 구현 · 산출물을 쓸 때 이 사전을 Claude 에게 함께 넘깁니다. Claude 를 따로 부르지 않으니 비용은 들지 않습니다. 사전이 길면 메모나 질문에 나온 용어부터 넣고 8,000자 안팎에서 자릅니다.
-							지식베이스도 켜 두었으면 찾을 때 비슷한 말을 덧붙여 찾습니다. 용어는 꺼 둔 채로도 적어 둘 수 있습니다.
+							켜면 계획 · 대화 · 구현 · 산출물을 쓸 때 이 사전을 Claude 에게 함께 넘깁니다. Claude 를 따로 부르지 않아 비용은 들지 않고, 길면 메모나 질문에 나온 용어부터 8,000자 안팎에서 자릅니다.
 						</p>
 					)}
 

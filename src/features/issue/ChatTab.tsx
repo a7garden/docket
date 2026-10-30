@@ -1,7 +1,7 @@
 import { type ClipboardEvent, type KeyboardEvent, memo, type RefObject, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowDown, Check, ChevronRight, Clock, Copy, History, Image as ImageIcon, ImagePlus, SquareTerminal, StickyNote, X } from "lucide-react";
+import { ArrowDown, Check, ChevronRight, Clock, Copy, History, Image as ImageIcon, ImagePlus, MessagesSquare, SquareTerminal, StickyNote, X } from "lucide-react";
 import { toast } from "sonner";
 import { copy } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
@@ -13,8 +13,8 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
-import { attachmentPath, clock, cost, duration, fileUrl, isImage, relTime, tokens } from "@/lib/format";
-import { useIssues, useSettings, useTerminalPlugin } from "@/lib/queries";
+import { attachmentPath, clock, cost, duration, fileUrl, isImage, newId, relTime, tokens } from "@/lib/format";
+import { useIssues, useProjects, useSettings, useTerminalPlugin } from "@/lib/queries";
 import { RUN_KIND_LABEL } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
 import type { HistoryEntry, Issue, QueuedChat, RunRecord, Turn } from "@/lib/types";
@@ -166,6 +166,11 @@ export const ChatTab = memo(function ChatTab({ issue, projectPath }: { issue: Is
 					<StepTurn key={x.run.id} issue={issue} root={projectPath} run={x.run} />
 				),
 			)}
+			{issue.history
+				.filter((h) => h.kind === "promoted")
+				.map((h) => (
+					<PromotedLine key={h.at} projectId={issue.projectId} entry={h} />
+				))}
 			{/* 위로 올라가 있는 동안 늘 띄운다. 칸 바닥에 붙는 높이 0 의 줄이라 상위 화면을 고치지 않고 두 화면에 함께 생긴다. -mt-5 로 목록의 gap 을 지운다. */}
 			<div className="pointer-events-none sticky bottom-0 -mt-5 h-0">
 				<Button
@@ -245,7 +250,7 @@ function TerminalTurn({ issue, root, turn }: { issue: Issue; root: string; turn:
 }
 
 /** 대화 탭 위에 늘 보이는 한 줄. 대화가 쌓여도 이 단추를 쓰려고 맨 위까지 올리지 않게 스크롤 칸 밖에 둔다. */
-export function SessionBar({ issue, projectPath }: { issue: Issue; projectPath: string }) {
+export function SessionBar({ issue, projectPath, compact = false }: { issue: Issue; projectPath: string; compact?: boolean }) {
 	const id = issue.sessionId;
 	const plugin = useTerminalPlugin();
 	if (!id) return null;
@@ -254,38 +259,76 @@ export function SessionBar({ issue, projectPath }: { issue: Issue; projectPath: 
 			? `켜 둔 ${plugin.name} 에 새 탭으로 붙입니다. 없으면 새로 띄웁니다`
 			: `프로젝트 폴더에서 ${plugin.name} 를 띄웁니다`
 		: "프로젝트 폴더에서 claude --resume 으로 엽니다";
+	const terminalLabel = plugin ? `${plugin.name} 에서 잇기` : "터미널에서 잇기";
+	// 좁은 옆 칸에서는 ID 를 줄이고 단추를 아이콘으로만 둔다. 이름은 툴팁으로 보인다.
+	const size = compact ? "icon-sm" : "sm";
 	return (
-		<div className="flex items-center gap-3 border-b border-border px-6 py-1.5">
+		<div className={cn("flex items-center gap-3 border-b border-border py-1.5", compact ? "px-4" : "px-6")}>
 			<div className="flex min-w-0 flex-1 items-baseline gap-2">
 				<span className="shrink-0 text-[12px] font-semibold text-muted-foreground">세션</span>
 				<span className="mono min-w-0 truncate text-[12px] text-foreground selectable" title={id}>
-					{id}
+					{compact ? `${id.slice(0, 8)}…` : id}
 				</span>
 			</div>
 			<div className="flex shrink-0 items-center gap-1">
-				<SessionPicker issue={issue} />
-				<Button size="sm" variant="ghost" onClick={() => void copy(id, "세션 ID")}>
+				{!issue.talk && <PromoteButton issue={issue} />}
+				{!compact && <SessionPicker issue={issue} />}
+				<Button size={size} variant="ghost" title="세션 ID 복사" aria-label="세션 ID 복사" onClick={() => void copy(id, "세션 ID")}>
 					<Copy />
-					ID
+					{!compact && "ID"}
 				</Button>
-				<Button size="sm" variant="ghost" title={resumeCommand(projectPath, id)} onClick={() => void copy(resumeCommand(projectPath, id), "터미널 명령")}>
-					<Copy />
-					명령
-				</Button>
+				{!compact && (
+					<Button size="sm" variant="ghost" title={resumeCommand(projectPath, id)} onClick={() => void copy(resumeCommand(projectPath, id), "터미널 명령")}>
+						<Copy />
+						명령
+					</Button>
+				)}
 				{/* 앱이 이 세션을 돌리는 동안 터미널에서도 이으면 대화가 두 갈래로 갈라진다. */}
 				<Button
-					size="sm"
-					variant="outline"
+					size={size}
+					variant={compact ? "ghost" : "outline"}
 					disabled={!!issue.run}
-					title={issue.run ? "실행이 끝나면 열 수 있습니다" : openTitle}
+					aria-label={terminalLabel}
+					title={issue.run ? "실행이 끝나면 열 수 있습니다" : compact ? `${terminalLabel} — ${openTitle}` : openTitle}
 					onClick={() => void api.issueOpenTerminal(issue.projectId, issue.id).catch((e) => toast.error(errorText(e)))}
 				>
 					<SquareTerminal />
-					{plugin ? `${plugin.name} 에서 잇기` : "터미널에서 잇기"}
+					{!compact && terminalLabel}
 				</Button>
 			</div>
 		</div>
 	);
+}
+
+/**
+ * 메모의 대화를 프로젝트 대화로 갈라 낸다. 한 사안을 길게 이어 가고 싶다는 생각은 대화를 보다가 들어서 이 줄에 둔다.
+ * 메모는 그대로 남고, 새 대화는 이 세션을 이어 받아 갈라진 세션으로 간다. 갈라 낸 대화는 옆 칸에 띄운다.
+ */
+export function PromoteButton({ issue }: { issue: Issue }) {
+	const [busy, setBusy] = useState(false);
+	return (
+		<Button
+			size="sm"
+			variant="ghost"
+			disabled={busy || !!issue.run}
+			title={issue.run ? "실행이 끝나면 갈라 낼 수 있습니다" : "메모는 그대로 두고 이 대화를 프로젝트 대화로 갈라 내 옆 칸에 띄웁니다"}
+			onClick={() => void promoteTalk(issue, setBusy)}
+		>
+			<MessagesSquare />
+			대화로 이어 가기
+		</Button>
+	);
+}
+
+export async function promoteTalk(issue: Issue, setBusy: (b: boolean) => void = () => {}) {
+	setBusy(true);
+	try {
+		const t = await api.talkPromote(issue.projectId, issue.id, newId());
+		useUi.getState().dockTalk({ projectId: t.projectId, id: t.id });
+	} catch (e) {
+		toast.error(errorText(e));
+	}
+	setBusy(false);
 }
 
 /**
@@ -368,32 +411,53 @@ function ChatTurn({ issue, root, run, memos }: { issue: Issue; root: string; run
 	);
 }
 
-/** 대화가 보드에 만든 메모 한 건. 기록 글은 `#번호 제목`, 실패했으면 `실패 · 까닭` 이다. */
+/**
+ * 대화가 보드에 만든 메모 한 건. 기록 글은 `#번호 제목`, 실패했으면 `실패 · 까닭` 이다.
+ * 앱 대화는 다른 프로젝트의 보드에 남기므로 `@<프로젝트 id> #번호 제목` 꼴이다. 그때는 어느 보드인지 앞에 보인다.
+ */
 function MemoLine({ projectId, entry }: { projectId: string; entry: HistoryEntry }) {
-	const { data: issues = [] } = useIssues(projectId);
-	const n = /^#(\d+)\s/.exec(entry.text)?.[1];
-	if (!n) return <div className="mt-2 text-[12.5px] break-keep text-danger/90 selectable">메모를 등록하지 못했습니다 · {entry.text.replace(/^실패 · /, "")}</div>;
+	const m = /^@(\S+) (.*)$/s.exec(entry.text);
+	const pid = m?.[1] ?? projectId;
+	const text = m?.[2] ?? entry.text;
+	const { data: issues = [] } = useIssues(pid);
+	const { data: projects = [] } = useProjects();
+	const n = /^#(\d+)\s/.exec(text)?.[1];
+	if (!n) return <div className="mt-2 text-[12.5px] break-keep text-danger/90 selectable">메모를 등록하지 못했습니다 · {text.replace(/^실패 · /, "")}</div>;
 	const target = issues.find((i) => i.number === Number(n));
+	const board = m ? `${projects.find((p) => p.id === pid)?.name ?? "다른 프로젝트"} 보드에` : "보드에";
 	return (
 		<div className="mt-2 flex items-center gap-2 rounded-md border border-border px-3 py-2 text-[12.5px]">
 			<StickyNote className="size-3.5 shrink-0 text-subtle" />
 			<span className="min-w-0 flex-1 truncate">
-				<span className="text-subtle">보드에 메모를 등록했습니다 · </span>
-				<span className="font-medium text-foreground">{entry.text}</span>
+				<span className="text-subtle">{board} 메모를 등록했습니다 · </span>
+				<span className="font-medium text-foreground">{text}</span>
 			</span>
 			{target && (
-				<Button
-					size="xs"
-					variant="outline"
-					onClick={() => {
-						const ui = useUi.getState();
-						ui.setView("board");
-						ui.openIssue(target.id);
-					}}
-				>
+				<Button size="xs" variant="outline" onClick={() => useUi.getState().openTarget({ projectId: pid, target: "issue", id: target.id })}>
 					열기
 				</Button>
 			)}
+		</div>
+	);
+}
+
+/** 메모 대화 탭 끝에 보이는 「갈라 낸 대화」 줄. 기록 글은 `<대화 id> <제목>` 이다. */
+function PromotedLine({ projectId, entry }: { projectId: string; entry: HistoryEntry }) {
+	const [id, ...rest] = entry.text.split(" ");
+	const title = rest.join(" ") || "새 대화";
+	return (
+		<div className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-[12.5px]">
+			<MessagesSquare className="size-3.5 shrink-0 text-subtle" />
+			<span className="min-w-0 flex-1 truncate">
+				<span className="text-subtle">「{title}」 대화로 갈라 냈습니다 · </span>
+				<span className="text-subtle">{relTime(entry.at)}</span>
+			</span>
+			<Button size="xs" variant="outline" onClick={() => useUi.getState().openTarget({ projectId, target: "issue", id, talk: true })}>
+				열기
+			</Button>
+			<Button size="xs" variant="ghost" onClick={() => useUi.getState().dockTalk({ projectId, id })}>
+				옆에 띄우기
+			</Button>
 		</div>
 	);
 }
@@ -561,7 +625,7 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 					if (sendKey.isSend(e)) send();
 				}}
 				placeholder={
-					(draft.edit ? "묻거나 고칠 것" : "물을 것 (읽기 전용)") +
+					(draft.edit ? "묻거나 고칠 것" : "물을 것") +
 					(running
 						? " · 답이 끝나면 대기 중인 질문과 묶어 보냅니다"
 						: issue.sessionId

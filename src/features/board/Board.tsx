@@ -225,6 +225,12 @@ export function Board({ project }: { project: Project }) {
 		for (const i of issues) t[stageOf(i)]++;
 		return t;
 	}, [issues]);
+	// 앞선 메모 id → 후속 메모 수. 연결은 후속 메모 쪽에만 있어 한 번 거꾸로 세어 카드에 넘긴다.
+	const followCounts = useMemo(() => {
+		const m = new Map<string, number>();
+		for (const i of issues) if (i.follows) m.set(i.follows.id, (m.get(i.follows.id) ?? 0) + 1);
+		return m;
+	}, [issues]);
 
 	// 열마다 그릴 카드. 메모 열에는 보류한 것을 뒤에 붙인다. 방향키 이동도 이 순서를 그대로 따른다.
 	const columns = useMemo(
@@ -344,6 +350,7 @@ export function Board({ project }: { project: Project }) {
 										delaySec={delay}
 										words={ws}
 										hit={hits.get(i.id)}
+										followCount={followCounts.get(i.id) ?? 0}
 										tabbable={i.id === active}
 										selected={sel.has(i.id)}
 										onPick={(e) => sel.toggle(i.id, e)}

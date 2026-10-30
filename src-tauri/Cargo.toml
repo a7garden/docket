@@ -1,6 +1,6 @@
 [package]
 name = "docket"
-version = "0.2.5"
+version = "0.2.6"
 description = "포스트잇처럼 적은 개발 이슈를 Claude 가 계획하고 구현하는 작업대"
 authors = ["a7garden"]
 license = "MIT"
@@ -23,6 +23,8 @@ tauri-plugin-dialog = "2"
 # GitHub 릴리즈의 latest.json 을 보고 새 판을 받아 깐다. 깐 뒤 다시 켜는 데 process 를 쓴다.
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# 실행이 끝났는데 창이 뒤에 있으면 Windows 알림으로도 알린다 (src/lib/systemNotify.ts).
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["process", "io-util", "sync", "time", "macros", "rt-multi-thread"] }

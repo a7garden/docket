@@ -130,11 +130,10 @@ export function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (i
 			{core.map((p) => (
 				<PluginRow key={`core-${p.id}`} p={p} on={enabled.includes(p.id)} onToggle={(v) => toggle(p, v)} onGrant={() => setGrant(p)} onRemoved={refresh} />
 			))}
-			<Section title="커뮤니티" hint="zip · plugin.json 으로 설치한 플러그인입니다." />
+			<Section title="커뮤니티" />
 			{community.length === 0 && (
 				<p className="px-4 py-3.5 text-[12.5px] leading-relaxed break-keep text-subtle">
-					아직 설치한 플러그인이 없습니다. 「설치」로 zip 이나 plugin.json 을 고릅니다. 플러그인은 메뉴 항목 · 사건 · 설정 칸 · 터미널을 더하고, 코드는 샌드박스(wasm)에서 허락한 권한으로만
-					돕니다.
+					아직 설치한 플러그인이 없습니다. 「설치」로 zip 이나 plugin.json 을 고릅니다.
 				</p>
 			)}
 			{community.map((p) => (
@@ -190,11 +189,11 @@ export function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (i
 }
 
 /** 묶음 머리. Group 의 구분선 사이에 한 줄로 들어간다. */
-function Section({ title, hint }: { title: string; hint: string }) {
+function Section({ title, hint }: { title: string; hint?: string }) {
 	return (
 		<div className="flex items-baseline gap-2 bg-muted/40 px-4 py-2">
 			<span className="text-[12px] font-semibold text-muted-foreground">{title}</span>
-			<span className="text-[12px] break-keep text-subtle">{hint}</span>
+			{hint && <span className="text-[12px] break-keep text-subtle">{hint}</span>}
 		</div>
 	);
 }

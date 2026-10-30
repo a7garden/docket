@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
-import { FolderOpen, MessageSquare, MessageSquarePlus, MoreHorizontal, Trash2 } from "lucide-react";
+import { CornerDownRight, FolderOpen, MessageSquare, MessageSquarePlus, MoreHorizontal, PanelRight, PanelRightClose, ShieldCheck, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, attempt, ContextActions, DropdownActions } from "@/components/ActionMenu";
 import { Empty, RunDot } from "@/components/bits";
@@ -16,39 +16,42 @@ import {
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { ChatComposer, ChatTab, type Draft, NO_TALK_DRAFT, SessionBar, useTranscript } from "@/features/issue/ChatTab";
+import { ChatComposer, ChatTab, NO_TALK_DRAFT, SessionBar, useTranscript } from "@/features/issue/ChatTab";
+import { AppTalkSettings } from "@/features/project/ProjectHeader";
 import { api, errorText } from "@/lib/api";
 import { newId, relTime } from "@/lib/format";
 import { lastEnded, useMarkSeen, useUnread } from "@/lib/notices";
-import { useTalks } from "@/lib/queries";
+import { useAppProject, useProjects, useTalks } from "@/lib/queries";
 import { useUi } from "@/lib/store";
-import type { Issue, Project } from "@/lib/types";
+import { GLOBAL_PID, type Issue } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
- * 메모 없이 프로젝트에서 바로 여는 대화. 왼쪽에 대화 목록, 오른쪽에 이슈 대화와 같은 화면을 둔다.
+ * 대화 목록과 대화 창. 왼쪽에 대화 목록, 오른쪽에 이슈 대화와 같은 화면을 둔다.
  * 대화는 보드에 나오지 않는 이슈라서 보내기 · 중지 · 터미널 · 첨부를 이슈 대화와 함께 쓴다.
+ * 프로젝트의 대화 탭은 그 프로젝트 대화만 보인다. 앱 대화와 다른 프로젝트 대화는 사이드바의 「대화」(AllTalks)에서 모아 본다.
  */
-export function Talks({ project }: { project: Project }) {
-	const { data: talks = [], isLoading } = useTalks(project.id);
-	const talkId = useUi((s) => s.talkId);
+export function Talks({ pid, path }: { pid: string; path: string }) {
+	const { data: talks = [], isLoading } = useTalks(pid);
+	const sel = useUi((s) => s.talk);
 	const openTalk = useUi((s) => s.openTalk);
 	const [busy, setBusy] = useState(false);
-	const talk = talks.find((t) => t.id === talkId);
+	const talk = sel ? talks.find((t) => t.id === sel.id) : undefined;
+	const app = pid === GLOBAL_PID;
 
-	// 연 대화가 없으면(처음 · 지운 뒤) 가장 최근 대화를 연다.
+	// 연 대화가 이 자리에 없으면(처음 · 지운 뒤 · 다른 자리에서 왔을 때) 가장 최근 대화를 연다.
 	useEffect(() => {
-		if (!isLoading && !talk && talks.length) openTalk(talks[0].id);
-	}, [isLoading, talk, talks, openTalk]);
+		if (!isLoading && !talk && talks.length) openTalk({ projectId: pid, id: talks[0].id });
+	}, [isLoading, talk, talks, pid, openTalk]);
 
 	// 아직 묻지 않은 대화가 있으면 그것을 다시 연다. 「새 대화」를 누를 때마다 빈 대화가 쌓이지 않게 한다.
 	const create = async () => {
 		const blank = talks.find((t) => t.runs.length === 0 && !t.run);
-		if (blank) return openTalk(blank.id);
+		if (blank) return openTalk({ projectId: pid, id: blank.id });
 		setBusy(true);
 		try {
-			const t = await api.talkCreate(project.id, newId());
-			openTalk(t.id);
+			const t = await api.talkCreate(pid, newId());
+			openTalk({ projectId: pid, id: t.id });
 		} catch (e) {
 			toast.error(errorText(e));
 		}
@@ -63,21 +66,31 @@ export function Talks({ project }: { project: Project }) {
 				</Button>
 				<nav className="-mr-1 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-1">
 					{talks.map((t) => (
-						<TalkRow key={t.id} talk={t} active={t.id === talk?.id} onOpen={() => openTalk(t.id)} />
+						<TalkRow key={t.id} talk={t} active={t.id === talk?.id} onOpen={() => openTalk({ projectId: pid, id: t.id })} />
 					))}
 				</nav>
 			</aside>
 
 			<section className="surface flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md">
 				{talk ? (
-					<TalkPane key={talk.id} talk={talk} projectPath={project.path} />
+					<TalkSlot key={talk.id} talk={talk} projectPath={path} />
 				) : (
 					!isLoading && (
 						<Empty className="grid flex-1 place-items-center leading-relaxed break-keep">
 							<div>
-								메모를 쓰지 않고 이 저장소에 대해 바로 물어볼 수 있습니다.
-								<br />
-								묻다가 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다.
+								{app ? (
+									<>
+										어느 프로젝트에도 묶이지 않고 이 앱 자체를 두고 묻는 대화입니다.
+										<br />
+										플러그인을 만들거나 설정 · 기록을 살펴 달라고 할 수 있습니다.
+									</>
+								) : (
+									<>
+										메모를 쓰지 않고 이 저장소에 대해 바로 물어볼 수 있습니다.
+										<br />
+										묻다가 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다.
+									</>
+								)}
 								<div className="mt-4">
 									<Button disabled={busy} onClick={() => void create()}>
 										<MessageSquarePlus />새 대화
@@ -92,25 +105,107 @@ export function Talks({ project }: { project: Project }) {
 	);
 }
 
-/** 대화 하나. 쓰다 만 질문은 대화마다 따로 둔다 — key 로 대화가 바뀌면 새로 만든다. */
-function TalkPane({ talk, projectPath }: { talk: Issue; projectPath: string }) {
-	const [draft, setDraft] = useState<Draft>(NO_TALK_DRAFT);
+/**
+ * 대화 탭 · 「대화」 화면이 대화를 그리는 자리. 옆 칸에 띄워 둔 대화는 여기서 그리지 않는다 —
+ * 같은 대화가 두 곳에 그려지면 스크롤 · 입력칸이 따로 놀아 어디서 보냈는지 헷갈린다.
+ */
+export function TalkSlot({ talk, projectPath }: { talk: Issue; projectPath: string }) {
+	const docked = useUi((s) => s.dock.open && s.dock.talk?.id === talk.id);
+	const setDock = useUi((s) => s.setDock);
+	if (!docked) return <TalkPane talk={talk} projectPath={projectPath} />;
+	return (
+		<Empty className="grid flex-1 place-items-center leading-relaxed break-keep">
+			<div>
+				「{talk.title || "새 대화"}」는 옆 칸에 띄워 둔 대화입니다.
+				<div className="mt-4">
+					<Button variant="outline" onClick={() => setDock({ open: false })}>
+						<PanelRightClose />
+						여기로 가져오기
+					</Button>
+				</div>
+			</div>
+		</Empty>
+	);
+}
+
+/** 대화가 도는 자리. 앱 대화는 앱 데이터 폴더에서 돌고 무엇이든 고칠 수 있어, 늘 눈에 띄게 둔다. */
+export function TalkTag({ talk }: { talk: Issue }) {
+	const { data: projects = [] } = useProjects();
+	if (talk.projectId === GLOBAL_PID) {
+		return (
+			<span title="앱 데이터 폴더에서 돕니다" className="shrink-0 rounded-sm border border-border px-1.5 text-[11px] text-muted-foreground">
+				앱
+			</span>
+		);
+	}
+	const name = projects.find((p) => p.id === talk.projectId)?.name;
+	return name ? <span className="shrink-0 rounded-sm border border-border px-1.5 text-[11px] text-muted-foreground">{name}</span> : null;
+}
+
+/** 메모에서 갈라 낸 대화의 출처. 누르면 그 메모를 연다. */
+function FromIssue({ talk }: { talk: Issue }) {
+	const f = talk.fromIssue;
+	if (!f) return null;
+	return (
+		<button
+			type="button"
+			title={`메모 #${f.number} ${f.title} 열기`}
+			onClick={() => useUi.getState().openTarget({ projectId: talk.projectId, target: "issue", id: f.id })}
+			className="flex shrink-0 items-center gap-1 text-[12px] text-subtle hover:text-foreground"
+		>
+			<CornerDownRight className="size-3.5" />
+			메모 #{f.number} 에서 옮김
+		</button>
+	);
+}
+
+/**
+ * 대화 하나. 쓰다 만 질문은 대화마다 화면 상태에 둔다 — 대화 탭과 옆 칸을 오가도 남는다.
+ * compact 는 옆 칸 꼴이다. 머리는 옆 칸이 그리고, 세션 줄을 줄인다.
+ */
+export function TalkPane({ talk, projectPath, compact = false }: { talk: Issue; projectPath: string; compact?: boolean }) {
+	const draft = useUi((s) => s.talkDrafts[talk.id]) ?? NO_TALK_DRAFT;
+	const setDraft = useUi((s) => s.setDraft);
 	// 터미널에서 이어 간 차례가 고친 파일을 담는다. 이슈 상세 창과 같다.
 	useTranscript(talk);
 	// 대화 화면에서 연 대화의 답은 본 것이다. 알림함 · 목록의 점이 꺼진다.
 	useMarkSeen(talk.id, lastEnded(talk.runs));
+	const pad = compact ? "px-4" : "px-6";
 	return (
 		<>
-			<header className="flex items-center gap-2 border-b border-border px-6 py-2.5">
-				<TalkTitle talk={talk} />
-				{talk.changes.length > 0 && <span className="text-[12px] text-subtle">바뀐 파일 {new Set(talk.changes.map((c) => c.rel)).size}</span>}
-				<TalkMenu talk={talk} />
-			</header>
-			<SessionBar issue={talk} projectPath={projectPath} />
-			<div data-scroll className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+			{!compact && (
+				<header className="flex items-center gap-2 border-b border-border px-6 py-2.5">
+					<TalkTitle talk={talk} />
+					<TalkTag talk={talk} />
+					<FromIssue talk={talk} />
+					{talk.changes.length > 0 && <span className="shrink-0 text-[12px] text-subtle">바뀐 파일 {new Set(talk.changes.map((c) => c.rel)).size}</span>}
+					<Button
+						size="icon-sm"
+						variant="ghost"
+						aria-label="옆에 띄우기"
+						title="옆에 띄우기 — 띄워 둔 채 보드 · 설정을 쓸 수 있습니다"
+						onClick={() => useUi.getState().dockTalk({ projectId: talk.projectId, id: talk.id })}
+					>
+						<PanelRight />
+					</Button>
+					<TalkMenu talk={talk} />
+				</header>
+			)}
+			{compact && talk.fromIssue && (
+				<div className="border-b border-border px-4 py-1">
+					<FromIssue talk={talk} />
+				</div>
+			)}
+			<SessionBar issue={talk} projectPath={projectPath} compact={compact} />
+			<div data-scroll className={cn("min-h-0 flex-1 overflow-y-auto py-5", pad)}>
 				<ChatTab issue={talk} projectPath={projectPath} />
 			</div>
-			<ChatComposer issue={talk} draft={draft} onDraft={setDraft} />
+			{talk.projectId === GLOBAL_PID && draft.edit && (
+				<div className={cn("border-t border-brand/30 bg-brand/10 py-1.5 text-[12px] break-keep text-brand-text", pad)}>
+					설정 · 이슈 기록까지 고칠 수 있습니다 · 보내기 전에 설정 파일을 백업합니다
+				</div>
+			)}
+			<ChatComposer issue={talk} draft={draft} onDraft={(d) => setDraft(talk.id, d)} />
 		</>
 	);
 }
@@ -175,14 +270,23 @@ function TalkTitle({ talk }: { talk: Issue }) {
 }
 
 /** 대화 폴더 · 지우기와 그 확인 창. 대화 머리의 「더 보기」와 목록 줄의 우클릭이 같이 쓴다. */
-function useTalkActions(talk: Issue): { items: ActionList; dialogs: ReactNode } {
+export function useTalkActions(talk: Issue): { items: ActionList; dialogs: ReactNode } {
 	const [confirm, setConfirm] = useState(false);
+	const [perm, setPerm] = useState(false);
+	const isApp = talk.projectId === GLOBAL_PID;
+	const { data: app } = useAppProject();
 	const items: ActionList = [
+		{ label: "옆에 띄우기", icon: <PanelRight />, onSelect: () => useUi.getState().dockTalk({ projectId: talk.projectId, id: talk.id }) },
 		{ label: "대화 폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.reveal(talk.dir)) },
+		// 앱 대화는 프로젝트 설정이 없다. 명령 허용 · 막을 목록과 앱 데이터 폴더를 대화 메뉴에서 연다.
+		isApp && !!app && { label: "앱 대화 권한", icon: <ShieldCheck />, onSelect: () => setPerm(true) },
+		isApp && !!app && { label: "앱 데이터 폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.open(app.path)) },
 		"sep",
 		{ label: "지우기", icon: <Trash2 />, destructive: true, disabled: !!talk.run, onSelect: () => setConfirm(true) },
 	];
 	const dialogs = (
+		<>
+		{isApp && app && <AppTalkSettings project={app} open={perm} onOpenChange={setPerm} />}
 		<AlertDialog open={confirm} onOpenChange={setConfirm}>
 			<AlertDialogContent className="pop">
 				<AlertDialogHeader>
@@ -200,7 +304,8 @@ function useTalkActions(talk: Issue): { items: ActionList; dialogs: ReactNode } 
 								await api.issueDelete(talk.projectId, talk.id);
 								// 목록에서 다른 대화를 지웠으면 보던 대화는 그대로 둔다. 보던 것을 지웠으면 가장 최근 대화가 열린다.
 								const ui = useUi.getState();
-								if (ui.talkId === talk.id) ui.openTalk(null);
+								if (ui.talk?.id === talk.id) ui.openTalk(null);
+								if (ui.dock.talk?.id === talk.id) ui.setDock({ open: false, talk: null });
 							})
 						}
 					>
@@ -209,6 +314,7 @@ function useTalkActions(talk: Issue): { items: ActionList; dialogs: ReactNode } 
 				</AlertDialogFooter>
 			</AlertDialogContent>
 		</AlertDialog>
+		</>
 	);
 	return { items, dialogs };
 }
@@ -232,7 +338,7 @@ function TalkMenu({ talk }: { talk: Issue }) {
 	);
 }
 
-function TalkRow({ talk, active, onOpen }: { talk: Issue; active: boolean; onOpen: () => void }) {
+export function TalkRow({ talk, active, onOpen }: { talk: Issue; active: boolean; onOpen: () => void }) {
 	const { items, dialogs } = useTalkActions(talk);
 	const unread = useUnread(talk.id, lastEnded(talk.runs)) && !talk.run;
 	return (
@@ -250,6 +356,7 @@ function TalkRow({ talk, active, onOpen }: { talk: Issue; active: boolean; onOpe
 					</span>
 					<span className="text-[11.5px] text-subtle">
 						{relTime(talk.updatedAt)}
+						{talk.fromIssue && ` · 메모 #${talk.fromIssue.number} 에서`}
 						{naming(talk) && " · 제목 짓는 중"}
 					</span>
 				</button>

@@ -4,11 +4,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { qk, upsert } from "./queries";
 import { useLive, useUi } from "./store";
-import type { Deliverable, Issue, KbProgress, KbView, RunEnvelope, Usage } from "./types";
+import { notifyIfAway } from "./systemNotify";
+import { type Deliverable, GLOBAL_PID, type Issue, type KbProgress, type KbView, type RunEnvelope, type Settings, type Usage } from "./types";
 
 /**
  * Rust 가 보내는 사건을 받아 캐시를 고친다. 목록을 다시 불러오지 않고 바뀐 한 건만 끼운다.
  * 실행이 끝나 사용자 차례가 되면 알림을 띄운다. 그 이슈를 이미 열어 보고 있으면 띄우지 않는다.
+ * 창이 앞에 없으면 설정 「시스템 알림」에 따라 Windows 알림으로도 알린다.
  */
 export function useDocketEvents() {
 	const qc = useQueryClient();
@@ -30,18 +32,33 @@ export function useDocketEvents() {
 				const finished = prev?.run && !payload.run && last?.status !== "stopped";
 				const ui = useUi.getState();
 				// 대화는 대화 화면에서 그 대화를 보고 있을 때만 「보고 있다」고 친다. 다른 화면에 가 있으면 답이 온 줄 모른다.
-				const open = payload.talk ? ui.view === "talks" && ui.talkId === payload.id : ui.issueId === payload.id;
-				if (!finished || open) return;
+				// 옆 칸에 띄워 둔 대화는 어느 화면에서든 보고 있는 것이다.
+				const open = payload.talk
+					? (ui.dock.open && ui.dock.talk?.id === payload.id) ||
+						((ui.view === "talks" || ui.view === "allTalks") && ui.talk?.id === payload.id)
+					: ui.issueId === payload.id;
+				if (!finished) return;
+				const name = payload.talk ? `${payload.projectId === GLOBAL_PID ? "앱 대화" : "대화"} · ${payload.title || "새 대화"}` : `#${payload.number} ${payload.title}`;
+				// 계획 · 결과 단계의 이슈에 물은 답도 상태는 그대로라, 상태보다 실행 종류를 먼저 본다.
+				const n = payload.error
+					? { title: `${name} 실패`, description: payload.error.slice(0, 160), error: true }
+					: last?.kind === "chat"
+						? { title: `${name} 답이 왔습니다` }
+						: payload.status === "planned"
+							? { title: `${name} 계획이 나왔습니다` }
+							: payload.status === "review"
+								? { title: `${name} 구현이 끝났습니다`, description: "바뀐 파일을 확인하세요" }
+								: null;
+				if (!n) return;
+				// 시스템 알림은 창이 앞에 없을 때 보낸다. 그 대상을 열어 두었어도 다른 창에 가 있으면 끝난 줄 모른다.
+				notifyIfAway(qc.getQueryData<Settings>(qk.settings)?.systemNotify, n.title, n.description);
+				if (open) return;
 				const go = {
 					label: "열기",
 					onClick: () => useUi.getState().openTarget({ projectId: payload.projectId, target: "issue", id: payload.id, talk: payload.talk }),
 				};
-				const name = payload.talk ? `대화 · ${payload.title || "새 대화"}` : `#${payload.number} ${payload.title}`;
-				if (payload.error) toast.error(`${name} 실패`, { description: payload.error.slice(0, 160), action: go });
-				// 계획 · 결과 단계의 이슈에 물은 답도 상태는 그대로라, 상태보다 실행 종류를 먼저 본다.
-				else if (last?.kind === "chat") toast(`${name} 답이 왔습니다`, { action: go });
-				else if (payload.status === "planned") toast(`${name} 계획이 나왔습니다`, { action: go });
-				else if (payload.status === "review") toast(`${name} 구현이 끝났습니다`, { description: "바뀐 파일을 확인하세요", action: go });
+				if (n.error) toast.error(n.title, { description: n.description, action: go });
+				else toast(n.title, { description: n.description, action: go });
 			}),
 		);
 		pending.push(
@@ -55,10 +72,13 @@ export function useDocketEvents() {
 				const key = qk.deliverables(payload.projectId);
 				const prev = qc.getQueryData<Deliverable[]>(key)?.find((x) => x.id === payload.id);
 				qc.setQueryData<Deliverable[]>(key, (old) => upsert(old, payload));
-				if (prev?.job && !payload.job && useUi.getState().deliverableId !== payload.id) {
-					if (payload.error) toast.error(`「${payload.title || "문서"}」 작성 실패`, { description: payload.error.slice(0, 160) });
-					else toast(`「${payload.title}」 작성이 끝났습니다`);
-				}
+				if (!prev?.job || payload.job) return;
+				const title = payload.error ? `「${payload.title || "문서"}」 작성 실패` : `「${payload.title}」 작성이 끝났습니다`;
+				const description = payload.error ? payload.error.slice(0, 160) : undefined;
+				notifyIfAway(qc.getQueryData<Settings>(qk.settings)?.systemNotify, title, description);
+				if (useUi.getState().deliverableId === payload.id) return;
+				if (payload.error) toast.error(title, { description });
+				else toast(title);
 			}),
 		);
 		pending.push(

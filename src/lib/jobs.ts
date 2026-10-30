@@ -1,6 +1,6 @@
 import { useQueries } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { qk, useProjects } from "@/lib/queries";
+import { focusOnly, qk, useProjects } from "@/lib/queries";
 import { RUN_KIND_LABEL } from "@/lib/status";
 import type { Project } from "@/lib/types";
 
@@ -24,9 +24,9 @@ export interface Job {
  */
 export function useJobs(): Job[] {
 	const { data: projects = [] } = useProjects();
-	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id) })) });
-	const docs = useQueries({ queries: projects.map((p) => ({ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id) })) });
-	const talks = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id) })) });
+	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id), ...focusOnly(p.id) })) });
+	const docs = useQueries({ queries: projects.map((p) => ({ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id), ...focusOnly(p.id) })) });
+	const talks = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id), ...focusOnly(p.id) })) });
 	const out: Job[] = [];
 	projects.forEach((project, n) => {
 		// 대화는 번호가 없다. #0 대신 「대화 · 제목」으로 부른다.

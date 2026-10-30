@@ -9,6 +9,8 @@
 //!   projects/<pid>/deliverables/<did>/ meta.json · v1/<파일> · runs/<rid>.jsonl
 //!   projects/<pid>/kb/                 지식베이스 · catalog.json · inbox/ · text/ (kb.rs)
 //!   projects/<pid>/glossary.json       어휘 사전 용어 목록 (glossary.rs)
+//!   global/issues/<id>/                   앱 대화 (프로젝트 id 자리에 GLOBAL_PID · global_talk.rs)
+//!   global/project.json · work/ · backup/ 앱 대화의 권한 칸 · 작업 폴더 · 고칠 수 있게 보낸 차례 전의 설정 사본
 //!   trash/<시각>-<이름>/                  지운 것은 여기로 옮긴다
 //!   plugins/<id>/plugin.json · <main>.wasm  플러그인 (설치하거나 사용자가 쓴다 · plugin_host) · 옛 정의 plugins/<id>.json
 //!   plugins-data/<id>/                    플러그인의 설정 칸 값 · 저장소 · 기록 (plugin_host)
@@ -16,22 +18,38 @@
 //!
 //! 프로젝트 폴더에는 쓰지 않는다. 소스 저장소에 이 앱의 흔적이 남지 않게 하는 것이 이 앱의 약속이다.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Instant, SystemTime};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::{Error, Result, msg};
 use crate::model::*;
-use crate::{extract, naming};
+use crate::{extract, naming, perf};
 
 pub struct Store {
 	pub root: PathBuf,
 	/// 이슈 · 산출물 · 목록 파일의 읽고-고치고-쓰기를 한 줄로 세운다. 실행 작업과 화면 명령이 같은 파일을 동시에 고친다.
 	lock: Mutex<()>,
+	/// 읽어 둔 issue.json. 수정 시각과 크기가 그대로면 다시 풀지 않는다 — 목록은 화면이 자주 묻고, 실행 기록이 쌓인 이슈는 풀기가 무겁다.
+	/// 앱이 쓸 때는 write_issue 가 바로 고친다. 손 편집 · 다른 프로세스가 쓴 것은 시각이나 크기가 바뀌어 다시 읽힌다.
+	issues: Mutex<HashMap<PathBuf, CachedIssue>>,
+}
+
+struct CachedIssue {
+	modified: SystemTime,
+	len: u64,
+	issue: Issue,
+}
+
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+	let m = fs::metadata(path).ok()?;
+	Some((m.modified().ok()?, m.len()))
 }
 
 /* ---------- 파일 도우미 ---------- */
@@ -116,6 +134,24 @@ pub fn same_path(a: &str, b: &str) -> bool {
 	norm(a) == norm(b)
 }
 
+/// 함께 여는 폴더를 다듬는다. 없는 폴더 · 상대 경로는 받지 않는다 — --add-dir 에 넘기면 CLI 가 어느 자리로 읽을지 알 수 없다.
+/// 프로젝트 폴더 자체와 겹친 줄은 뺀다. 이미 cwd 라 다시 열 까닭이 없다.
+fn clean_extra_dirs(input: &[String], project: &str) -> Result<Vec<String>> {
+	let mut out: Vec<String> = Vec::new();
+	for d in input.iter().map(|d| d.trim().trim_end_matches(['/', '\\'])).filter(|d| !d.is_empty()) {
+		if !Path::new(d).is_absolute() {
+			return msg(format!("함께 여는 폴더는 전체 경로로 적어 주세요: {d}"));
+		}
+		if !Path::new(d).is_dir() {
+			return msg(format!("없는 폴더입니다: {d}"));
+		}
+		if !same_path(d, project) && !out.iter().any(|o| same_path(o, d)) {
+			out.push(d.to_string());
+		}
+	}
+	Ok(out)
+}
+
 /// 메모 첫 줄을 제목으로 쓴다. 머리표 · 목록 기호 · 이미지 줄은 건너뛴다.
 /// 옛 이슈의 제목이고, 제목 모델이 지어 오기 전이나 짓지 못했을 때의 임시 제목이다. 카드가 빈 제목으로 뜨지 않게 하려는 것이다.
 pub fn title_of(note: &str) -> String {
@@ -179,7 +215,7 @@ impl Store {
 		fs::create_dir_all(root.join("trash"))?;
 		// 설정 화면의 「폴더 열기」가 처음부터 열리게 만들어 둔다.
 		fs::create_dir_all(crate::plugin_host::dir(&root))?;
-		Ok(Self { root, lock: Mutex::new(()) })
+		Ok(Self { root, lock: Mutex::new(()), issues: Mutex::default() })
 	}
 
 	fn guard(&self) -> MutexGuard<'_, ()> {
@@ -223,7 +259,38 @@ impl Store {
 		read_json(&self.projects_path())
 	}
 
+	/// 앱 대화의 권한 칸(허용 · 막을 명령)만 저장한다. 이름 · 경로는 늘 정해져 있어 두지 않는다.
+	fn global_project_path(&self) -> PathBuf {
+		self.root.join("global").join("project.json")
+	}
+
+	/// 앱 대화가 도는 가상의 프로젝트. 폴더는 앱 데이터 폴더 자체이고 projects.json 에는 없다 — 보드 · 번호 · 사이드바에 섞이지 않는다.
+	/// 지식베이스 · 어휘 사전 · 워크트리 · 함께 여는 폴더는 기본값(끔 · 비움)이라 실행이 저절로 건너뛴다.
+	pub fn global_project(&self) -> Result<Project> {
+		let saved: Project = read_json(&self.global_project_path())?;
+		Ok(Project {
+			id: GLOBAL_PID.into(),
+			name: "앱".into(),
+			path: self.root.to_string_lossy().to_string(),
+			allowed_tools: saved.allowed_tools,
+			denied_tools: saved.denied_tools,
+			plan_vcs_read: false,
+			parallel_impl: false,
+			..Default::default()
+		})
+	}
+
+	fn save_global_project(&self, allowed: &[String], denied: &[String]) -> Result<Project> {
+		let tidy = |v: &[String]| v.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<Vec<_>>();
+		let saved = Project { allowed_tools: tidy(allowed), denied_tools: tidy(denied), ..Default::default() };
+		write_json(&self.global_project_path(), &saved)?;
+		self.global_project()
+	}
+
 	pub fn project(&self, id: &str) -> Result<Project> {
+		if id == GLOBAL_PID {
+			return self.global_project();
+		}
 		self.projects()?
 			.into_iter()
 			.find(|p| p.id == id)
@@ -250,6 +317,15 @@ impl Store {
 	/// 실행 기록의 「허용 목록에 추가」. 이미 있는 규칙은 다시 넣지 않는다.
 	pub fn allow_rules(&self, pid: &str, rules: &[String]) -> Result<Project> {
 		let _g = self.guard();
+		if pid == GLOBAL_PID {
+			let mut p = self.global_project()?;
+			for r in rules.iter().map(|r| r.trim()).filter(|r| !r.is_empty()) {
+				if !p.allowed_tools.iter().any(|x| x == r) {
+					p.allowed_tools.push(r.to_string());
+				}
+			}
+			return self.save_global_project(&p.allowed_tools, &p.denied_tools);
+		}
 		let mut list: Vec<Project> = read_json(&self.projects_path())?;
 		let p = list.iter_mut().find(|p| p.id == pid).ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
 		for r in rules.iter().map(|r| r.trim()).filter(|r| !r.is_empty()) {
@@ -266,6 +342,10 @@ impl Store {
 	/// 산출물 설정 · 지식베이스 · 어휘 사전은 각 화면이 따로 저장한다 — 여기서 덮으면 이 창이 들고 있던 옛 값이 그 화면의 변경을 지운다.
 	pub fn save_project(&self, input: &Project) -> Result<Project> {
 		let _g = self.guard();
+		// 앱 대화는 권한 칸만 받는다. 이름 · 경로 · 워크트리 · 함께 여는 폴더는 뜻이 없다.
+		if input.id == GLOBAL_PID {
+			return self.save_global_project(&input.allowed_tools, &input.denied_tools);
+		}
 		let mut list: Vec<Project> = read_json(&self.projects_path())?;
 		let p = list
 			.iter_mut()
@@ -282,6 +362,7 @@ impl Store {
 			return msg("git 저장소의 맨 위 폴더인 프로젝트만 워크트리를 쓸 수 있습니다");
 		}
 		p.worktree = input.worktree;
+		p.extra_dirs = clean_extra_dirs(&input.extra_dirs, &p.path)?;
 		let out = p.clone();
 		write_json(&self.projects_path(), &list)?;
 		Ok(out)
@@ -474,6 +555,9 @@ impl Store {
 	}
 
 	pub fn project_dir(&self, pid: &str) -> PathBuf {
+		if pid == GLOBAL_PID {
+			return self.root.join("global");
+		}
 		self.root.join("projects").join(pid)
 	}
 
@@ -488,11 +572,34 @@ impl Store {
 		if !path.exists() {
 			return msg("이슈를 찾을 수 없습니다");
 		}
-		read_json(&path)
+		self.read_issue(&path).map(|(issue, _)| issue)
+	}
+
+	/// issue.json 을 캐시를 거쳐 읽는다. 두 번째 값은 캐시에서 꺼냈는지다(계측용).
+	fn read_issue(&self, path: &Path) -> Result<(Issue, bool)> {
+		let cache = || self.issues.lock().unwrap_or_else(|e| e.into_inner());
+		let st = stamp(path);
+		if let Some((modified, len)) = st
+			&& let Some(c) = cache().get(path).filter(|c| c.modified == modified && c.len == len)
+		{
+			return Ok((c.issue.clone(), true));
+		}
+		let issue: Issue = read_json(path)?;
+		if let Some((modified, len)) = st {
+			cache().insert(path.to_path_buf(), CachedIssue { modified, len, issue: issue.clone() });
+		}
+		Ok((issue, false))
 	}
 
 	fn write_issue(&self, issue: &Issue) -> Result<()> {
-		write_json(&self.issue_dir(&issue.project_id, &issue.id).join("issue.json"), issue)
+		let path = self.issue_dir(&issue.project_id, &issue.id).join("issue.json");
+		write_json(&path, issue)?;
+		let mut cache = self.issues.lock().unwrap_or_else(|e| e.into_inner());
+		match stamp(&path) {
+			Some((modified, len)) => cache.insert(path, CachedIssue { modified, len, issue: issue.clone() }),
+			None => cache.remove(&path),
+		};
+		Ok(())
 	}
 
 	pub fn note(&self, pid: &str, iid: &str) -> String {
@@ -545,16 +652,26 @@ impl Store {
 		let dir = self.project_dir(safe_id(pid)?).join("issues");
 		let mut out = Vec::new();
 		let Ok(rd) = fs::read_dir(&dir) else { return Ok(out) };
+		let t = perf::on().then(Instant::now);
+		let (mut seen, mut hits) = (0, 0);
 		for e in rd.filter_map(|e| e.ok()) {
 			let path = e.path().join("issue.json");
 			if !path.exists() {
 				continue;
 			}
-			match read_json::<Issue>(&path) {
-				Ok(issue) if issue.talk == talk => out.push(self.view(issue)),
-				Ok(_) => {}
+			seen += 1;
+			match self.read_issue(&path) {
+				Ok((issue, hit)) => {
+					hits += hit as usize;
+					if issue.talk == talk {
+						out.push(self.view(issue));
+					}
+				}
 				Err(err) => eprintln!("이슈를 읽지 못함 {}: {err}", path.display()),
 			}
+		}
+		if let Some(t) = t {
+			perf::log(format_args!("scan({pid}, talk={talk}) {:.1}ms 이슈 {seen} · 캐시 {hits} · 돌려줌 {}", t.elapsed().as_secs_f64() * 1000.0, out.len()));
 		}
 		Ok(out)
 	}
@@ -579,10 +696,71 @@ impl Store {
 		Ok(self.view(issue))
 	}
 
+	/// 메모의 대화를 같은 프로젝트의 대화로 갈라 낸다. 메모는 그대로 두고 이력 한 줄만 남긴다.
+	/// 대화 차례 · 그 실행 기록 · 첨부를 복사해 대화 탭에 지난 문답이 보이게 하고, 세션은 첫 차례에 --fork-session 으로 갈라진다.
+	/// 계획 · 구현 실행은 옮기지 않는다 — 세션에는 남아 있어 Claude 는 알지만, 대화 화면에서는 대화만 보이게 한다.
+	pub fn talk_from_issue(&self, pid: &str, iid: &str, tid: &str) -> Result<(IssueView, IssueView)> {
+		let id = safe_id(tid)?.to_string();
+		let src = self.load_issue(pid, iid)?;
+		if src.talk || pid == GLOBAL_PID {
+			return msg("메모의 대화만 갈라 낼 수 있습니다");
+		}
+		if src.run.is_some() {
+			return msg("실행이 끝난 뒤에 갈라 낼 수 있습니다");
+		}
+		if src.session_id.is_empty() {
+			return msg("이어 갈 세션이 없습니다");
+		}
+		let (from, to) = (self.issue_dir(pid, iid), self.issue_dir(pid, &id));
+		if to.join("issue.json").exists() {
+			return msg("이미 있는 대화입니다");
+		}
+		let runs: Vec<RunRecord> = src.runs.iter().filter(|r| r.kind == "chat").cloned().collect();
+		if from.join("attachments").is_dir() {
+			copy_dir_all(&from.join("attachments"), &to.join("attachments"))?;
+		}
+		fs::create_dir_all(to.join("runs"))?;
+		for r in &runs {
+			let f = from.join("runs").join(format!("{}.jsonl", r.id));
+			if f.is_file() {
+				fs::copy(&f, to.join("runs").join(format!("{}.jsonl", r.id)))?;
+			}
+		}
+		let now = now_ms();
+		let mut talk = Issue {
+			id: id.clone(),
+			project_id: pid.to_string(),
+			talk: true,
+			model: src.model.clone(),
+			effort: src.effort.clone(),
+			title: src.title.clone(),
+			// 메모의 제목을 그대로 쓴다. 손으로 고치면 그 제목이 남는다.
+			title_mode: TitleMode::Manual,
+			titled_at: now,
+			created_at: now,
+			updated_at: now,
+			session_id: src.session_id.clone(),
+			fork_pending: true,
+			runs,
+			from_issue: Some(IssueRef { id: src.id.clone(), number: src.number, title: src.title.clone() }),
+			..Default::default()
+		};
+		talk.log("created", format!("메모 #{} 에서 갈라 냄", src.number));
+		{
+			let _g = self.guard();
+			self.write_issue(&talk)?;
+		}
+		let src = self.update_issue(pid, iid, |i| {
+			i.log("promoted", format!("{id} {}", talk.title));
+			Ok(())
+		})?;
+		Ok((self.view(talk), src))
+	}
+
 	/// 화면이 미리 정한 id 를 받는다. 메모를 붙이기 전에 붙여 넣은 이미지가 그 id 의 폴더에 먼저 저장된다.
 	/// title_mode 가 auto 여도 첫 줄을 임시 제목으로 넣는다. 지은 제목은 제목 짓기 순회가 나중에 바꾼다.
-	/// model · effort 를 비우면 설정의 실행별 값을 따른다.
-	pub fn create_issue(&self, pid: &str, iid: Option<&str>, note: &str, auto_plan: bool, title_mode: TitleMode, model: &str, effort: &str) -> Result<IssueView> {
+	/// model · effort 를 비우면 설정의 실행별 값을 따른다. follows 를 주면 그 메모의 후속 메모가 된다.
+	pub fn create_issue(&self, pid: &str, iid: Option<&str>, note: &str, auto_plan: bool, title_mode: TitleMode, model: &str, effort: &str, follows: Option<IssueRef>) -> Result<IssueView> {
 		safe_id(pid)?;
 		let id = match iid {
 			Some(i) => safe_id(i)?.to_string(),
@@ -616,9 +794,11 @@ impl Store {
 				created_at: now,
 				updated_at: now,
 				note_updated_at: now,
+				follows,
 				..Default::default()
 			};
-			issue.log("created", "");
+			let from = issue.follows.as_ref().map(|f| format!("#{} 에서 이어짐", f.number)).unwrap_or_default();
+			issue.log("created", from);
 			write_atomic(&self.issue_dir(pid, &id).join("note.md"), note.as_bytes())?;
 			self.write_issue(&issue)?;
 			issue
@@ -655,7 +835,9 @@ impl Store {
 		if issue.run.is_some() {
 			return msg("실행 중인 이슈는 지울 수 없습니다. 먼저 중지하세요.");
 		}
-		self.trash(&self.issue_dir(pid, iid), &format!("issue-{}", issue.number))?;
+		let dir = self.issue_dir(pid, iid);
+		self.issues.lock().unwrap_or_else(|e| e.into_inner()).remove(&dir.join("issue.json"));
+		self.trash(&dir, &format!("issue-{}", issue.number))?;
 		Ok(())
 	}
 
@@ -812,7 +994,7 @@ impl Store {
 		let Ok(pid) = safe_id(pid) else { return Vec::new() };
 		let Ok(rd) = fs::read_dir(self.project_dir(pid).join("issues")) else { return Vec::new() };
 		rd.filter_map(|e| e.ok())
-			.filter_map(|e| read_json::<Issue>(&e.path().join("issue.json")).ok())
+			.filter_map(|e| self.read_issue(&e.path().join("issue.json")).ok().map(|(i, _)| i))
 			.filter(|i| !i.talk && i.status == Status::Done && !i.changes.is_empty())
 			.filter_map(|i| {
 				let done_at = i.history.iter().rev().find(|h| h.kind == "done")?.at;
@@ -1074,7 +1256,10 @@ impl Store {
 
 	/// 앱이 닫혀 끊긴 실행을 정리한다. 남겨 두면 그 이슈가 영원히 「실행 중」으로 보인다.
 	pub fn recover_interrupted(&self) -> Result<()> {
-		for p in self.projects()? {
+		// 앱 대화도 끊길 수 있다. 앱 대화 폴더에는 산출물이 없어 아래 산출물 정리는 비어 지나간다.
+		let mut projects = self.projects()?;
+		projects.push(self.global_project()?);
+		for p in projects {
 			// 대화도 끊길 수 있다. 빠뜨리면 그 대화가 영원히 실행 중으로 남는다.
 			for v in self.scan(&p.id, false)?.into_iter().chain(self.scan(&p.id, true)?) {
 				if let Some(run) = v.issue.run.clone() {
@@ -1189,7 +1374,7 @@ mod tests {
 		for d in [home.join("projects"), home.join("trash"), proj.clone()] {
 			fs::create_dir_all(d).unwrap();
 		}
-		let store = Store { root: home, lock: Mutex::new(()) };
+		let store = Store { root: home, lock: Mutex::new(()), issues: Mutex::default() };
 		let p = store.add_project(&proj.to_string_lossy()).unwrap();
 		store
 			.save_deliverable_settings(
@@ -1217,6 +1402,36 @@ mod tests {
 		assert_eq!((refs.len(), refs[0].kind.as_str()), (1, "direct"));
 
 		assert_eq!(fs::read_dir(&proj).unwrap().count(), 0, "프로젝트 폴더에 무언가 생겼다");
+		let _ = fs::remove_dir_all(&base);
+	}
+
+	/// 이슈 캐시: 앱이 쓴 것은 바로 보이고, 같은 파일은 다시 풀지 않으며, 손으로 고친 파일은 다시 읽는다.
+	#[test]
+	fn issue_cache_follows_writes_and_hand_edits() {
+		let base = std::env::temp_dir().join(format!("docket-cache-{}", short_id()));
+		let (home, proj) = (base.join("home"), base.join("proj"));
+		for d in [home.join("projects"), home.join("trash"), proj.clone()] {
+			fs::create_dir_all(d).unwrap();
+		}
+		let store = Store { root: home, lock: Mutex::new(()), issues: Mutex::default() };
+		let p = store.add_project(&proj.to_string_lossy()).unwrap();
+		store.create_talk(&p.id, "t1").unwrap();
+		let path = store.issue_dir(&p.id, "t1").join("issue.json");
+
+		assert!(store.read_issue(&path).unwrap().1, "앱이 쓴 이슈를 다시 풀었다");
+		assert!(store.list_issues(&p.id).unwrap().is_empty(), "대화가 보드 목록에 들어갔다");
+		assert_eq!(store.list_talks(&p.id).unwrap().len(), 1);
+
+		let mut raw: Issue = read_json(&path).unwrap();
+		raw.title = "손으로 고친 꽤 긴 제목".into();
+		fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+		let (issue, hit) = store.read_issue(&path).unwrap();
+		assert!(!hit, "손으로 고친 파일을 캐시에서 꺼냈다");
+		assert_eq!(store.list_talks(&p.id).unwrap()[0].issue.title, issue.title);
+		assert_eq!(issue.title, "손으로 고친 꽤 긴 제목");
+
+		store.delete_issue(&p.id, "t1").unwrap();
+		assert!(store.list_talks(&p.id).unwrap().is_empty());
 		let _ = fs::remove_dir_all(&base);
 	}
 

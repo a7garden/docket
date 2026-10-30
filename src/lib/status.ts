@@ -76,6 +76,8 @@ export const HISTORY_LABEL: Record<string, string> = {
 	"merge-conflict": "반영 못 함",
 	error: "실패",
 	memo: "메모 등록",
+	promoted: "대화로 갈라 냄",
+	follow: "후속 메모",
 	deliverable: "산출물 자동 갱신",
 };
 

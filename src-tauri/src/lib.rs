@@ -2,10 +2,12 @@ mod claude_files;
 mod commands;
 mod error;
 mod extract;
+mod global_talk;
 mod glossary;
 mod kb;
 mod model;
 mod naming;
+mod perf;
 mod plugin_host;
 mod recipe;
 mod runner;
@@ -28,6 +30,7 @@ pub fn run() {
 		.plugin(tauri_plugin_dialog::init())
 		.plugin(tauri_plugin_updater::Builder::new().build())
 		.plugin(tauri_plugin_process::init())
+		.plugin(tauri_plugin_notification::init())
 		.setup(|app| {
 			let store = store::Store::open()?;
 			if let Err(e) = store.recover_interrupted() {
@@ -61,6 +64,7 @@ pub fn run() {
 		})
 		.invoke_handler(tauri::generate_handler![
 			commands::app_info,
+			commands::perf_enabled,
 			commands::doc_tools_check,
 			commands::usage_get,
 			commands::spend_summary,
@@ -80,8 +84,11 @@ pub fn run() {
 			commands::issues_list,
 			commands::issue_get,
 			commands::issue_create,
+			commands::issue_follow_up,
 			commands::talks_list,
 			commands::talk_create,
+			commands::talk_promote,
+			commands::app_project,
 			commands::issue_save_note,
 			commands::issue_set_title,
 			commands::issue_set_auto_plan,

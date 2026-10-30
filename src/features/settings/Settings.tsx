@@ -1,7 +1,7 @@
 /*
  * 설정 화면.
  * - 목차 SECTIONS · 구획별 항목 이름 SETTING_ROWS(Ctrl+K 로 찾는다) · 화면 Settings (왼쪽 목차 + 본문 두 단)
- * - 구획: Claude · 자동 계획 · 지식베이스 · 산출물 · 플러그인(Plugins.tsx) · 화면 · 업데이트(Updates.tsx) · 저장 위치
+ * - 구획: Claude · 자동 계획 · 지식베이스 · 산출물 · 플러그인(Plugins.tsx) · 알림 · 화면 · 업데이트(Updates.tsx) · 저장 위치
  * - 틀: Group · Row (Updates.tsx · Plugins.tsx · DocTools.tsx 도 쓴다)
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -17,6 +17,7 @@ import { Switch } from "@/components/ui/switch";
 import { api, errorText } from "@/lib/api";
 import { qk, useAppInfo, useSettings } from "@/lib/queries";
 import { useUi } from "@/lib/store";
+import { ensurePermission, systemNotify } from "@/lib/systemNotify";
 import type { Settings as S } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { DocTools } from "./DocTools";
@@ -45,6 +46,7 @@ export const SECTIONS = {
 	knowledge: "지식베이스",
 	deliverables: "산출물",
 	plugins: "플러그인",
+	notify: "알림",
 	screen: "화면",
 	updates: "업데이트",
 	storage: "저장 위치",
@@ -62,6 +64,7 @@ export const SETTING_ROWS: Record<SectionId, string[]> = {
 	knowledge: ["카드 모델"],
 	deliverables: ["파일을 넣으면 작성법 뽑기", "한컴으로 확인", "문서 도구"],
 	plugins: [],
+	notify: ["시스템 알림", "시험 알림"],
 	screen: ["테마", "보내기 키"],
 	updates: ["지금 판", "자동으로 확인", "새 판", "바뀐 내용"],
 	storage: ["앱 데이터", "Claude 설정 폴더"],
@@ -290,6 +293,30 @@ export function Settings() {
 					</Group>
 
 					<Plugins enabled={s.enabledPlugins} onToggle={togglePlugin} />
+
+					<Group id="notify">
+						<Row
+							label="시스템 알림"
+							hint="창이 뒤에 있거나 최소화되어 있을 때 계획 · 구현 · 대화 답 · 산출물 작성이 끝나거나 실패하면 Windows 알림으로도 알립니다. 앱을 보고 있을 때는 앱 안에만 띄웁니다."
+							inline
+						>
+							<Switch
+								checked={s.systemNotify}
+								onCheckedChange={async (v) => {
+									if (v && !(await ensurePermission())) {
+										toast.error("Windows 가 알림을 허락하지 않았습니다", { description: "Windows 설정 › 알림에서 docket 을 켜세요" });
+										return;
+									}
+									void save({ systemNotify: v });
+								}}
+							/>
+						</Row>
+						<Row label="시험 알림" hint="오지 않으면 Windows 설정 › 알림에서 docket 과 방해 금지를 확인하세요." inline>
+							<Button variant="outline" onClick={() => void systemNotify("docket 시험 알림", "실행이 끝나면 이렇게 알립니다")}>
+								보내 보기
+							</Button>
+						</Row>
+					</Group>
 
 					<Group id="screen">
 						<Row label="테마" inline>

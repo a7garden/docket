@@ -1,6 +1,7 @@
 //! Claude Code 설정 파일을 찾고 읽고 쓴다. 지침(CLAUDE.md) · 스킬 · 에이전트 · 명령 · 규칙.
 //!
 //! 전역은 ~/.claude (CLAUDE_CONFIG_DIR 을 따른다), 프로젝트는 그 폴더의 CLAUDE.md · .claude/ 다.
+//! 프로젝트를 고르면 그 프로젝트에 실제로 실리는 것을 층으로 낸다: 전역 → 상위 폴더 지침 → 프로젝트 → 함께 여는 폴더 → settings.json.
 //! 사용자가 저장을 눌렀을 때만 쓴다. 쓸 때는 원래 파일의 줄바꿈(CRLF · LF)과 BOM 을 그대로 지킨다.
 
 use std::collections::HashMap;
@@ -19,12 +20,25 @@ pub fn claude_home() -> PathBuf {
 	}
 }
 
+/// docket 실행이 빼는 전역 자리(~/.claude 기준 glob). runner::run_settings 가 claudeMdExcludes 로 넘기고
+/// 설정 화면이 「docket 실행에서 빠짐」 표시에 쓴다. 한 곳에만 적는다 — 두 곳에 적으면 화면 표시가 실제 실행과 어긋난다.
+pub const RUN_EXCLUDES: &[&str] = &["CLAUDE.md", "rules/**"];
+
+/// docket 실행에서 빠지는 전역 파일인지. RUN_EXCLUDES 의 `x/**` 는 그 폴더 아래 전부, 나머지는 그 파일 하나다.
+pub fn run_excluded(path: &Path) -> bool {
+	let home = claude_home();
+	RUN_EXCLUDES.iter().any(|e| match e.strip_suffix("/**") {
+		Some(dir) => under(path, &home.join(dir)) && norm(path) != norm(&home.join(dir)),
+		None => norm(path) == norm(&home.join(e)),
+	})
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
-	/// instructions · skill · agent · command · rule
+	/// instructions · skill · agent · command · rule · settings · folder
 	pub kind: String,
-	/// global · project
+	/// global · parent(상위 폴더) · project · local(settings.local.json) · extra(함께 여는 폴더)
 	pub scope: String,
 	pub name: String,
 	pub description: String,
@@ -35,6 +49,28 @@ pub struct Resource {
 	/// 스킬 폴더 안의 다른 파일 (폴더 기준 상대 경로)
 	pub files: Vec<String>,
 	pub modified: i64,
+	/// docket 실행에서는 실리지 않는다(RUN_EXCLUDES)
+	pub excluded: bool,
+	/// settings 일 때 그 파일의 권한 규칙 · 훅
+	pub rules: Option<RuleSet>,
+}
+
+impl Resource {
+	fn file(kind: &str, scope: &str, name: String, description: String, path: &Path) -> Self {
+		Self {
+			kind: kind.into(),
+			scope: scope.into(),
+			name,
+			description,
+			path: path.to_string_lossy().to_string(),
+			dir: String::new(),
+			exists: path.exists(),
+			files: Vec::new(),
+			modified: mtime(path),
+			excluded: run_excluded(path),
+			rules: None,
+		}
+	}
 }
 
 fn mtime(path: &Path) -> i64 {
@@ -123,17 +159,7 @@ fn push_md_dir(out: &mut Vec<Resource>, kind: &str, scope: &str, dir: &Path, col
 		let meta = read_meta(&path);
 		let stem = rel_name(&rel.with_extension(""));
 		let name = meta.get("name").cloned().filter(|n| !n.is_empty() && kind == "agent").unwrap_or(if colon_names { stem.replace('/', ":") } else { stem });
-		out.push(Resource {
-			kind: kind.into(),
-			scope: scope.into(),
-			name,
-			description: meta.get("description").cloned().unwrap_or_default(),
-			path: path.to_string_lossy().to_string(),
-			dir: String::new(),
-			exists: true,
-			files: Vec::new(),
-			modified: mtime(&path),
-		});
+		out.push(Resource::file(kind, scope, name, meta.get("description").cloned().unwrap_or_default(), &path));
 	}
 }
 
@@ -141,23 +167,13 @@ fn scan(out: &mut Vec<Resource>, scope: &str, base: &Path, is_home: bool) {
 	let instructions: Vec<PathBuf> = if is_home {
 		vec![base.join("CLAUDE.md")]
 	} else {
-		vec![base.join("CLAUDE.md"), base.join("CLAUDE.local.md"), base.join(".claude").join("CLAUDE.md"), base.join("AGENTS.md")]
+		// 2026.10.30 : AGENTS.md 를 뺐다. Claude 는 이 파일을 읽지 않는데 지침 목록에 있어 실리는 것처럼 읽혔다.
+		vec![base.join("CLAUDE.md"), base.join("CLAUDE.local.md"), base.join(".claude").join("CLAUDE.md")]
 	};
 	for (i, p) in instructions.iter().enumerate() {
-		let exists = p.is_file();
 		// 첫 자리(CLAUDE.md)는 없어도 보여 준다. 저장하면 만들어진다.
-		if exists || i == 0 {
-			out.push(Resource {
-				kind: "instructions".into(),
-				scope: scope.into(),
-				name: rel_name(p.strip_prefix(base).unwrap_or(p)),
-				description: String::new(),
-				path: p.to_string_lossy().to_string(),
-				dir: String::new(),
-				exists,
-				files: Vec::new(),
-				modified: mtime(p),
-			});
+		if p.is_file() || i == 0 {
+			out.push(Resource::file("instructions", scope, rel_name(p.strip_prefix(base).unwrap_or(p)), String::new(), p));
 		}
 	}
 
@@ -171,16 +187,11 @@ fn scan(out: &mut Vec<Resource>, scope: &str, base: &Path, is_home: bool) {
 			let meta = read_meta(&main);
 			let mut files = Vec::new();
 			walk(&dir, &dir, &mut files, 0);
+			let name = meta.get("name").cloned().filter(|n| !n.is_empty()).unwrap_or_else(|| e.file_name().to_string_lossy().to_string());
 			out.push(Resource {
-				kind: "skill".into(),
-				scope: scope.into(),
-				name: meta.get("name").cloned().filter(|n| !n.is_empty()).unwrap_or_else(|| e.file_name().to_string_lossy().to_string()),
-				description: meta.get("description").cloned().unwrap_or_default(),
-				path: main.to_string_lossy().to_string(),
 				dir: dir.to_string_lossy().to_string(),
-				exists: true,
 				files: files.iter().map(|f| rel_name(f)).collect(),
-				modified: mtime(&main),
+				..Resource::file("skill", scope, name, meta.get("description").cloned().unwrap_or_default(), &main)
 			});
 		}
 	}
@@ -189,11 +200,51 @@ fn scan(out: &mut Vec<Resource>, scope: &str, base: &Path, is_home: bool) {
 	push_md_dir(out, "rule", scope, &cdir.join("rules"), false);
 }
 
-pub fn list(project_root: Option<&Path>) -> Vec<Resource> {
+/// 프로젝트 폴더의 부모부터 드라이브 루트까지 있는 CLAUDE.md · CLAUDE.local.md, 가까운 것부터.
+/// Claude Code 는 작업 폴더에서 위로 올라가며 이것들을 모두 싣는다. 전역 홈(~/.claude 의 부모)은 건너뛴다.
+pub fn parent_instructions(root: &Path) -> Vec<PathBuf> {
+	let skip = claude_home().parent().map(norm).unwrap_or_default();
+	root.ancestors()
+		.skip(1)
+		.filter(|d| norm(d) != skip)
+		.flat_map(|d| [d.join("CLAUDE.md"), d.join("CLAUDE.local.md")])
+		.filter(|p| p.is_file())
+		.collect()
+}
+
+/// settings.json 은 있는 것만 보인다. 처음에는 읽기 전용이다 — JSON 을 손으로 고치다 깨뜨리면 모든 세션의 권한이 흔들린다.
+fn push_settings(out: &mut Vec<Resource>, r: RuleSet) {
+	if !r.exists {
+		return;
+	}
+	let name = match r.scope.as_str() {
+		"global" => "~/.claude/settings.json",
+		"local" => ".claude/settings.local.json",
+		_ => ".claude/settings.json",
+	};
+	let description = format!("거부 {} · 허용 {} · 훅 {}", r.deny.len(), r.allow.len(), r.hooks.len());
+	let path = PathBuf::from(&r.path);
+	let scope = r.scope.clone();
+	out.push(Resource { rules: Some(r), ..Resource::file("settings", &scope, name.into(), description, &path) });
+}
+
+/// 전역 · 상위 폴더 · 프로젝트 · 함께 여는 폴더 · settings.json 을 이 차례로 낸다.
+pub fn list(project_root: Option<&Path>, extra_dirs: &[String]) -> Vec<Resource> {
 	let mut out = Vec::new();
 	scan(&mut out, "global", &claude_home(), true);
-	if let Some(p) = project_root {
-		scan(&mut out, "project", p, false);
+	let Some(p) = project_root else {
+		push_settings(&mut out, rule_set("global", claude_home().join("settings.json")));
+		return out;
+	};
+	for f in parent_instructions(p) {
+		out.push(Resource::file("instructions", "parent", f.to_string_lossy().to_string(), String::new(), &f));
+	}
+	scan(&mut out, "project", p, false);
+	for d in extra_dirs {
+		out.push(Resource::file("folder", "extra", d.clone(), "읽기 · 편집은 열림 · 이 폴더의 CLAUDE.md 는 실리지 않음".into(), Path::new(d)));
+	}
+	for r in rule_sets(p) {
+		push_settings(&mut out, r);
 	}
 	out
 }
@@ -337,6 +388,20 @@ pub struct RuleSet {
 	pub allow: Vec<String>,
 	pub deny: Vec<String>,
 	pub ask: Vec<String>,
+	/// 훅 사건마다 「사건 이름 · 명령 수」 (예: PreToolUse · 2)
+	pub hooks: Vec<String>,
+}
+
+/// settings.json 의 hooks: { 사건: [{ matcher, hooks: [명령 …] }, …] }
+fn hook_summary(v: &serde_json::Value) -> Vec<String> {
+	let Some(events) = v.get("hooks").and_then(|h| h.as_object()) else { return Vec::new() };
+	events
+		.iter()
+		.map(|(event, groups)| {
+			let n: usize = groups.as_array().map(|a| a.iter().map(|g| g.get("hooks").and_then(|x| x.as_array()).map_or(0, |x| x.len())).sum()).unwrap_or(0);
+			format!("{event} · {n}")
+		})
+		.collect()
 }
 
 fn rule_set(scope: &str, path: PathBuf) -> RuleSet {
@@ -351,6 +416,7 @@ fn rule_set(scope: &str, path: PathBuf) -> RuleSet {
 		allow: list("allow"),
 		deny: list("deny"),
 		ask: list("ask"),
+		hooks: hook_summary(&v),
 		path: path.to_string_lossy().into(),
 	}
 }
@@ -424,4 +490,31 @@ pub fn suggest_commands(root: &Path) -> Vec<Suggestion> {
 		add("Bash(dotnet test:*)", ".NET 시험");
 	}
 	out
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// 상위 폴더 지침은 가까운 것부터 나오고, 프로젝트 폴더 자신의 CLAUDE.md 는 상위 층에 넣지 않는다. AGENTS.md 는 지침이 아니다.
+	#[test]
+	fn parent_layer_nearest_first() {
+		let a = std::env::temp_dir().join(format!("docket-parent-{}", crate::model::short_id()));
+		let proj = a.join("b").join("proj");
+		fs::create_dir_all(&proj).unwrap();
+		fs::write(a.join("CLAUDE.md"), "a").unwrap();
+		fs::write(a.join("b").join("CLAUDE.md"), "b").unwrap();
+		fs::write(proj.join("CLAUDE.md"), "p").unwrap();
+		fs::write(proj.join("AGENTS.md"), "x").unwrap();
+		let mine: Vec<PathBuf> = parent_instructions(&proj).into_iter().filter(|p| p.starts_with(&a)).collect();
+		assert_eq!(mine, vec![a.join("b").join("CLAUDE.md"), a.join("CLAUDE.md")]);
+
+		let list = list(Some(&proj), &[a.to_string_lossy().to_string()]);
+		let parents: Vec<&str> = list.iter().filter(|r| r.scope == "parent" && r.path.starts_with(&*a.to_string_lossy())).map(|r| r.path.as_str()).collect();
+		assert_eq!(parents.len(), 2);
+		assert!(!list.iter().any(|r| r.name.ends_with("AGENTS.md")), "AGENTS.md 를 지침으로 보였다");
+		assert!(list.iter().any(|r| r.kind == "folder" && r.scope == "extra"), "함께 여는 폴더가 보이지 않는다");
+		assert!(run_excluded(&claude_home().join("CLAUDE.md")) && run_excluded(&claude_home().join("rules").join("x.md")) && !run_excluded(&claude_home().join("skills").join("x").join("SKILL.md")));
+		let _ = fs::remove_dir_all(&a);
+	}
 }

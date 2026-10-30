@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import { Archive, Check, FileStack, FolderOpen, Play, RotateCcw, Square, Trash2, Undo2, Wand2 } from "lucide-react";
+import { Archive, Check, FileStack, FolderOpen, MessagesSquare, Play, RotateCcw, Square, Trash2, Undo2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 import { type Action, type ActionList, attempt } from "@/components/ActionMenu";
 import { pluginActions } from "@/components/PluginResult";
@@ -17,6 +17,7 @@ import { api } from "@/lib/api";
 import { usePluginMenus } from "@/lib/queries";
 import { useUi } from "@/lib/store";
 import type { Issue } from "@/lib/types";
+import { promoteTalk } from "./ChatTab";
 
 /** 단계를 넘기는 동작 하나. `call` 은 부르는 곳이 바쁨 표시 · 오류 처리를 감싸 부른다. */
 export interface Primary {
@@ -112,6 +113,8 @@ export function useIssueActions(issue: Issue): { items: ActionList; dialogs: Rea
 					});
 				}),
 		},
+		// 대화 탭 세션 줄의 「대화로 이어 가기」와 같다. 세션이 있어야 이어 갈 것이 있다.
+		!!issue.sessionId && { label: "대화로 이어 가기", icon: <MessagesSquare />, disabled: !!issue.run, onSelect: () => void promoteTalk(issue) },
 		{ label: "이슈 폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.reveal(issue.dir)) },
 		!issue.run && issue.status !== "dropped" && issue.status !== "done" && { label: "보류", icon: <Archive />, onSelect: () => void attempt(() => api.issueDrop(p, id)) },
 		// 결과 확인 · 완료 단계는 상세 창 아래 칸에도 단추가 있다. 승인 대기 중 대화로 고친 것처럼 그 밖의 단계는 메뉴에서만 되돌린다.

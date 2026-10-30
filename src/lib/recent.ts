@@ -35,8 +35,10 @@ function push(r: Recent) {
  * 아직 만들지 않은 새 대화의 id 도 들어오지만, 팔레트가 목록에 없는 id 를 걸러 낸다.
  */
 useUi.subscribe((s, prev) => {
+	// 대화 탭 · 옆 칸의 대화는 사이드바 프로젝트와 따로 움직여 제 프로젝트 id 를 든다(앱 대화 · 다른 프로젝트 대화).
+	if (s.talk && s.talk.id !== prev.talk?.id) push({ ...s.talk, kind: "talk" });
+	if (s.dock.talk && s.dock.talk.id !== prev.dock.talk?.id) push({ ...s.dock.talk, kind: "talk" });
 	if (!s.projectId) return;
 	if (s.issueId && s.issueId !== prev.issueId) push({ projectId: s.projectId, kind: "issue", id: s.issueId });
-	if (s.talkId && s.talkId !== prev.talkId) push({ projectId: s.projectId, kind: "talk", id: s.talkId });
 	if (s.deliverableId && s.deliverableId !== prev.deliverableId) push({ projectId: s.projectId, kind: "deliverable", id: s.deliverableId });
 });

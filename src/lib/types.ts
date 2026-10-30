@@ -35,6 +35,8 @@ export interface Settings {
 	autoUpdateCheck: boolean;
 	/** 파일 산출물에서 한컴오피스로 한글 문서를 확인한다(열기 검사 · 정확한 쪽 수 · hwp 변환). 끄면 rhwp 로 본다. */
 	hancomCheck: boolean;
+	/** 실행이 끝났는데 창이 앞에 없으면 Windows 알림으로도 알린다. 기본 켜짐. */
+	systemNotify: boolean;
 }
 
 /** 터미널 기여. 자리표시: {cwd} {claude} {session} {session_short} {title} · attach 둘째 단계부터 {out.경로} */
@@ -203,6 +205,8 @@ export interface Project {
 	parallelImpl: boolean;
 	/** 줄을 서야 할 구현을 기다리지 않고 git 워크트리에서 돌린다. parallelImpl 을 켰을 때만 먹는다. 예전 프로젝트에는 없을 수 있다. */
 	worktree?: boolean;
+	/** 실행마다 --add-dir 로 함께 여는 폴더(전체 경로). 계획 · 읽기 대화 · 산출물은 읽기만, 구현은 편집까지. 예전 프로젝트에는 없을 수 있다. */
+	extraDirs?: string[];
 	/** 산출물 네 칸. 프로젝트 저장(projectSave)은 덮지 않는다 — 산출물 화면의 deliverableSettingsSave 로만 바꾼다. */
 	deliverablesDir: string;
 	naming: string;
@@ -440,6 +444,8 @@ export interface RuleSet {
 	allow: string[];
 	deny: string[];
 	ask: string[];
+	/** 훅 사건마다 「사건 이름 · 명령 수」 */
+	hooks?: string[];
 }
 
 export interface Suggestion {
@@ -490,10 +496,25 @@ export interface Issue {
 	queue?: QueuedChat[];
 	/** 구현이 도는 워크트리. 있으면 결과 확인 때 「반영」해야 본 작업트리에 들어간다. 예전 이슈에는 없을 수 있다. */
 	worktree?: Worktree | null;
+	/** 메모의 대화에서 갈라 낸 대화면 그 메모. 예전 대화에는 없다. */
+	fromIssue?: IssueRef | null;
+	/** 갈라 낸 뒤 아직 보내지 않았다. 첫 차례가 메모 세션을 새 세션으로 가른다. */
+	forkPending?: boolean;
+	/** 이 메모가 이어 받은 앞선 메모. 후속 메모는 화면이 목록에서 이 칸으로 거꾸로 찾는다. 예전 메모에는 없다. */
+	follows?: IssueRef | null;
 	note: string;
 	attachments: string[];
 	dir: string;
 }
+
+export interface IssueRef {
+	id: string;
+	number: number;
+	title: string;
+}
+
+/** 앱 대화(프로젝트에 묶이지 않은 대화)의 예약 프로젝트 id. 서버 model.rs 의 GLOBAL_PID 와 같다. */
+export const GLOBAL_PID = "global";
 
 export interface Worktree {
 	path: string;
@@ -608,11 +629,13 @@ export interface Deliverable {
 
 export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir" | "autoUpdate"> & Partial<Pick<Deliverable, "skill" | "vocab" | "format">>;
 
-export type ResourceKind = "instructions" | "skill" | "agent" | "command" | "rule";
+/** settings 는 settings.json(읽기 전용으로 보인다), folder 는 함께 여는 폴더 한 줄이다. */
+export type ResourceKind = "instructions" | "skill" | "agent" | "command" | "rule" | "settings" | "folder";
 
 export interface Resource {
 	kind: ResourceKind;
-	scope: "global" | "project";
+	/** parent: 프로젝트 위 폴더의 지침 · local: settings.local.json · extra: 함께 여는 폴더 */
+	scope: "global" | "parent" | "project" | "local" | "extra";
 	name: string;
 	description: string;
 	path: string;
@@ -620,6 +643,10 @@ export interface Resource {
 	exists: boolean;
 	files: string[];
 	modified: number;
+	/** docket 실행에서는 실리지 않는다 (전역 CLAUDE.md · 전역 rules) */
+	excluded?: boolean;
+	/** settings 일 때 그 파일의 권한 규칙 · 훅 */
+	rules?: RuleSet | null;
 }
 
 export interface TextFile {

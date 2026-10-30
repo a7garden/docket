@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Hash, PanelRight, Paperclip, Square } from "lucide-react";
+import { Check, Copy, CornerDownRight, Hash, PanelRight, Paperclip, Square } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, ContextActions, copy } from "@/components/ActionMenu";
 import { Chip, Diffstat, RunDot } from "@/components/bits";
@@ -85,6 +85,7 @@ export function IssueCard({
 	delaySec,
 	words = [],
 	hit,
+	followCount = 0,
 	tabbable = true,
 	selected = false,
 	onPick,
@@ -95,6 +96,8 @@ export function IssueCard({
 	delaySec: number;
 	words?: string[];
 	hit?: Hit;
+	/** 이 메모에서 이어진 후속 메모 수. 보드가 목록에서 거꾸로 세어 넘긴다. */
+	followCount?: number;
 	/** 보드에서 Tab 이 멈추는 카드인지. 나머지 카드는 방향키로 간다. */
 	tabbable?: boolean;
 	/** 여러 개 고르기에 들어 있는지. */
@@ -230,6 +233,24 @@ export function IssueCard({
 				{selected && <Check aria-hidden className="-mr-1 size-3 text-foreground" />}
 				<span className="mono tabular">#{issue.number}</span>
 				<span>{relTime(issue.updatedAt)}</span>
+				{/* 앞선 메모로 가는 꼬리표. 누르면 이 카드가 아니라 그 메모를 연다. 높이가 바뀌지 않게 머리 줄 안에만 둔다. */}
+				{issue.follows && (
+					<button
+						type="button"
+						tabIndex={-1}
+						title={`#${issue.follows.number} ${issue.follows.title} 에서 이어짐`}
+						onClick={(e) => {
+							e.stopPropagation();
+							onOpen?.();
+							openIssue(issue.follows!.id);
+						}}
+						className="flex items-center gap-0.5 rounded-sm hover:text-foreground"
+					>
+						<CornerDownRight className="size-3" />
+						<span className="mono tabular">#{issue.follows.number}</span>
+					</button>
+				)}
+				{followCount > 0 && <span title={`이 메모에서 이어진 후속 메모 ${followCount}개`}>후속 {followCount}</span>}
 				<div className="flex-1" />
 				{issue.attachments.length > 0 && (
 					<span className="flex items-center gap-0.5" title={`첨부 ${issue.attachments.length}개`}>

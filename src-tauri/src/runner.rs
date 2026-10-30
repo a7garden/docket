@@ -296,8 +296,9 @@ fn run_settings(deny: &[&str]) -> Value {
 	// 값은 glob 이라 \ 가 이스케이프로 읽힐 수 있다. / 로 적어도 Windows 경로에 맞는 것을 확인했다.
 	let home = crate::claude_files::claude_home().to_string_lossy().replace('\\', "/");
 	let home = home.trim_end_matches('/');
+	let excludes: Vec<String> = crate::claude_files::RUN_EXCLUDES.iter().map(|e| format!("{home}/{e}")).collect();
 	let mut v = serde_json::json!({
-		"claudeMdExcludes": [format!("{home}/CLAUDE.md"), format!("{home}/rules/**")],
+		"claudeMdExcludes": excludes,
 		"autoMemoryEnabled": false,
 	});
 	if !deny.is_empty() {
@@ -480,32 +481,48 @@ fn stage_mark(text: &str) -> (String, Option<String>) {
 }
 
 /// 프로젝트 대화에서 사용자가 작업 메모로 남기라고 했을 때 Claude 가 답에 내는 블록의 여는 줄과 닫는 줄. 여는 줄 뒤에 제목이 온다.
+/// 앱 대화는 어느 보드에 남길지 `[메모:등록@<프로젝트 이름>]` 으로 적는다. 프로젝트 대화는 `@` 없이 자기 보드에 남긴다.
 const MEMO_MARK: &str = "[메모:등록]";
+const MEMO_GLOBAL_MARK: &str = "[메모:등록@<프로젝트 이름>]";
+const MEMO_OPEN: &str = "[메모:등록";
 const MEMO_END: &str = "[/메모]";
+
+/// 메모 블록 하나. project 는 여는 줄의 `@이름` 이다. 없으면 비어 있다.
+type MemoBlock = (String, String, String);
+
+/// 여는 줄이면 (프로젝트 이름, 제목) 을 돌려준다. `[메모:등록]` · `[메모:등록@이름]` 둘 다 받는다.
+fn memo_open(t: &str) -> Option<(String, String)> {
+	let rest = t.strip_prefix(MEMO_OPEN)?;
+	let (project, rest) = match rest.strip_prefix('@') {
+		Some(r) => r.split_once(']').map(|(p, r)| (p.trim().to_string(), r))?,
+		None => (String::new(), rest.strip_prefix(']')?),
+	};
+	Some((project, rest.trim().to_string()))
+}
 
 /// 답에서 메모 블록을 꺼내고 표지 줄을 걷어 낸다. 본문 줄은 답에 그대로 남긴다.
 /// 닫는 줄이 없는 블록은 등록하지 않는다. 중간에 끊긴 답으로 반쪽 메모가 생기지 않게 하려는 것이다.
-fn memo_blocks(text: &str) -> (String, Vec<(String, String)>) {
+fn memo_blocks(text: &str) -> (String, Vec<MemoBlock>) {
 	let mut blocks = Vec::new();
-	let mut open: Option<(String, Vec<&str>)> = None;
+	let mut open: Option<(String, String, Vec<&str>)> = None;
 	let mut kept: Vec<&str> = Vec::new();
 	for l in text.lines() {
 		let t = l.trim().trim_matches('`').trim();
-		if let Some(rest) = t.strip_prefix(MEMO_MARK) {
-			open = Some((rest.trim().to_string(), Vec::new()));
+		if let Some((project, title)) = memo_open(t) {
+			open = Some((project, title, Vec::new()));
 			continue;
 		}
 		if t == MEMO_END {
-			if let Some((title, body)) = open.take() {
+			if let Some((project, title, body)) = open.take() {
 				let body = body.join("\n").trim().to_string();
 				let title = if title.is_empty() { crate::store::title_of(&body) } else { title };
 				if !title.is_empty() || !body.is_empty() {
-					blocks.push((title, body));
+					blocks.push((project, title, body));
 				}
 			}
 			continue;
 		}
-		if let Some((_, body)) = open.as_mut() {
+		if let Some((_, _, body)) = open.as_mut() {
 			body.push(l);
 		}
 		kept.push(l);
@@ -1342,6 +1359,39 @@ fn note_block(v: &IssueView) -> String {
 	s
 }
 
+/// 후속 메모가 이어 받은 앞선 메모의 요약. 세션을 잇지 않고 이것만 넘긴다 — 앞선 세션이 길면 실행마다 비용이 커진다.
+/// 바뀐 파일은 경로만, 많으면 앞의 것만 싣는다. 지운 메모면 부르는 쪽이 이 블록을 빼고 돈다.
+fn follows_block(p: &Issue) -> String {
+	const MAX_FILES: usize = 20;
+	let mut s = format!("## 앞선 메모 #{}: {}\n이 메모는 앞선 메모에서 이어진 일이다. 앞선 메모에서 한 일은 아래와 같다.\n", p.number, p.title);
+	if let Some(plan) = &p.plan {
+		if !plan.summary.trim().is_empty() {
+			s.push_str(&format!("\n계획\n{}\n", plan.summary.trim()));
+		}
+	}
+	if let Some(r) = &p.result {
+		if !r.summary.trim().is_empty() {
+			s.push_str(&format!("\n결과\n{}\n", r.summary.trim()));
+		}
+	}
+	let mut files: Vec<&str> = Vec::new();
+	for c in &p.changes {
+		if !files.contains(&c.rel.as_str()) {
+			files.push(&c.rel);
+		}
+	}
+	if !files.is_empty() {
+		s.push_str("\n바꾼 파일\n");
+		for f in files.iter().take(MAX_FILES) {
+			s.push_str(&format!("- {f}\n"));
+		}
+		if files.len() > MAX_FILES {
+			s.push_str(&format!("- … 외 {}개\n", files.len() - MAX_FILES));
+		}
+	}
+	s
+}
+
 fn plan_block(p: &Plan) -> String {
 	let mut s = format!("## 승인된 계획: {}\n\n{}\n\n{}\n", p.title, p.summary, p.plan);
 	if !p.steps.is_empty() {
@@ -1527,18 +1577,37 @@ fn issue_prompt(job: &Job, v: &IssueView, resumed: bool) -> String {
 			mode.push_str("\n\n(화면 설계를 보일 때는 ```html · ```svg 코드 블록으로 낸다. 화면을 고쳤으면 결과 화면을 찍어 답에 `![설명](전체 경로)` 로 건다. 화면이 바뀌지 않으면 둘 다 하지 않는다.)");
 			// 계획 전 · 승인 전 이슈만 대화에서 설계를 받는다. 구현 뒤에 표지가 오면 승인 대기로 되돌아가 버린다.
 			// 프로젝트 대화는 보드의 단계 밖에 있다. 설계 대신 메모를 남긴다 — 첫 차례에는 MEMO_RULE 전체를, 이어 붙일 때는 한 줄로 일깨운다.
+			let app_talk = v.issue.project_id == GLOBAL_PID;
 			if v.issue.talk {
-				if resumed {
-					mode.push_str(&format!("\n\n(작업 메모로 남기라고 했을 때만 답 맨 끝에 `{MEMO_MARK} <제목>` · 본문 · `{MEMO_END}` 블록을 낸다.)"));
+				// 갈라 낸 첫 차례는 메모 세션을 이어 받아 MEMO_RULE 을 본 적이 없다. 그 차례에 전체를 싣는다(아래).
+				if resumed && !v.issue.fork_pending {
+					let mark = if app_talk { MEMO_GLOBAL_MARK } else { MEMO_MARK };
+					mode.push_str(&format!("\n\n(작업 메모로 남기라고 했을 때만 답 맨 끝에 `{mark} <제목>` · 본문 · `{MEMO_END}` 블록을 낸다.)"));
 				}
 			} else if matches!(v.issue.status, Status::Inbox | Status::Planned | Status::Dropped) {
 				mode.push_str(&format!(
 					"\n\n(이 대화로 무엇을 어떻게 바꿀지 사용자와 정해졌으면, 답에 정해진 설계를 정리해 적고 맨 끝 줄에 `{STAGE_MARK} <한 줄 제목>` 을 따로 적는다. 아직 묻고 답하는 중이면 달지 않는다.)"
 				));
 			}
+			// 메모 세션에서 갈라 나온 첫 차례. 지금부터는 메모의 단계와 따로 묻고 답한다는 것과 메모 남기는 법을 알린다.
+			if resumed && v.issue.talk && v.issue.fork_pending {
+				let from = v.issue.from_issue.as_ref().map(|f| format!("메모 #{}", f.number)).unwrap_or_else(|| "메모".into());
+				return format!(
+					"(이 대화는 {from} 에서 갈라 나온 프로젝트 대화다. 앞의 메모 · 계획 · 구현 흐름은 알고 있되, 이제부터는 메모의 단계와 상관없이 묻고 답한다. 설계 표지 `{STAGE_MARK}` 는 달지 않는다.)\n\n{text}{mode}\n\n{MEMO_RULE}\n"
+				);
+			}
 			// 이어 붙일 때는 사용자가 쓴 글 그대로 보낸다. 터미널에서 이어 쓴 대화와 같은 모양이 되게 한다.
 			if resumed {
 				return format!("{text}{mode}\n");
+			}
+			// 앱 대화는 저장소가 없다. 저장소 규칙(RULES) 대신 앱 데이터 안내를 싣는다. 자리는 실행이 채운다(global_talk::CONTEXT_SLOT).
+			if app_talk {
+				let memo = MEMO_RULE.replace(MEMO_MARK, MEMO_GLOBAL_MARK).replace("보드에 새 메모를", "그 프로젝트의 보드에 새 메모를")
+					+ "\n- 앱 대화는 어느 프로젝트의 보드에 남길지 여는 줄의 `@` 뒤에 아래 「등록한 프로젝트」의 이름을 그대로 적는다. 이름이 맞지 않으면 등록되지 않는다.";
+				return format!(
+					"사용자가 이 앱(docket) 자체 — 플러그인 · 설정 · 기록 — 에 대해 묻는다. 지금 폴더는 이 앱의 데이터 폴더다.\n\n{}\n\n## 사용자\n{text}{mode}\n\n{memo}\n\n{VISUAL_RULE}\n",
+					crate::global_talk::CONTEXT_SLOT
+				);
 			}
 			if v.issue.talk {
 				return format!(
@@ -1755,8 +1824,28 @@ fn base_args(s: &Settings, model: &str, effort: &str, add_dirs: &[&Path]) -> Vec
 	a
 }
 
+/// 프로젝트의 함께 여는 폴더. 저장한 뒤 지워진 폴더는 넘기지 않는다 — 없는 폴더를 --add-dir 에 주면 CLI 가 어떻게 하는지 확인하지 못했다.
+fn extra_dirs(p: &Project) -> Vec<PathBuf> {
+	p.extra_dirs.iter().map(PathBuf::from).filter(|d| d.is_dir()).collect()
+}
+
+/// 권한 규칙에 쓰는 절대 경로 glob. 절대 경로 규칙은 // 로 시작하고, Windows 경로는 D:\a → /d/a 꼴로 바꿔 맞춘다(Claude Code 문서).
+/// 2026.10.30 실측(CLI 2.1.311): 이 꼴의 Write 거부 규칙이 acceptEdits 에서 --add-dir 폴더의 Write 를 막았고, 규칙을 빼면 통과했다.
+fn abs_rule_glob(d: &Path) -> String {
+	let s = d.to_string_lossy().replace('\\', "/");
+	let s = s.trim_end_matches('/');
+	let s = match s.as_bytes() {
+		[l, b':', ..] if l.is_ascii_alphabetic() => format!("/{}{}", l.to_ascii_lowercase() as char, &s[2..]),
+		_ => s.to_string(),
+	};
+	format!("/{s}/**")
+}
+
 fn job_args(job: &Job, s: &Settings, p: &Project, issue: &Issue, add_dir: &Path, resume: Option<&str>) -> Vec<String> {
-	let mut a = base_args(s, pick_model(s, &issue.model, job.kind()), pick_effort(s, &issue.effort, job.kind()), &[add_dir]);
+	// 함께 여는 폴더의 권한은 실행 종류를 따른다. --add-dir 폴더의 편집은 acceptEdits 일 때만 묻지 않고 통과해, 계획 · 읽기 대화에서는 읽기만 된다.
+	let extra = extra_dirs(p);
+	let dirs: Vec<&Path> = std::iter::once(add_dir).chain(extra.iter().map(PathBuf::as_path)).collect();
+	let mut a = base_args(s, pick_model(s, &issue.model, job.kind()), pick_effort(s, &issue.effort, job.kind()), &dirs);
 	perm_args(&mut a, &job_perms(job, p), &[]);
 	match job {
 		Job::Plan { .. } => a.extend(["--json-schema".into(), PLAN_SCHEMA.into()]),
@@ -1766,6 +1855,10 @@ fn job_args(job: &Job, s: &Settings, p: &Project, issue: &Issue, add_dir: &Path,
 	}
 	if let Some(sid) = resume {
 		a.extend(["--resume".into(), sid.to_string()]);
+		// 메모에서 갈라 낸 대화의 첫 차례. 메모의 세션은 그대로 두고 이어 받은 새 세션으로 간다.
+		if issue.fork_pending {
+			a.push("--fork-session".into());
+		}
 	}
 	a
 }
@@ -2098,6 +2191,10 @@ pub fn send_queued(app: &AppHandle, pid: &str, iid: &str, extra: Option<QueuedCh
 
 fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueView> {
 	let store = app.state::<Store>();
+	// 앱 대화는 묻고 답하기만 한다. 계획 · 구현 · 되돌리기는 저장소가 있는 보드의 일이다.
+	if pid == GLOBAL_PID && !matches!(job, Job::Chat { .. }) {
+		return msg("앱 대화에서는 대화만 할 수 있습니다");
+	}
 	// 이슈를 실행 중으로 바꾸기 전에 읽는다. 바꾼 뒤에 실패하면 이슈가 실행 중인 채로 남는다.
 	let project = store.project(pid)?;
 	let title_mode = new_title_mode(&store.settings()?);
@@ -2399,11 +2496,28 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 	if matches!(kind, RunKind::Implement | RunKind::Chat) {
 		let _ = std::fs::create_dir_all(Path::new(&view.dir).join("shots"));
 	}
+	// 앱 대화는 앱 데이터 전체를 고칠 수 있다. 고칠 수 있게 보낸 차례 전에 설정을 남겨 잘못 고쳐도 되돌릴 수 있게 한다.
+	if pid == GLOBAL_PID {
+		crate::global_talk::prepare(&store);
+		if matches!(job, Job::Chat { edit: true, .. }) {
+			crate::global_talk::backup(&store, run_id);
+		}
+	}
 	// 함께 도는 구현이 잡은 파일을 고쳤으면 실행은 그대로 두고 흐름에 한 번씩 남긴다. 결과 확인 때 사람이 본다.
 	let mut overlapped: HashSet<String> = HashSet::new();
 	let outcome = loop {
 		let mut args = job_args(job, &settings, &project, &view.issue, Path::new(&view.dir), resumed.then_some(view.issue.session_id.as_str()));
 		let mut prompt = issue_prompt(job, &view, resumed);
+		if pid == GLOBAL_PID {
+			prompt = prompt.replace(crate::global_talk::CONTEXT_SLOT, &crate::global_talk::context(&store));
+		}
+		// 후속 메모는 앞선 메모의 요약을 메모 바로 뒤에 싣는다. 메모를 싣는 첫 차례에만 붙고, 이어 붙이는 차례는 세션이 이미 안다.
+		if !resumed {
+			if let Some(prior) = view.issue.follows.as_ref().and_then(|f| store.raw_issue(pid, &f.id).ok()) {
+				let note = note_block(&view);
+				prompt = prompt.replacen(&note, &format!("{note}\n{}", follows_block(&prior)), 1);
+			}
+		}
 		// 계획은 본 저장소에서 세웠다. 계획에 적힌 전체 경로를 따라 본 저장소를 고치지 않게 알린다 — 고치려 해도 실행 폴더 밖이라 막힌다.
 		if let Some(w) = &worktree {
 			prompt.push_str(&format!(
@@ -2513,6 +2627,8 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 		}
 		if !outcome.parser.session_id.is_empty() {
 			i.session_id = outcome.parser.session_id.clone();
+			// 갈라 낸 대화는 첫 차례로 새 세션을 받았다. 다음부터는 그 세션을 그냥 잇는다.
+			i.fork_pending = false;
 		}
 		// 대화는 오류를 이슈에 올리지 않는다. 실패는 그 실행 기록에 남아 대화 탭에 보인다.
 		// 단계는 대화가 실제로 한 일로 옮긴다 — 파일을 고쳤으면 결과 확인, 설계가 정해졌다고 표지를 달았으면 승인 대기.
@@ -2595,17 +2711,30 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 
 /// 프로젝트 대화가 낸 메모 블록을 보드의 새 메모로 만든다. 자동 계획은 보드 작성칸으로 쓴 메모와 같이 설정을 따른다.
 /// 무엇을 등록했는지(실패했으면 까닭)를 대화의 흐름에 남긴다. 대화 화면은 그 기록으로 「메모 #N」 줄을 그린다.
-fn register_memos(app: &AppHandle, pid: &str, tid: &str, memos: &[(String, String)], auto_plan: bool) -> Result<()> {
+/// 앱 대화의 메모는 블록에 적힌 프로젝트 이름으로 보드를 고르고, 기록 글 앞에 `@<pid>` 를 붙여 화면이 그 보드를 열게 한다.
+fn register_memos(app: &AppHandle, pid: &str, tid: &str, memos: &[MemoBlock], auto_plan: bool) -> Result<()> {
 	let store = app.state::<Store>();
 	let mode = new_title_mode(&store.settings()?);
+	let projects = if pid == GLOBAL_PID { store.projects()? } else { Vec::new() };
 	let mut logs = Vec::new();
-	for (title, body) in memos {
+	for (project, title, body) in memos {
+		let (target, tag) = if pid == GLOBAL_PID {
+			match memo_target(&projects, project) {
+				Ok(p) => (p.id.clone(), format!("@{} ", p.id)),
+				Err(e) => {
+					logs.push(format!("실패 · {e}"));
+					continue;
+				}
+			}
+		} else {
+			(pid.to_string(), String::new())
+		};
 		let note = if title.is_empty() { format!("{body}\n") } else { format!("# {title}\n\n{body}\n") };
 		// 대화가 제목을 붙여 낸 메모는 그 제목(첫 줄)을 쓴다. 이미 Claude 가 지은 제목을 한 번 더 지을 까닭이 없다.
 		let mode = if title.is_empty() { mode } else { TitleMode::FirstLine };
-		match store.create_issue(pid, None, &note, auto_plan, mode, "", "") {
+		match store.create_issue(&target, None, &note, auto_plan, mode, "", "", None) {
 			Ok(v) => {
-				logs.push(format!("#{} {}", v.issue.number, v.issue.title));
+				logs.push(format!("{tag}#{} {}", v.issue.number, v.issue.title));
 				emit_issue(app, &v);
 			}
 			Err(e) => logs.push(format!("실패 · {e}")),
@@ -2619,6 +2748,20 @@ fn register_memos(app: &AppHandle, pid: &str, tid: &str, memos: &[(String, Strin
 	})?;
 	emit_issue(app, &v);
 	Ok(())
+}
+
+/// 앱 대화의 메모 블록이 가리킨 프로젝트. 이름(대소문자 무시)이 딱 하나 맞아야 한다 — 짐작해 엉뚱한 보드에 남기지 않는다.
+fn memo_target<'a>(projects: &'a [Project], name: &str) -> std::result::Result<&'a Project, String> {
+	let names = || projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(" · ");
+	if name.is_empty() {
+		return Err(format!("어느 프로젝트에 남길지 적지 않았습니다 (프로젝트: {})", names()));
+	}
+	let hit: Vec<&Project> = projects.iter().filter(|p| p.name.to_lowercase() == name.to_lowercase()).collect();
+	match hit.as_slice() {
+		[p] => Ok(p),
+		[] => Err(format!("「{name}」 프로젝트가 없습니다 (프로젝트: {})", names())),
+		_ => Err(format!("「{name}」 이름의 프로젝트가 여럿입니다. 프로젝트 이름을 바꿔 가른 뒤 다시 남겨 주세요")),
+	}
 }
 
 /* ---------- 산출물 작성 ---------- */
@@ -2640,6 +2783,9 @@ pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: S
 
 /// catch_up 은 「밀린 변경 반영」이 한꺼번에 반영하는 이슈들이다. 새 판이 나오면 자동 관리 기록에 남기고 검토 표지를 단다.
 pub fn document_job(app: &AppHandle, pid: &str, did: Option<String>, request: String, issue_id: &str, catch_up: Vec<String>) -> Result<DeliverableView> {
+	if pid == GLOBAL_PID {
+		return msg("앱 대화에는 산출물이 없습니다");
+	}
 	let store = app.state::<Store>();
 	let did = match did {
 		Some(d) => {
@@ -2702,11 +2848,15 @@ pub fn document_job(app: &AppHandle, pid: &str, did: Option<String>, request: St
 /// 2026.10.29 : 읽기 도구만 열고 앱이 .md 로 저장하던 「마크다운으로 받기」 갈래를 없앴다. 마크다운도 형식의 하나로 파일로 만든다.
 fn doc_args(s: &Settings, p: &Project, data_dir: &Path, out: &Path, plugin: Option<&Path>) -> Vec<String> {
 	// 플러그인 폴더도 연다. 프롬프트가 문장 다듬기 기준(anti-slop 의 references)을 Read 로 읽게 한다.
+	// 함께 여는 폴더는 읽기만 연다. 산출물 실행은 결과 폴더에 파일을 만드는 일이라, 저장소처럼 그 폴더의 편집도 거부 규칙으로 막는다.
+	let extra = extra_dirs(p);
 	let mut dirs = vec![data_dir, out];
 	dirs.extend(plugin);
+	dirs.extend(extra.iter().map(PathBuf::as_path));
 	let mut a = base_args(s, pick_model(s, "", RunKind::Document), pick_effort(s, "", RunKind::Document), &dirs);
 	let perms = Perms { tools: None, mode: "acceptEdits", allow: vec!["Bash".into(), "Skill".into()], deny: p.denied_tools.clone(), label: String::new() };
-	let deny: Vec<&str> = DENY_REPO_EDITS.iter().chain(DENY_FOREIGN_DOC_SKILLS).copied().collect();
+	let extra_deny: Vec<String> = extra.iter().flat_map(|d| ["Edit", "Write"].map(|t| format!("{t}({})", abs_rule_glob(d)))).collect();
+	let deny: Vec<&str> = DENY_REPO_EDITS.iter().chain(DENY_FOREIGN_DOC_SKILLS).copied().chain(extra_deny.iter().map(String::as_str)).collect();
 	perm_args(&mut a, &perms, &deny);
 	if let Some(pd) = plugin {
 		a.extend(["--plugin-dir".into(), pd.to_string_lossy().to_string()]);
@@ -3140,9 +3290,10 @@ pub fn spawn_titler(app: AppHandle) {
 			let Ok(projects) = store.projects() else { continue };
 			let now = now_ms();
 			let runner = app.state::<Runner>();
-			for p in projects {
-				let Ok(mut list) = store.list_issues(&p.id) else { continue };
-				list.extend(store.list_talks(&p.id).unwrap_or_default());
+			// 앱 대화도 프로젝트 대화처럼 첫 답 뒤에 제목을 짓는다. 앱 대화 폴더에는 보드 이슈가 없다.
+			for pid in projects.into_iter().map(|p| p.id).chain([GLOBAL_PID.to_string()]) {
+				let Ok(mut list) = store.list_issues(&pid) else { continue };
+				list.extend(store.list_talks(&pid).unwrap_or_default());
 				for v in list {
 					let i = &v.issue;
 					let due = if i.talk {
@@ -3156,7 +3307,7 @@ pub fn spawn_titler(app: AppHandle) {
 					if !due {
 						continue;
 					}
-					let key = issue_key(&p.id, &i.id);
+					let key = issue_key(&pid, &i.id);
 					{
 						// 한꺼번에 몰리지 않게 동시에 둘까지만 띄운다.
 						let mut titling = runner.titling.lock().unwrap();
@@ -3164,7 +3315,7 @@ pub fn spawn_titler(app: AppHandle) {
 							continue;
 						}
 					}
-					let (app, pid, iid, talk) = (app.clone(), p.id.clone(), i.id.clone(), i.talk);
+					let (app, pid, iid, talk) = (app.clone(), pid.clone(), i.id.clone(), i.talk);
 					tauri::async_runtime::spawn(async move {
 						let made = if talk { make_talk_title(&app, &pid, &iid).await } else { make_title(&app, &pid, &iid).await };
 						if let Err(e) = made {
@@ -3426,6 +3577,36 @@ mod tests {
 		assert_eq!(at(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &Issue::default(), dir, None)), None);
 	}
 
+	/// 함께 여는 폴더는 모든 실행의 --add-dir 뒤에 실리고, 산출물 실행에서는 그 폴더의 편집을 막는다. 없는 폴더는 넘기지 않는다.
+	#[test]
+	fn extra_dirs_follow_add_dir() {
+		let extra = std::env::temp_dir().join(format!("docket-extra-{}", short_id()));
+		std::fs::create_dir_all(&extra).unwrap();
+		let e = extra.to_string_lossy().to_string();
+		let p = Project { extra_dirs: vec![e.clone(), "Z:\\없는 폴더".into()], ..Default::default() };
+		let (s, i, dir) = (Settings::default(), Issue::default(), Path::new("issue"));
+		let opened = |a: &[String]| -> Vec<String> {
+			let at = a.iter().position(|x| x == "--add-dir").unwrap();
+			a[at + 1..].iter().take_while(|x| !x.starts_with("--")).cloned().collect()
+		};
+		for a in [
+			job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None),
+			job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None),
+			job_args(&Job::Chat { text: "물음".into(), edit: false, images: vec![] }, &s, &p, &i, dir, None),
+		] {
+			assert_eq!(opened(&a), vec!["issue".to_string(), e.clone()], "이슈 폴더 뒤에 함께 여는 폴더가 실리지 않았다: {a:?}");
+		}
+		let file = doc_args(&s, &p, dir, Path::new("out"), None);
+		assert!(opened(&file).contains(&e), "산출물 실행에 함께 여는 폴더가 없다");
+		let glob = abs_rule_glob(&extra);
+		assert!(glob.starts_with("//") && glob.ends_with("/**") && !glob.contains('\\') && !glob.contains(':'), "절대 경로 규칙 꼴이 아니다: {glob}");
+		let deny = at_settings(&file);
+		assert!(deny.contains(&format!("Write({glob})")) && deny.contains(&format!("Edit({glob})")), "산출물 실행이 함께 여는 폴더 편집을 막지 않았다: {deny}");
+		assert!(!at_settings(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None)).contains(&glob), "구현에서 함께 여는 폴더 편집을 막았다");
+		assert_eq!(abs_rule_glob(Path::new("D:\\workspace\\fdr-chatbot")), "//d/workspace/fdr-chatbot/**");
+		let _ = std::fs::remove_dir_all(&extra);
+	}
+
 	/// 이어 붙인 세션에는 그 세션이 받은 구획을 다시 붙이지 않는다. 다른 세션 · 옛 기록(세션 없음)은 보내지 않은 것으로 친다.
 	#[test]
 	fn unsent_hits_skip_sections_already_in_session() {
@@ -3558,15 +3739,31 @@ mod tests {
 	fn memo_blocks_are_read_and_markers_stripped() {
 		let (shown, blocks) = memo_blocks("남겼습니다.\n\n[메모:등록] 저장 단추를 위로\n저장 단추가 아래에 묻힌다.\n`a.tsx:10`\n[/메모]");
 		assert_eq!(shown, "남겼습니다.\n\n저장 단추가 아래에 묻힌다.\n`a.tsx:10`");
-		assert_eq!(blocks, vec![("저장 단추를 위로".to_string(), "저장 단추가 아래에 묻힌다.\n`a.tsx:10`".to_string())]);
+		assert_eq!(blocks, vec![(String::new(), "저장 단추를 위로".to_string(), "저장 단추가 아래에 묻힌다.\n`a.tsx:10`".to_string())]);
 
 		let (_, two) = memo_blocks("`[메모:등록] 하나`\n본문 1\n`[/메모]`\n[메모:등록]\n# 둘째 제목\n본문 2\n[/메모]");
 		assert_eq!(two.len(), 2);
-		assert_eq!(two[1].0, "둘째 제목");
+		assert_eq!(two[1].1, "둘째 제목");
 
 		// 닫는 줄이 없으면 등록하지 않는다. 본문은 답으로 남는다.
 		assert_eq!(memo_blocks("[메모:등록] 반쪽\n끊긴 본문"), ("끊긴 본문".into(), Vec::new()));
 		assert_eq!(memo_blocks("그냥 답"), ("그냥 답".into(), Vec::new()));
+	}
+
+	#[test]
+	fn app_talk_memo_names_its_board() {
+		let (shown, b) = memo_blocks("남겼습니다.\n[메모:등록@mhms_new] 알림 주소 칸\n본문\n[/메모]");
+		assert_eq!(shown, "남겼습니다.\n본문");
+		assert_eq!(b, vec![("mhms_new".to_string(), "알림 주소 칸".to_string(), "본문".to_string())]);
+		// 닫는 괄호가 없는 여는 줄은 표지가 아니다.
+		assert!(memo_blocks("[메모:등록@mhms 제목\n본문\n[/메모]").1.is_empty());
+
+		let p = |id: &str, name: &str| Project { id: id.into(), name: name.into(), ..Default::default() };
+		let list = vec![p("a", "mhms_new"), p("b", "app"), p("c", "App")];
+		assert_eq!(memo_target(&list, "MHMS_NEW").map(|p| p.id.as_str()), Ok("a"));
+		assert!(memo_target(&list, "").unwrap_err().contains("mhms_new"), "후보를 보이지 않았다");
+		assert!(memo_target(&list, "없음").is_err());
+		assert!(memo_target(&list, "app").unwrap_err().contains("여럿"), "겹친 이름에 등록했다");
 	}
 
 	/// 2026-10-28 전에 저장된 계획은 질문이 문자열이고 steps 가 없다. 그대로 열려야 한다.

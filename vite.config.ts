@@ -13,8 +13,9 @@ export default defineConfig(() => ({
 	},
 	// Tauri 가 고정 포트를 기다리므로 포트가 차 있으면 다른 포트로 넘어가지 않고 실패해야 한다.
 	clearScreen: false,
-	// 데스크톱 앱이라 첫 화면 내려받기 크기를 아낄 까닭이 적다.
-	build: { chunkSizeWarningLimit: 2500 },
+	// 데스크톱 앱이라 내려받기는 없지만, 첫 묶음이 클수록 켤 때 풀어 읽는 시간이 는다. 보드 밖 화면은 App.tsx 가 따로 묶는다.
+	// 한도는 지금 첫 묶음(약 1.1MB)보다 조금 위다 — 다시 커지면 경고가 뜨게. 기본값 500KB 로 두면 편집기(CodeMirror)가 첫 화면에 있어 늘 뜬다.
+	build: { chunkSizeWarningLimit: 1200 },
 	server: {
 		port: 1420,
 		strictPort: true,

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, MoreHorizontal, RotateCcw, Undo2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CornerDownRight, MoreHorizontal, RotateCcw, Undo2, X } from "lucide-react";
 import { toast } from "sonner";
 import { DropdownActions } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
@@ -12,6 +12,7 @@ import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { useSheetBesideDock } from "@/features/talk/DockPane";
 import { api, errorText } from "@/lib/api";
 import { clock, relTime } from "@/lib/format";
 import { inTyping, keyAnchor, useKey } from "@/lib/keys";
@@ -60,12 +61,14 @@ export function IssueSheet({ project }: { project: Project }) {
 	const issue = issues?.find((i) => i.id === issueId);
 	// 열어 본 이슈의 계획 · 결과 · 답은 알림함에서 뺀다.
 	useMarkSeen(issue?.id, issue ? lastEnded(issue.runs) : 0);
+	const beside = useSheetBesideDock();
 
 	return (
-		<Sheet open={!!issue} onOpenChange={(o) => !o && openIssue(null)}>
+		<Sheet open={!!issue} onOpenChange={(o) => !o && openIssue(null)} modal={beside.modal}>
 			<SheetContent
 				side="right"
 				showCloseButton={false}
+				onInteractOutside={beside.onInteractOutside}
 				// 열리자마자 첫 단추(더 보기)에 초점 테두리가 생기면 부차적인 메뉴가 가장 먼저 눈에 띈다. 창 자체에 초점을 둔다.
 				onOpenAutoFocus={(e) => {
 					e.preventDefault();
@@ -84,7 +87,8 @@ export function IssueSheet({ project }: { project: Project }) {
 						sheet?.focus();
 					});
 				}}
-				className="pop gap-0 overflow-hidden rounded-none p-0 outline-none data-[side=right]:top-9 data-[side=right]:bottom-0 data-[side=right]:h-auto data-[side=right]:w-[min(860px,64vw)] data-[side=right]:border-y-0 data-[side=right]:border-r-0 data-[side=right]:sm:max-w-none"
+				// 옆 칸 대화를 띄웠으면 그 칸을 비켜 본문 칸 안에서 열린다(--dock-right · --dock-w 는 DockPane 이 정한다).
+				className="pop gap-0 overflow-hidden rounded-none p-0 outline-none data-[side=right]:top-9 data-[side=right]:right-[var(--dock-right,0px)] data-[side=right]:bottom-0 data-[side=right]:h-auto data-[side=right]:w-[min(860px,calc((100vw_-_var(--dock-w,0px))*0.64))] data-[side=right]:border-y-0 data-[side=right]:border-r-0 data-[side=right]:sm:max-w-none"
 			>
 				{issue && <IssueDetail key={issue.id} issue={issue} projectPath={project.path} onClose={() => openIssue(null)} />}
 			</SheetContent>
@@ -189,6 +193,7 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 					</Button>
 				</div>
 				<IssueTitle issue={issue} />
+				<IssueLinks issue={issue} />
 				<SheetDescription className="sr-only">이슈 상세</SheetDescription>
 			</header>
 
@@ -285,7 +290,67 @@ function ErrorBar({ issue }: { issue: Issue }) {
 	);
 }
 
-type Ask = { kind: "replan" | "rework"; text: string } | null;
+type Ask = { kind: "replan" | "rework" | "follow"; text: string } | null;
+
+const ASK_TEXT = {
+	replan: { placeholder: "계획에서 바꿀 것이나 Claude 가 물은 것에 대한 답", send: "다시 계획" },
+	rework: { placeholder: "구현 결과에서 고칠 것", send: "수정 요청" },
+	follow: { placeholder: "이 메모에서 이어서 할 일. 새 메모로 보드에 올라가고, 계획할 때 이 메모의 요약을 함께 넘깁니다", send: "후속 메모 만들기" },
+};
+
+/** 후속 메모 입력칸의 처음 글. 구현 결과의 「이어서 할 일」을 목록으로 넣어 둔다 — 지우거나 고쳐서 보내면 된다. */
+function followDraft(issue: Issue) {
+	const items = issue.result?.followups ?? [];
+	return items.map((f) => `- ${f}`).join("\n");
+}
+
+/** 「후속 메모」 단추. 결과 확인 · 완료 · 보류 칸에 둔다 — 그 전 단계는 이 메모를 고치면 된다. */
+function FollowButton({ issue, disabled, onAsk }: { issue: Issue; disabled: boolean; onAsk: (a: Ask) => void }) {
+	return (
+		<Button variant="outline" disabled={disabled} title="이 메모에서 이어지는 새 메모를 만듭니다. 이 메모는 그대로 둡니다." onClick={() => onAsk({ kind: "follow", text: followDraft(issue) })}>
+			<CornerDownRight />
+			후속 메모
+		</Button>
+	);
+}
+
+/**
+ * 앞선 메모와 후속 메모를 잇는 줄. 연결은 후속 메모 쪽(follows)에만 있어 후속 메모는 목록에서 거꾸로 찾는다.
+ * 제목 · 상태는 목록의 지금 값을 쓴다. 앞선 메모를 지웠으면 만들 때 찍어 둔 제목을 흐리게 보인다.
+ */
+function IssueLinks({ issue }: { issue: Issue }) {
+	const { data: issues } = useIssues(issue.projectId);
+	const openIssue = useUi((s) => s.openIssue);
+	const prior = issue.follows ? issues?.find((i) => i.id === issue.follows?.id) : undefined;
+	const next = (issues ?? []).filter((i) => i.follows?.id === issue.id).sort((a, b) => a.number - b.number);
+	if (!issue.follows && next.length === 0) return null;
+	const link = "rounded-sm text-subtle hover:text-foreground";
+	return (
+		<div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-subtle">
+			{issue.follows &&
+				(prior ? (
+					<button type="button" className={cn("flex items-center gap-1", link)} title={`#${prior.number} ${prior.title} 열기`} onClick={() => openIssue(prior.id)}>
+						<CornerDownRight className="size-3.5" />#{prior.number} 에서 이어짐
+					</button>
+				) : (
+					<span className="flex items-center gap-1 opacity-60" title="지운 메모입니다">
+						<CornerDownRight className="size-3.5" />#{issue.follows.number} {issue.follows.title} 에서 이어짐
+					</span>
+				))}
+			{next.length > 0 && (
+				<span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+					후속
+					{next.map((n) => (
+						<button key={n.id} type="button" className={cn("flex items-center gap-1", link)} title={`#${n.number} ${n.title} 열기`} onClick={() => openIssue(n.id)}>
+							<span className="mono tabular">#{n.number}</span>
+							<span>{stateOf(n)?.label ?? "메모"}</span>
+						</button>
+					))}
+				</span>
+			)}
+		</div>
+	);
+}
 
 function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 	const [ask, setAsk] = useState<Ask>(null);
@@ -317,7 +382,11 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 		if (!ask || !ask.text.trim()) return;
 		const text = ask.text;
 		void go(async () => {
-			await (ask.kind === "replan" ? api.issuePlan(p, id, text) : api.issueRework(p, id, text, once));
+			if (ask.kind === "follow") {
+				// 이 창에 머문다. 새 메모는 머리의 연결 줄에 바로 생기고, 알림에서 열 수 있다.
+				const v = await api.issueFollowUp(p, id, text);
+				toast(`후속 메모 #${v.number} 를 만들었습니다`, { action: { label: "열기", onClick: () => useUi.getState().openIssue(v.id) } });
+			} else await (ask.kind === "replan" ? api.issuePlan(p, id, text) : api.issueRework(p, id, text, once));
 			setAsk(null);
 		});
 	};
@@ -378,7 +447,7 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 						if (sendKey.isSend(e)) send();
 						if (e.key === "Escape") setAsk(null);
 					}}
-					placeholder={(ask.kind === "replan" ? "계획에서 바꿀 것이나 Claude 가 물은 것에 대한 답" : "구현 결과에서 고칠 것") + sendKey.hint}
+					placeholder={ASK_TEXT[ask.kind].placeholder + sendKey.hint}
 					className="min-h-24 resize-none bg-transparent text-[13.5px] leading-relaxed"
 				/>
 				<div className="flex items-center justify-end gap-2">
@@ -388,7 +457,7 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 						취소
 					</Button>
 					<Button disabled={busy || !ask.text.trim()} onClick={send}>
-						{ask.kind === "replan" ? "다시 계획" : "수정 요청"}
+						{ASK_TEXT[ask.kind].send}
 						<Kbd className="ml-1 bg-primary-foreground/15 text-primary-foreground">{sendKey.label}</Kbd>
 					</Button>
 				</div>
@@ -449,6 +518,7 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 				<div className={bar}>
 					<RevertButton issue={issue} disabled={busy} />
 					<div className="flex-1" />
+					<FollowButton issue={issue} disabled={busy} onAsk={setAsk} />
 					<Button variant="outline" disabled={busy} onClick={() => setAsk({ kind: "rework", text: "" })}>
 						수정 요청
 					</Button>
@@ -470,6 +540,7 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 				<div className={bar}>
 					{issue.changes.length > 0 && <RevertButton issue={issue} disabled={busy} />}
 					<div className="flex-1" />
+					<FollowButton issue={issue} disabled={busy} onAsk={setAsk} />
 					<Button variant="outline" disabled={busy} onClick={() => void go(() => api.issueReopen(p, id))}>
 						<RotateCcw />
 						다시 열기

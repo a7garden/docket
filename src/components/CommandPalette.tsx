@@ -6,12 +6,12 @@ import { goProject, PROJECT_TABS } from "@/features/project/ProjectHeader";
 import { SECTION_IDS, SECTIONS, SETTING_ROWS } from "@/features/settings/Settings";
 import { api } from "@/lib/api";
 import { useKey } from "@/lib/keys";
-import { qk, useProjects } from "@/lib/queries";
+import { focusOnly, qk, useProjects, useTalks } from "@/lib/queries";
 import { recentItems } from "@/lib/recent";
 import { matchScore, normalize, numberScore } from "@/lib/search";
 import { needsDecision } from "@/lib/status";
 import { useUi } from "@/lib/store";
-import type { Deliverable, Issue, Project } from "@/lib/types";
+import { type Deliverable, GLOBAL_PID, type Issue, type Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** 묶음 순서 그대로다. 빈 입력일 때는 「최근」 · 「결정할 차례」만 쓴다. */
@@ -43,6 +43,9 @@ interface Source {
 	talks: Issue[];
 	docs: Deliverable[];
 }
+
+/** 앱 대화의 자리. 항목 아래 줄에 「앱」으로 보인다. */
+const APP_SOURCE = { id: GLOBAL_PID, name: "앱", path: "" } as Project;
 
 const openIssue = (i: Issue) => useUi.getState().openTarget({ projectId: i.projectId, target: "issue", id: i.id });
 const openTalk = (t: Issue) => useUi.getState().openTarget({ projectId: t.projectId, target: "issue", id: t.id, talk: true });
@@ -78,10 +81,10 @@ const docItem = (group: Group, d: Deliverable, p: Project, score = 0): Item => (
 });
 
 /** 빈 입력: 최근 연 것과 결정할 차례 이슈. 목록에서 빠진(지운 · 아직 만들지 않은) 것은 건너뛴다. */
-function idleItems(all: Source[]): Item[] {
+function idleItems(all: Source[], app: Source): Item[] {
 	const out: Item[] = [];
 	for (const r of recentItems()) {
-		const src = all.find((s) => s.project.id === r.projectId);
+		const src = [...all, app].find((s) => s.project.id === r.projectId);
 		if (!src) continue;
 		if (r.kind === "issue") {
 			const i = src.issues.find((x) => x.id === r.id);
@@ -102,7 +105,7 @@ function idleItems(all: Source[]): Item[] {
 	return [...out, ...decide];
 }
 
-function searchItems(all: Source[], q: string): Item[] {
+function searchItems(all: Source[], app: Source, q: string): Item[] {
 	const out: Item[] = [];
 	const add = (it: Item) => {
 		const score = Math.max(it.score, matchScore(q, it.text ?? it.label));
@@ -117,6 +120,9 @@ function searchItems(all: Source[], q: string): Item[] {
 			add({ key: `v:${p.id}:${v}`, group: "화면", label: `${p.name} › ${tab}`, text: `${p.name} ${tab}`, score: 0, at: 0, go: () => goProject(p.id, v) });
 		}
 	}
+	// 앱 대화는 프로젝트가 아니다. 프로젝트 · 탭 항목 없이 대화만 넣는다.
+	for (const t of app.talks) add(talkItem("대화", t, app.project));
+	add({ key: "v:allTalks", group: "화면", label: "대화", text: "대화 앱 대화 모든 대화", score: 0, at: 0, go: () => useUi.getState().setView("allTalks") });
 	add({ key: "v:claude", group: "화면", label: "Claude 설정", score: 0, at: 0, go: () => useUi.getState().setView("claude") });
 	add({ key: "v:settings", group: "화면", label: "설정", score: 0, at: 0, go: () => useUi.getState().setView("settings") });
 	for (const id of SECTION_IDS) {
@@ -154,16 +160,18 @@ export function CommandPalette() {
 	useKey({ id: "palette", combo: "Mod+K", label: "어디로든 가기", group: "어디서나", run: () => toggle(!open) });
 
 	const { data: projects = [] } = useProjects();
-	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id) })) });
-	const talks = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id) })) });
-	const docs = useQueries({ queries: projects.map((p) => ({ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id) })) });
+	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id), ...focusOnly(p.id) })) });
+	const talks = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id), ...focusOnly(p.id) })) });
+	const docs = useQueries({ queries: projects.map((p) => ({ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id), ...focusOnly(p.id) })) });
+	const { data: appTalks = [] } = useTalks(GLOBAL_PID);
 
 	const q = normalize(query);
 	// 렌더마다 다시 거른다. 프로젝트 몇 개의 번호 · 제목이라 가볍고, useQueries 는 렌더마다 새 배열을 줘서 메모해도 걸러 둔 것을 다시 쓰지 못한다.
 	let items: Item[] = [];
 	if (open) {
 		const all: Source[] = projects.map((project, n) => ({ project, issues: issues[n]?.data ?? [], talks: talks[n]?.data ?? [], docs: docs[n]?.data ?? [] }));
-		items = q ? searchItems(all, q) : idleItems(all);
+		const app: Source = { project: APP_SOURCE, issues: [], talks: appTalks, docs: [] };
+		items = q ? searchItems(all, app, q) : idleItems(all, app);
 	}
 
 	const cur = Math.min(active, Math.max(items.length - 1, 0));

@@ -61,7 +61,7 @@ export const spend: Spend = {
 	total: { group: "total", calls: 266, tokens: { input: 844, output: 262_800, cacheCreate: 1_573_000, cacheRead: 7_050_000 }, costUsd: 12.23 },
 };
 
-export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr", "change-summary", "slack-notify"], pluginGrants: { "change-summary": ["issue:read"], "slack-notify": ["issue:read", "http:hooks.slack.com"] }, kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true, autoUpdateCheck: true, hancomCheck: false };
+export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr", "change-summary", "slack-notify"], pluginGrants: { "change-summary": ["issue:read"], "slack-notify": ["issue:read", "http:hooks.slack.com"] }, kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true, autoUpdateCheck: true, hancomCheck: false, systemNotify: true };
 
 const KB_OFF = { enabled: false, folders: [], includeDeliverables: true, topK: 8, rerank: false, exclude: [], keep: [] };
 const GL_OFF = { enabled: false, include: [] };
@@ -152,7 +152,7 @@ export const pluginReply = {
 };
 
 export const projects: Project[] = [
-	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"], exclude: ["이전판"] }, glossary: { enabled: true, include: ["pdoc00000001"] } },
+	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, extraDirs: ["D:\\work\\calc-docs"], kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"], exclude: ["이전판"] }, glossary: { enabled: true, include: ["pdoc00000001"] } },
 	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, kb: KB_OFF, glossary: GL_OFF },
 	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, kb: KB_OFF, glossary: GL_OFF },
 ];
@@ -222,6 +222,9 @@ export const issues: Issue[] = [
 	base("i0000000009", 9, {
 		note: "README 의 설치 방법이 옛 명령이다\n\npip install -e . 로 바꾸고 파이썬 3.12 이상이라고 적기",
 		attachments: ["붙여넣기-20261027-101500.png"],
+		// 완료한 #2 에서 이어진 후속 메모. 카드 머리의 꼬리표와 상세 창의 연결 줄을 보이려고 둔다.
+		follows: { id: "i0000000002", number: 2, title: "README 에 사용법 예시 넣기" },
+		history: [{ at: now - 39 * min, kind: "created", text: "#2 에서 이어짐" }],
 		updatedAt: now - 9 * min,
 	}),
 	base("i0000000008", 8, {
@@ -386,7 +389,11 @@ export const issues: Issue[] = [
 		status: "done",
 		note: "README 에 사용법 예시 넣기",
 		plan: planOf("README 에 사용 예시를 더한다", "add · mul 호출 예시를 README 에 넣는다."),
-		result: { summary: "README.md 에 쓰는 법 절을 더했다.", changed: [], verification: "", followups: [], createdAt: now - 3 * 3600_000, runId: "x" },
+		result: { summary: "README.md 에 쓰는 법 절을 더했다.", changed: [], verification: "", followups: ["설치 방법도 지금 명령으로 고치기"], createdAt: now - 3 * 3600_000, runId: "x" },
+		history: [
+			{ at: now - 4 * 3600_000, kind: "created", text: "" },
+			{ at: now - 39 * min, kind: "follow", text: "#9 README 의 설치 방법이 옛 명령이다" },
+		],
 		updatedAt: now - 3 * 3600_000,
 	}),
 	base("i0000000001", 1, { status: "dropped", note: "명령줄 도구로 감싸기", updatedAt: now - 86400_000 }),
@@ -430,7 +437,39 @@ export const talks: Issue[] = [
 		dir: `${DATA}\\projects\\${P}\\issues\\t0000000002`,
 	}),
 	base("t0000000001", 0, { talk: true, title: "시험은 어떻게 돌리나요?", titledAt: 0, sessionId: "5c1f7e2a-talk-0001", runs: [talkRun("r-talk-0", now - 26 * 3600_000, "시험은 어떻게 돌리나요?")], updatedAt: now - 26 * 3600_000 }),
+	// 메모 #4 의 대화에서 갈라 낸 대화. 메모는 보드에 그대로 있다.
+	base("t0000000003", 0, {
+		talk: true,
+		title: "0 나누기 안내 문구를 어떻게 둘지",
+		titleMode: "manual",
+		sessionId: "5c1f7e2a-talk-0003",
+		runs: [talkRun("r-talk-3", now - 50 * min, "0 으로 나누면 None 대신 안내를 띄우는 쪽은 어때?")],
+		fromIssue: { id: "i0000000004", number: 4, title: "0 으로 나누면 죽는다" },
+		updatedAt: now - 48 * min,
+		dir: `${DATA}\\projects\\${P}\\issues\\t0000000003`,
+	}),
 ];
+
+/** 앱 대화. 프로젝트에 묶이지 않고 앱 데이터 폴더에서 돈다. 둘째 차례에서 calc 보드에 메모 #12 를 남겼다. */
+export const appTalks: Issue[] = [
+	base("g0000000002", 0, {
+		projectId: "global",
+		talk: true,
+		title: "슬랙 알림 플러그인 만들기",
+		sessionId: "7a9b-app-0002",
+		runs: [talkRun("r-app-1", now - 6 * min, "구현이 끝나면 슬랙으로 알리는 플러그인을 만들어 줘"), talkRun("r-app-2", now - 3 * min, "calc 보드에 알림 주소 칸을 더하는 메모로 남겨 줘")],
+		history: [
+			{ at: now - 7 * min, kind: "created", text: "" },
+			{ at: now - 3 * min + 30_000, kind: "memo", text: `@${P} #12 알림 주소 칸 더하기` },
+		],
+		updatedAt: now - 3 * min,
+		dir: `${DATA}\\global\\issues\\g0000000002`,
+	}),
+	base("g0000000001", 0, { projectId: "global", talk: true, title: "herdr 탭 이름 규칙", sessionId: "7a9b-app-0001", runs: [talkRun("r-app-0", now - 30 * 3600_000, "herdr 탭 이름은 어디서 정해?")], updatedAt: now - 30 * 3600_000, dir: `${DATA}\\global\\issues\\g0000000001` }),
+];
+
+/** 앱 대화가 도는 가상의 프로젝트 */
+export const appProject: Project = { ...projects[0], id: "global", name: "앱", path: DATA, allowedTools: ["Bash(npm run build:*)"], extraDirs: [], kb: KB_OFF, glossary: GL_OFF };
 
 export const liveEvents: Record<string, RunEvent[]> = {
 	i0000000008: [
@@ -717,13 +756,27 @@ export const docTextNext = docText.replace("| `div` | 두 수를 나눈다 | `No
 
 const H = info.claudeHome;
 export const resources: Resource[] = [
-	{ kind: "instructions", scope: "global", name: "CLAUDE.md", description: "", path: `${H}\\CLAUDE.md`, dir: "", exists: true, files: [], modified: now - 3600_000 },
+	{ kind: "instructions", scope: "global", name: "CLAUDE.md", description: "", path: `${H}\\CLAUDE.md`, dir: "", exists: true, files: [], modified: now - 3600_000, excluded: true },
 	{ kind: "skill", scope: "global", name: "changelog", description: "바뀐 것을 CHANGELOG 형식으로 정리한다. 「변경 기록 써줘」 요청 때 쓴다.", path: `${H}\\skills\\changelog\\SKILL.md`, dir: `${H}\\skills\\changelog`, exists: true, files: ["SKILL.md", "template.md", "scripts/collect.mjs"], modified: now - 86400_000 },
 	{ kind: "skill", scope: "global", name: "test-plan", description: "고친 코드에 맞춰 확인할 시험 목록을 만든다.", path: `${H}\\skills\\test-plan\\SKILL.md`, dir: `${H}\\skills\\test-plan`, exists: true, files: ["SKILL.md"], modified: now - 2 * 86400_000 },
 	{ kind: "skill", scope: "global", name: "hwpx", description: "한글 HWP/HWPX 파일의 변환 · 읽기 · 편집과 편집 가능한 .hwpx 문서 생성.", path: `${H}\\skills\\hwpx\\SKILL.md`, dir: `${H}\\skills\\hwpx`, exists: true, files: ["SKILL.md"], modified: now - 5 * 86400_000 },
 	{ kind: "agent", scope: "global", name: "reviewer", description: "변경분을 리뷰한다", path: `${H}\\agents\\reviewer.md`, dir: "", exists: true, files: [], modified: now - 7 * 86400_000 },
 	{ kind: "command", scope: "global", name: "fix", description: "이슈 하나를 골라 끝까지 고친다", path: `${H}\\commands\\fix.md`, dir: "", exists: true, files: [], modified: now - 7 * 86400_000 },
+	{ kind: "instructions", scope: "parent", name: "D:\\work\\CLAUDE.md", description: "", path: "D:\\work\\CLAUDE.md", dir: "", exists: true, files: [], modified: now - 86400_000 },
 	{ kind: "instructions", scope: "project", name: "CLAUDE.md", description: "", path: `${ROOT}\\CLAUDE.md`, dir: "", exists: false, files: [], modified: 0 },
+	{ kind: "folder", scope: "extra", name: "D:\\work\\calc-docs", description: "읽기 · 편집은 열림 · 이 폴더의 CLAUDE.md 는 실리지 않음", path: "D:\\work\\calc-docs", dir: "", exists: true, files: [], modified: 0 },
+	{
+		kind: "settings",
+		scope: "global",
+		name: "~/.claude/settings.json",
+		description: "거부 3 · 허용 2 · 훅 1",
+		path: `${H}\\settings.json`,
+		dir: "",
+		exists: true,
+		files: [],
+		modified: now - 86400_000,
+		rules: { scope: "global", path: `${H}\\settings.json`, exists: true, defaultMode: "", allow: ["Bash(npm test:*)", "Read"], deny: ["Bash(svn commit:*)", "Bash(svn add:*)", "Bash(git push:*)"], ask: [], hooks: ["PostToolUse · 1"] },
+	},
 ];
 
 export const claudeMd =

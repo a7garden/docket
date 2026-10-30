@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as rawInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import type {
 	AppInfo,
 	Deliverable,
@@ -30,6 +30,51 @@ import type {
 	Turn,
 	Usage,
 } from "./types";
+
+/**
+ * 속도 계측. 앱을 DOCKET_PERF=1 로 켰을 때만 명령마다 왕복 시간을 performance.measure 와 콘솔에 남긴다.
+ * 켜졌는지 답이 오기 전의 명령(앱을 켤 때 몰리는 목록 읽기)도 재야 해서, 답이 올 때까지는 모아 두었다가 함께 찍는다.
+ * 시각은 창을 연 때부터 센 값이다. ms 가 없으면 그 시점에 찍은 표시(perfMark)다.
+ */
+let perf: boolean | null = null;
+const early: { label: string; start: number; ms?: number }[] = [];
+void rawInvoke<boolean>("perf_enabled")
+	.then((on) => !!on)
+	.catch(() => false)
+	.then((on) => {
+		perf = on;
+		if (on) for (const e of early) record(e.label, e.start, e.ms);
+		early.length = 0;
+	});
+
+function record(label: string, start: number, ms?: number) {
+	if (ms === undefined) {
+		performance.mark(label, { startTime: start });
+		console.info(`[perf] ${label} ${start.toFixed(0)}ms`);
+	} else {
+		performance.measure(`invoke ${label}`, { start, duration: ms });
+		console.debug(`[perf] ${label} ${ms.toFixed(1)}ms (시작 ${start.toFixed(0)}ms)`);
+	}
+}
+
+function note(label: string, start: number, ms?: number) {
+	if (perf) record(label, start, ms);
+	else if (perf === null) early.push({ label, start, ms });
+}
+
+/** 계측이 켜졌을 때 지금 시점을 남긴다. 첫 화면이 그려진 때처럼 명령이 아닌 순간을 잴 때 쓴다. */
+export function perfMark(label: string) {
+	if (perf !== false) note(label, performance.now());
+}
+
+function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+	if (perf === false) return rawInvoke<T>(cmd, args, options);
+	const start = performance.now();
+	const done = () => note(cmd, start, performance.now() - start);
+	const p = rawInvoke<T>(cmd, args, options);
+	p.then(done, done);
+	return p;
+}
 
 // Rust 명령 이름과 인자를 한 곳에 모은다. 화면 코드는 invoke 를 직접 부르지 않는다.
 export const api = {
@@ -68,9 +113,15 @@ export const api = {
 	/** model · effort 를 비우면 설정의 실행별 값을 따른다. */
 	issueCreate: (projectId: string, issueId: string, note: string, autoPlan: boolean, model: string, effort: string) =>
 		invoke<Issue>("issue_create", { projectId, issueId, note, autoPlan, model, effort }),
+	/** 이 메모에서 이어지는 새 메모를 만든다. 자동 계획은 설정을 따르고, 모델 · effort 는 앞선 메모의 것을 물려받는다. */
+	issueFollowUp: (projectId: string, issueId: string, note: string) => invoke<Issue>("issue_follow_up", { projectId, issueId, note }),
 	/** 프로젝트 대화. 보내기 · 중지 · 터미널 · 첨부 · 지우기는 issue* 를 그대로 쓴다. */
 	talks: (projectId: string) => invoke<Issue[]>("talks_list", { projectId }),
 	talkCreate: (projectId: string, talkId: string) => invoke<Issue>("talk_create", { projectId, talkId }),
+	/** 메모의 대화를 같은 프로젝트의 대화로 갈라 낸다. 메모는 그대로 남는다. */
+	talkPromote: (projectId: string, issueId: string, talkId: string) => invoke<Issue>("talk_promote", { projectId, issueId, talkId }),
+	/** 앱 대화가 도는 가상의 프로젝트(앱 데이터 폴더 · 권한 칸). 프로젝트 목록에는 없다. */
+	appProject: () => invoke<Project>("app_project"),
 	issueSaveNote:(projectId: string, issueId: string, note: string) =>
 		invoke<Issue>("issue_save_note", { projectId, issueId, note }),
 	/** 비우면 다시 제목 모델에 맡긴다. */

@@ -6,6 +6,10 @@ pub fn now_ms() -> i64 {
 	chrono::Utc::now().timestamp_millis()
 }
 
+/// 프로젝트에 묶이지 않은 대화(화면 이름 「앱 대화」)의 예약 프로젝트 id. 진짜 프로젝트 id 는 16진수 12자라 겹치지 않는다.
+/// projects.json 에 넣지 않고 Store::project 가 가상의 프로젝트로 돌려준다 — 보내기 · 대기열 · 첨부 · 알림을 프로젝트 대화와 함께 쓰려는 것이다.
+pub const GLOBAL_PID: &str = "global";
+
 pub fn short_id() -> String {
 	uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
@@ -60,6 +64,9 @@ pub struct Settings {
 	/// 파일 산출물에서 한컴오피스로 한글 문서를 확인한다(열기 검사 · 정확한 쪽 수 · hwp 변환). 실행마다 DOCKET_HANCOM 으로 넘긴다.
 	/// 기본은 끔이다 — 한컴 자동화 보안 모듈이 없으면 띄울 때마다 접근 확인 창이 뜬다. 끄면 rhwp 로 그리고 읽어 본다.
 	pub hancom_check: bool,
+	/// 계획 · 구현 · 대화 답 · 산출물 작성이 끝났는데 창이 앞에 없으면 Windows 알림으로도 알린다 (src/lib/events.ts).
+	/// 기본 켜짐이다. 칸이 없는 옛 설정도 serde(default) 로 켜진 채 읽혀, 업데이트한 사람도 따로 켜지 않고 받는다.
+	pub system_notify: bool,
 }
 
 impl Default for Settings {
@@ -86,6 +93,7 @@ impl Default for Settings {
 			recipe_auto: true,
 			auto_update_check: true,
 			hancom_check: false,
+			system_notify: true,
 		}
 	}
 }
@@ -115,6 +123,10 @@ pub struct Project {
 	/// 줄을 서야 할 구현을 기다리게 하지 않고 git 워크트리에서 돌린다(worktree.rs). parallel_impl 을 켰을 때만 먹는다.
 	/// 2026.10.29 : 기본 꺼짐. 저장소가 크면 워크트리를 만드는 것 자체가 무거워서 프로젝트마다 고른다.
 	pub worktree: bool,
+	/// 실행마다 --add-dir 로 함께 여는 폴더(전체 경로). 저장소 지침이 과업 루트처럼 저장소 밖 파일을 읽고 고치라고 시킬 때 쓴다.
+	/// 권한은 실행 종류를 따른다 — 계획 · 읽기 대화는 읽기만, 구현 · 대화(편집)는 편집까지, 산출물은 읽기만(runner::doc_args).
+	/// 2026.10.30 : 이 폴더의 CLAUDE.md 는 실리지 않는다(CLI 2.1.311 실측). 지침을 복사해 오지 않고 폴더를 여는 쪽을 골랐다 — 같은 규칙이 두 곳에 생기면 한쪽이 낡는다.
+	pub extra_dirs: Vec<String>,
 	/// 산출물 파일을 둘 폴더. 비우면 앱 데이터 폴더에 둔다. 사용자가 고른 폴더라 프로젝트 안이어도 쓴다.
 	/// 산출물 네 칸(deliverables_dir · naming · naming_underscore · archive_dir)은 산출물 화면의 설정 창이 save_deliverable_settings 로만 바꾼다.
 	/// save_project 는 덮지 않는다 — 프로젝트 설정 창이 들고 있던 옛 값으로 산출물 설정을 지우지 않게 한다.
@@ -233,6 +245,7 @@ impl Default for Project {
 			plan_vcs_read: true,
 			parallel_impl: true,
 			worktree: false,
+			extra_dirs: Vec::new(),
 			deliverables_dir: String::new(),
 			naming: String::new(),
 			naming_underscore: true,
@@ -445,6 +458,7 @@ pub struct HistoryEntry {
 	pub at: i64,
 	/// created · plan · planned · approve · implemented · rework · chat · session · revert · reverted · done · drop · reopen · stop · error · memo
 	/// memo 는 프로젝트 대화가 보드에 메모를 등록했을 때다. text 는 `#번호 제목`, 등록에 실패했으면 `실패 · 까닭` 이다.
+	/// follow 는 이 메모에서 후속 메모를 만들었을 때다. text 는 `#번호 제목` 이다.
 	/// deliverable 은 완료한 뒤 자동 갱신이 산출물을 고친 결과다. text 는 `제목 · v판 갱신` · `제목 · 건너뜀 · 까닭` · `판정 · …` 이다.
 	pub kind: String,
 	pub text: String,
@@ -562,6 +576,22 @@ pub struct Issue {
 	pub queue: Vec<QueuedChat>,
 	/// 이 이슈의 구현이 도는 워크트리. 있으면 수정 요청 · 대화도 그 안에서 돌고, 결과 확인 때 「반영」해야 본 작업트리에 들어간다.
 	pub worktree: Option<Worktree>,
+	/// 메모의 대화에서 갈라 낸 대화면 그 메모. 대화 머리에서 메모로 돌아가는 길이다.
+	pub from_issue: Option<IssueRef>,
+	/// 갈라 낸 뒤 아직 한 번도 보내지 않았다. 첫 차례만 메모의 세션을 --fork-session 으로 이어 새 세션으로 갈라진다.
+	pub fork_pending: bool,
+	/// 이 메모가 이어 받은 앞선 메모. 자식 쪽에만 둔다 — 「후속 N개」는 화면이 목록에서 거꾸로 센다. 두 곳에 두면 지우기 · 실패한 쓰기로 어긋난다.
+	/// 갈라 낸 대화의 from_issue 와 따로 둔다. 그 칸은 세션 차례 거르기 · 프롬프트가 「세션에서 갈라졌다」는 뜻으로 읽는다.
+	pub follows: Option<IssueRef>,
+}
+
+/// 다른 이슈를 가리키는 칸. 번호는 화면에 보일 것이고, id 는 열 때 쓴다.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct IssueRef {
+	pub id: String,
+	pub number: u32,
+	pub title: String,
 }
 
 /// 본 작업트리 밖에서 도는 구현의 자리.

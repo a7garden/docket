@@ -316,9 +316,7 @@ function RulesDialog({
 			<DialogContent className="pop gap-4 p-6 sm:max-w-4xl">
 				<DialogHeader>
 					<DialogTitle>산출물 규칙</DialogTitle>
-					<DialogDescription className="leading-relaxed break-keep">
-						산출물마다 이름 규칙 · 형식 · 템플릿 · 어휘 · 작성법을 모았습니다. 줄을 누르면 그 산출물의 「만드는 법」을 엽니다.
-					</DialogDescription>
+					<DialogDescription className="sr-only">산출물마다의 이름 규칙 · 형식 · 템플릿 · 어휘 · 작성법</DialogDescription>
 				</DialogHeader>
 				<div className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-[13px]">
 					<BookA className="size-4 text-subtle" />
@@ -424,7 +422,7 @@ function SettingsDialog({ project, open, onOpenChange }: { project: Project; ope
 			<DialogContent className="pop max-h-[88vh] gap-5 overflow-y-auto p-6 sm:max-w-lg">
 				<DialogHeader>
 					<DialogTitle>산출물 설정</DialogTitle>
-					<DialogDescription className="leading-relaxed break-keep">판 파일을 둘 폴더와 이름 규칙입니다. 산출물마다 「만드는 법」에서 이름 규칙을 따로 정할 수 있습니다.</DialogDescription>
+					<DialogDescription className="sr-only">판 파일을 둘 폴더와 이름 규칙</DialogDescription>
 				</DialogHeader>
 				<div className="flex flex-col gap-1.5">
 					<Label>산출물 폴더</Label>
@@ -451,7 +449,7 @@ function SettingsDialog({ project, open, onOpenChange }: { project: Project; ope
 					<Label>기본 파일 이름 규칙</Label>
 					<Input value={s.naming} onChange={(e) => setS({ ...s, naming: e.target.value })} placeholder="{제목}_v{판}_{날짜}" className="h-8 text-[13px] md:text-[13px]" />
 					<p className="text-[12px] leading-relaxed text-subtle">
-						쓸 수 있는 자리: <span className="mono text-muted-foreground">{"{제목} {판} {날짜} {시각} {프로젝트}"}</span>
+						산출물마다 「만드는 법」에서 따로 정할 수 있습니다. 쓸 수 있는 자리: <span className="mono text-muted-foreground">{"{제목} {판} {날짜} {시각} {프로젝트}"}</span>
 						{preview && (
 							<>
 								<br />

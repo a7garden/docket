@@ -1,9 +1,10 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, FolderOpen, MoreHorizontal, PanelRight, Plus, Search, Trash2 } from "lucide-react";
+import { Copy, ExternalLink, FolderOpen, MoreHorizontal, PanelRight, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, attempt, ContextActions, copy, DropdownActions } from "@/components/ActionMenu";
 import { Empty, Label } from "@/components/bits";
+import { RuleLines } from "@/features/project/ProjectHeader";
 import { Markdown } from "@/components/Markdown";
 import { MarkdownEditor } from "@/components/MarkdownEditor";
 import {
@@ -35,8 +36,24 @@ const KINDS: { kind: ResourceKind; label: string }[] = [
 	{ kind: "agent", label: "에이전트" },
 	{ kind: "command", label: "명령" },
 	{ kind: "rule", label: "규칙" },
+	{ kind: "settings", label: "설정 파일" },
+	{ kind: "folder", label: "폴더" },
 ];
 const KIND_LABEL = Object.fromEntries(KINDS.map((k) => [k.kind, k.label])) as Record<ResourceKind, string>;
+/** 「새로 만들기」로 만들 수 있는 것. 지침은 첫 자리가 늘 보이고, 설정 파일 · 폴더는 여기서 만들지 않는다. */
+const CREATABLE = KINDS.filter((k) => ["skill", "agent", "command", "rule"].includes(k.kind));
+
+/**
+ * 프로젝트를 고르면 그 프로젝트의 실행에 실제로 실리는 것을 이 차례로 보인다. Claude Code 가 쌓는 순서와 같다.
+ * 상위 폴더 지침은 작업 폴더에서 드라이브 루트까지 올라가며 실리는 CLAUDE.md 다 — 화면에 없으면 실리는 줄 모른다.
+ */
+const LAYERS: { key: string; label: string; note?: string; kinds: boolean; match: (r: Resource) => boolean }[] = [
+	{ key: "global", label: "전역", note: "자동 메모리는 docket 실행에서 꺼집니다", kinds: true, match: (r) => r.scope === "global" && r.kind !== "settings" },
+	{ key: "parent", label: "상위 폴더", kinds: false, match: (r) => r.scope === "parent" },
+	{ key: "project", label: "프로젝트", kinds: true, match: (r) => r.scope === "project" && r.kind !== "settings" },
+	{ key: "extra", label: "함께 여는 폴더", note: "프로젝트 설정에서 정합니다", kinds: false, match: (r) => r.scope === "extra" },
+	{ key: "settings", label: "설정", kinds: false, match: (r) => r.kind === "settings" },
+];
 
 type Scope = "global" | "project";
 
@@ -61,7 +78,8 @@ export function ClaudeConfig() {
 
 	const items = useMemo(() => {
 		const q = query.trim().toLowerCase();
-		return all.filter((r) => r.scope === scope && (!q || r.name.toLowerCase().includes(q) || r.description.toLowerCase().includes(q)));
+		// 전역을 볼 때는 전역 층만, 프로젝트를 볼 때는 그 프로젝트에 실리는 층을 모두 보인다.
+		return all.filter((r) => (scope === "project" || r.scope === "global") && (!q || r.name.toLowerCase().includes(q) || r.description.toLowerCase().includes(q)));
 	}, [all, scope, query]);
 
 	const current = all.find((r) => r.path === selected) ?? items[0];
@@ -131,7 +149,7 @@ export function ClaudeConfig() {
 							</Button>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end" className="pop">
-							{KINDS.filter((k) => k.kind !== "instructions").map((k) => (
+							{CREATABLE.map((k) => (
 								<DropdownMenuItem key={k.kind} onSelect={() => setCreating(k.kind)}>
 									새 {k.label}
 								</DropdownMenuItem>
@@ -140,50 +158,71 @@ export function ClaudeConfig() {
 					</DropdownMenu>
 				</div>
 				<div className="-mr-1 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
-					{KINDS.map(({ kind, label }) => {
-						const list = items.filter((r) => r.kind === kind);
-						if (list.length === 0) return null;
+					{LAYERS.map((layer) => {
+						const inLayer = items.filter(layer.match);
+						if (inLayer.length === 0) return null;
+						const groups = layer.kinds ? KINDS.map((k) => ({ ...k, list: inLayer.filter((r) => r.kind === k.kind) })).filter((g) => g.list.length > 0) : [{ kind: layer.key, label: "", list: inLayer }];
 						return (
-							<section key={kind} className="flex flex-col gap-0.5">
-								<Label className="flex items-center gap-1.5 px-2 pb-1">
-									{label}
-									<span className="tabular font-normal text-subtle">{list.length}</span>
-								</Label>
-								{list.map((r) => {
-									const pick = () =>
-										guard(() => {
-											setSelected(r.path);
-											setFile(null);
-										});
-									return (
-										<ContextActions key={r.path} items={resourceActions(r, () => setDeleting(r), pick)}>
-											<button
-												type="button"
-												onClick={pick}
-												className={cn(
-													"flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-hover",
-													current?.path === r.path && "bg-hover shadow-[inset_0_0_0_1px_var(--border-strong)]",
-												)}
-											>
-												<span className={cn("truncate text-[13px] font-medium", !r.exists && "text-subtle")}>{r.name}</span>
-												{r.description ? (
-													<span className="line-clamp-2 text-[12px] leading-snug break-keep text-subtle">{r.description}</span>
-												) : (
-													!r.exists && <span className="text-[12px] text-subtle">아직 없습니다. 저장하면 만듭니다.</span>
-												)}
-											</button>
-										</ContextActions>
-									);
-								})}
+							<section key={layer.key} className="flex flex-col gap-2">
+								{/* 전역만 볼 때는 층이 하나라 머리를 달지 않는다 */}
+								{scope === "project" && (
+									<div className="flex flex-col border-b border-border px-2 pb-1">
+										<span className="text-[12.5px] font-semibold">{layer.label}</span>
+										{layer.note && <span className="text-[11.5px] text-subtle">{layer.note}</span>}
+									</div>
+								)}
+								{groups.map((g) => (
+									<div key={g.kind} className="flex flex-col gap-0.5">
+										{g.label && (
+											<Label className="flex items-center gap-1.5 px-2 pb-1">
+												{g.label}
+												<span className="tabular font-normal text-subtle">{g.list.length}</span>
+											</Label>
+										)}
+										{g.list.map((r) => {
+											const pick = () =>
+												guard(() => {
+													setSelected(r.path);
+													setFile(null);
+												});
+											return (
+												<ContextActions key={r.path} items={resourceActions(r, () => setDeleting(r), pick)}>
+													<button
+														type="button"
+														onClick={pick}
+														title={r.scope === "parent" || r.scope === "extra" ? r.path : undefined}
+														className={cn(
+															"flex flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-hover",
+															current?.path === r.path && "bg-hover shadow-[inset_0_0_0_1px_var(--border-strong)]",
+														)}
+													>
+														<span className={cn("truncate text-[13px] font-medium", (!r.exists || r.excluded) && "text-subtle")}>{r.name}</span>
+														{r.excluded && <span className="text-[11.5px] text-subtle">docket 실행에서는 빠짐</span>}
+														{r.description ? (
+															<span className="line-clamp-2 text-[12px] leading-snug break-keep text-subtle">{r.description}</span>
+														) : (
+															!r.exists && <span className="text-[12px] text-subtle">아직 없습니다. 저장하면 만듭니다.</span>
+														)}
+													</button>
+												</ContextActions>
+											);
+										})}
+									</div>
+								))}
 							</section>
 						);
 					})}
+					{scope === "global" && <p className="px-2 text-[11.5px] leading-relaxed break-keep text-subtle">자동 메모리는 docket 실행에서 꺼집니다</p>}
 					{items.length === 0 && <Empty>찾는 것이 없습니다</Empty>}
 				</div>
 			</aside>
 
 			<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-				{current && currentFile ? (
+				{current?.kind === "settings" ? (
+					<SettingsView key={current.path} resource={current} shortPath={short(current.path)} />
+				) : current?.kind === "folder" ? (
+					<FolderView key={current.path} resource={current} />
+				) : current && currentFile ? (
 					<ResourceEditor
 						key={currentFile}
 						resource={current}
@@ -433,12 +472,81 @@ function ResourceEditor({
 	);
 }
 
-/** 편집 화면의 「더 보기」와 목록 우클릭이 같이 쓴다. 목록에서만 `onOpen` 을 준다. 지침은 지우지 않는다. */
+/**
+ * settings.json 은 읽기 전용으로 보인다. 고치는 것은 「파일 열기」로 다른 편집기에서 한다 —
+ * JSON 을 한 글자 깨뜨리면 그 파일의 거부 규칙(SVN 쓰기 금지 등)이 통째로 빠진다.
+ */
+function SettingsView({ resource, shortPath }: { resource: Resource; shortPath: string }) {
+	const r = resource.rules;
+	return (
+		<div className="flex min-h-0 flex-1 flex-col gap-3">
+			<header className="flex items-start gap-3">
+				<div className="min-w-0 flex-1">
+					<div className="flex items-center gap-2">
+						<h2 className="truncate text-[17px] font-semibold tracking-[-0.015em]">{resource.name}</h2>
+						<span className="text-[12px] text-subtle">설정 파일 · 읽기 전용</span>
+					</div>
+					<button type="button" className="mono mt-0.5 block max-w-full truncate text-[12px] text-subtle hover:text-foreground" title="폴더에서 보기" onClick={() => void api.reveal(resource.path).catch(() => {})}>
+						{shortPath}
+					</button>
+				</div>
+				<Button variant="outline" onClick={() => void attempt(() => api.open(resource.path))}>
+					<ExternalLink />
+					파일 열기
+				</Button>
+			</header>
+			<div className="surface flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto rounded-xl px-5 py-4 text-[12px]" data-scroll>
+				{r && (
+					<>
+						<RuleLines label="거부" rules={r.deny} />
+						<RuleLines label="허용" rules={r.allow} />
+						{r.ask.length > 0 && <RuleLines label="묻기" rules={r.ask} />}
+						<RuleLines label="훅" rules={r.hooks ?? []} />
+						{r.defaultMode && <RuleLines label="기본 모드" rules={[r.defaultMode]} />}
+					</>
+				)}
+				<p className="leading-relaxed break-keep text-subtle">
+					docket 실행도 이 파일을 읽어 앱의 규칙과 합칩니다. 거부가 허용보다 앞섭니다. 묻기 규칙은 앱 실행에서 묻지 못해 막힙니다. 기본 모드는 앱이 실행마다 정해 주므로 따르지 않습니다.
+				</p>
+			</div>
+		</div>
+	);
+}
+
+/** 함께 여는 폴더 한 줄. 폴더 안 파일은 Claude 가 읽고 고칠 수 있지만 그 폴더의 CLAUDE.md 는 실리지 않는다. */
+function FolderView({ resource }: { resource: Resource }) {
+	return (
+		<div className="flex min-h-0 flex-1 flex-col gap-3">
+			<header className="flex items-start gap-3">
+				<div className="min-w-0 flex-1">
+					<div className="flex items-center gap-2">
+						<h2 className="mono truncate text-[15px] font-semibold">{resource.name}</h2>
+						<span className="shrink-0 text-[12px] text-subtle">함께 여는 폴더</span>
+					</div>
+					{!resource.exists && <p className="mt-0.5 text-[12px] text-danger">폴더가 없어 실행에 넘기지 않습니다</p>}
+				</div>
+				{resource.exists && (
+					<Button variant="outline" onClick={() => void attempt(() => api.open(resource.path))}>
+						<FolderOpen />
+						폴더 열기
+					</Button>
+				)}
+			</header>
+			<div className="surface flex flex-col gap-2 rounded-xl px-5 py-4 text-[13px] leading-relaxed break-keep">
+				<p>실행마다 --add-dir 로 이 폴더를 함께 엽니다. 계획 · 읽기 대화 · 산출물에서는 읽기만, 구현과 편집 대화에서는 고치기까지 됩니다.</p>
+				<p className="text-subtle">이 폴더의 CLAUDE.md 는 실리지 않습니다. 저장소 지침이 그 파일을 열라고 시키면 읽을 수 있을 뿐입니다. 목록은 프로젝트 설정의 「함께 여는 폴더」에서 고칩니다.</p>
+			</div>
+		</div>
+	);
+}
+
+/** 편집 화면의 「더 보기」와 목록 우클릭이 같이 쓴다. 목록에서만 `onOpen` 을 준다. 지침 · 설정 파일 · 폴더는 지우지 않는다. */
 function resourceActions(r: Resource, onDelete: () => void, onOpen?: () => void): ActionList {
-	const removable = r.kind !== "instructions" && r.exists;
+	const removable = CREATABLE.some((k) => k.kind === r.kind) && r.exists;
 	return [
 		onOpen && { label: "열기", icon: <PanelRight />, onSelect: onOpen },
 		"sep",
+		r.kind === "settings" && { label: "파일 열기", icon: <ExternalLink />, onSelect: () => void attempt(() => api.open(r.path)) },
 		r.exists && { label: "폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.reveal(r.dir || r.path)) },
 		{ label: "경로 복사", icon: <Copy />, onSelect: () => void copy(r.path, "경로") },
 		"sep",

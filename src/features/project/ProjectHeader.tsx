@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BookA, BookMarked, Check, ChevronRight, Copy, FileStack, FolderOpen, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { BookA, BookMarked, Check, ChevronRight, Copy, FileStack, FolderOpen, FolderPlus, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink, X } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, attempt, copy, DropdownActions } from "@/components/ActionMenu";
 import { Label } from "@/components/bits";
@@ -268,6 +269,7 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 								</span>
 							</span>
 						</label>
+						<ExtraDirs project={p} value={p.extraDirs ?? []} onChange={(extraDirs) => setP({ ...p, extraDirs })} />
 						<EffectiveRules projectId={project.id} open={open} />
 
 						<p className="text-[12px] leading-relaxed break-keep text-subtle">산출물 폴더 · 파일 이름 규칙은 산출물 화면의 「산출물 설정」에서 정합니다.</p>
@@ -284,6 +286,65 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 						</DialogFooter>
 					</>
 				)}
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+/**
+ * 앱 대화의 권한. 앱 대화는 앱 데이터 폴더에서 돌아 이름 · 경로 · 워크트리 · 함께 여는 폴더가 뜻이 없고, 명령 허용 · 막을 목록만 둔다.
+ * 플러그인 빌드 명령(npm · extism-js)을 여기 허용해 두면 묻지 않고 돈다.
+ */
+export function AppTalkSettings({ project, open, onOpenChange }: { project: Project; open: boolean; onOpenChange: (o: boolean) => void }) {
+	const qc = useQueryClient();
+	const [tools, setTools] = useState(project.allowedTools.join("\n"));
+	const [deny, setDeny] = useState(project.deniedTools.join("\n"));
+	useEffect(() => {
+		if (open) {
+			setTools(project.allowedTools.join("\n"));
+			setDeny(project.deniedTools.join("\n"));
+		}
+	}, [open, project]);
+
+	const save = async () => {
+		try {
+			const lines = (t: string) => t.split("\n").map((x) => x.trim()).filter(Boolean);
+			const p = await api.projectSave({ ...project, allowedTools: lines(tools), deniedTools: lines(deny) });
+			qc.setQueryData(qk.appProject, p);
+			onOpenChange(false);
+		} catch (e) {
+			toast.error(errorText(e));
+		}
+	};
+
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="pop max-h-[88vh] gap-5 overflow-y-auto p-6 sm:max-w-lg">
+				<DialogHeader>
+					<DialogTitle>앱 대화 권한</DialogTitle>
+					<DialogDescription className="mono truncate text-[12px]">{project.path}</DialogDescription>
+				</DialogHeader>
+				<div className="flex flex-col gap-1.5">
+					<Label>묻지 않고 허용할 명령</Label>
+					<Textarea
+						value={tools}
+						onChange={(e) => setTools(e.target.value)}
+						placeholder={"한 줄에 하나\nBash(npm run build:*)\nBash(extism-js:*)"}
+						className="mono min-h-24 resize-none bg-transparent text-[12.5px]"
+					/>
+				</div>
+				<div className="flex flex-col gap-1.5">
+					<Label>막을 명령 · 경로</Label>
+					<Textarea value={deny} onChange={(e) => setDeny(e.target.value)} placeholder={"한 줄에 하나 · 어떤 실행에서도 막습니다"} className="mono min-h-24 resize-none bg-transparent text-[12.5px]" />
+					<p className="text-[12px] leading-relaxed break-keep text-subtle">허용보다 앞섭니다. 실행 기록의 「허용」 단추로도 풀리지 않습니다.</p>
+				</div>
+				<EffectiveRules projectId={project.id} open={open} />
+				<DialogFooter>
+					<Button variant="ghost" onClick={() => onOpenChange(false)}>
+						취소
+					</Button>
+					<Button onClick={() => void save()}>저장</Button>
+				</DialogFooter>
 			</DialogContent>
 		</Dialog>
 	);
@@ -315,6 +376,41 @@ function CommandChips({ projectId, open, value, onChange }: { projectId: string;
 					</button>
 				);
 			})}
+		</div>
+	);
+}
+
+/**
+ * 실행마다 --add-dir 로 함께 여는 폴더. 저장소 지침이 저장소 밖 파일(과업 루트의 정본 · 산출물)을 읽고 고치라고 시킬 때 쓴다.
+ * 이 폴더의 CLAUDE.md 는 실리지 않는다 — 지침이 그 파일을 열라고 시키면 읽을 수 있을 뿐이다.
+ */
+function ExtraDirs({ project, value, onChange }: { project: Project; value: string[]; onChange: (v: string[]) => void }) {
+	const add = async () => {
+		const dir = await openDialog({ directory: true, title: "함께 열 폴더", defaultPath: project.path });
+		if (typeof dir === "string" && !value.some((d) => d.toLowerCase() === dir.toLowerCase())) onChange([...value, dir]);
+	};
+	return (
+		<div className="flex flex-col gap-1.5">
+			<div className="flex items-center gap-2">
+				<Label>함께 여는 폴더</Label>
+				<Button size="sm" variant="ghost" className="ml-auto h-7 text-[12px]" onClick={() => void add()}>
+					<FolderPlus />
+					폴더 더하기
+				</Button>
+			</div>
+			{value.map((d) => (
+				<div key={d} className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1">
+					<span className="mono min-w-0 flex-1 truncate text-[12px]" title={d}>
+						{d}
+					</span>
+					<Button size="icon" variant="ghost" className="size-6" aria-label="빼기" onClick={() => onChange(value.filter((x) => x !== d))}>
+						<X />
+					</Button>
+				</div>
+			))}
+			<p className="text-[12px] leading-relaxed break-keep text-subtle">
+				프로젝트 밖 폴더를 모든 실행에 함께 엽니다. 계획 · 읽기 대화 · 산출물에서는 읽기만, 구현과 편집 대화에서는 고치기까지 됩니다. 그 폴더의 CLAUDE.md 는 실리지 않습니다.
+			</p>
 		</div>
 	);
 }
@@ -364,7 +460,7 @@ function EffectiveRules({ projectId, open }: { projectId: string; open: boolean 
 	);
 }
 
-function RuleLines({ label, rules }: { label: string; rules: string[] }) {
+export function RuleLines({ label, rules }: { label: string; rules: string[] }) {
 	const [all, setAll] = useState(false);
 	const shown = all ? rules : rules.slice(0, 6);
 	return (

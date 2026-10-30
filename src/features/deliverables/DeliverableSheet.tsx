@@ -37,6 +37,7 @@ import { api, errorText } from "@/lib/api";
 import { diffLines, foldDiff } from "@/lib/diff";
 import { bytes, clock, dirname, fileUrl, isImage, isText, joinPath } from "@/lib/format";
 import { lastEnded, useMarkSeen } from "@/lib/notices";
+import { useSheetBesideDock } from "@/features/talk/DockPane";
 import { useDeliverables } from "@/lib/queries";
 import { useUi } from "@/lib/store";
 import type { Deliverable, Project, Version } from "@/lib/types";
@@ -52,16 +53,19 @@ export function DeliverableSheet({ project }: { project: Project }) {
 	const d = data?.find((x) => x.id === id);
 	// 열어 본 산출물의 새 판 · 실패는 알림함에서 뺀다.
 	useMarkSeen(d?.id, d ? lastEnded(d.runs) : 0);
+	const beside = useSheetBesideDock();
 	return (
-		<Sheet open={!!d} onOpenChange={(o) => !o && openDeliverable(null)}>
+		<Sheet open={!!d} onOpenChange={(o) => !o && openDeliverable(null)} modal={beside.modal}>
 			<SheetContent
 				side="right"
 				showCloseButton={false}
+				onInteractOutside={beside.onInteractOutside}
 				onOpenAutoFocus={(e) => {
 					e.preventDefault();
 					(e.currentTarget as HTMLElement | null)?.focus();
 				}}
-				className="pop gap-0 overflow-hidden rounded-none p-0 outline-none data-[side=right]:top-9 data-[side=right]:bottom-0 data-[side=right]:h-auto data-[side=right]:w-[min(860px,64vw)] data-[side=right]:border-y-0 data-[side=right]:border-r-0 data-[side=right]:sm:max-w-none"
+				// 이슈 상세 창과 같이 옆 칸 대화를 비켜 본문 칸 안에서 열린다.
+				className="pop gap-0 overflow-hidden rounded-none p-0 outline-none data-[side=right]:top-9 data-[side=right]:right-[var(--dock-right,0px)] data-[side=right]:bottom-0 data-[side=right]:h-auto data-[side=right]:w-[min(860px,calc((100vw_-_var(--dock-w,0px))*0.64))] data-[side=right]:border-y-0 data-[side=right]:border-r-0 data-[side=right]:sm:max-w-none"
 			>
 				{d && <Detail key={d.id} project={project} d={d} onClose={() => openDeliverable(null)} />}
 			</SheetContent>

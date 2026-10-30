@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { perfMark } from "@/lib/api";
 import { useUi } from "@/lib/store";
 import App from "./App";
 import "./index.css";
@@ -12,9 +13,9 @@ if (import.meta.env.DEV) {
 	const ui = useUi.getState();
 	const view = q.get("view");
 	if (q.get("project")) ui.setProject(q.get("project"));
-	if (view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary" || view === "claude" || view === "settings") ui.setView(view);
+	if (view === "board" || view === "deliverables" || view === "talks" || view === "allTalks" || view === "knowledge" || view === "glossary" || view === "claude" || view === "settings") ui.setView(view);
 	if (q.get("issue")) ui.openIssue(q.get("issue"));
-	if (q.get("talk")) ui.openTalk(q.get("talk"));
+	if (q.get("talk")) ui.openTalk({ projectId: useUi.getState().projectId ?? "", id: q.get("talk")! });
 	if (q.get("deliverable")) ui.openDeliverable(q.get("deliverable"));
 	if (q.has("projectSettings")) ui.editProject(useUi.getState().projectId);
 }
@@ -34,6 +35,7 @@ if (!import.meta.env.DEV) {
 }
 
 // 데이터는 Rust 사건으로 갱신된다. 창에 다시 들어올 때만 한 번 새로 읽어 바깥(다른 창 · 손 편집)의 변화를 잡는다.
+// 모든 프로젝트를 훑는 목록(사이드바 · 알림함 · 대기열 · Ctrl+K · 대화 목록)은 보던 프로젝트만 다시 읽는다 — queries.ts 의 focusOnly.
 const queryClient = new QueryClient({
 	defaultOptions: {
 		queries: { staleTime: 30_000, refetchOnWindowFocus: true, retry: 1 },
@@ -49,3 +51,5 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 		</QueryClientProvider>
 	</React.StrictMode>,
 );
+// 첫 그림이 화면에 오른 때. 두 번 넘겨야 그 그림의 칠하기가 끝난 뒤다.
+requestAnimationFrame(() => requestAnimationFrame(() => perfMark("첫 화면")));

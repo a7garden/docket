@@ -3,10 +3,10 @@ import { useQueries } from "@tanstack/react-query";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { api } from "./api";
-import { qk, useProjects } from "./queries";
+import { focusOnly, qk, useProjects, useTalks } from "./queries";
 import { needsDecision } from "./status";
 import type { Target } from "./store";
-import type { Deliverable, Issue, Project, RunRecord } from "./types";
+import { type Deliverable, GLOBAL_PID, type Issue, type Project, type RunRecord } from "./types";
 
 /**
  * 알림함. 알림을 따로 쌓지 않고, 캐시에 있는 이슈 · 대화 · 산출물에서 「마지막 실행이 끝난 뒤 아직 열어 보지 않은 것」을 고른다.
@@ -124,9 +124,10 @@ function deliverableNotice(d: Deliverable): { what: string; tone: NoticeTone } |
 /** 모든 프로젝트에서 아직 보지 않은 알림. 최근 것이 위다. 사건으로 캐시가 고쳐지므로 따로 다시 묻지 않는다. */
 export function useNotices(): Notice[] {
 	const { data: projects = [] } = useProjects();
-	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id) })) });
-	const talks = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id) })) });
-	const docs = useQueries({ queries: projects.map((p) => ({ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id) })) });
+	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id), ...focusOnly(p.id) })) });
+	const talks = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id), ...focusOnly(p.id) })) });
+	const docs = useQueries({ queries: projects.map((p) => ({ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id), ...focusOnly(p.id) })) });
+	const { data: appTalks = [] } = useTalks(GLOBAL_PID);
 	const { seen, since } = useSeen();
 
 	const all = projects.map((project, n) => ({
@@ -135,6 +136,8 @@ export function useNotices(): Notice[] {
 		talks: talks[n]?.data ?? [],
 		docs: docs[n]?.data ?? [],
 	}));
+	// 앱 대화는 프로젝트가 없다. 알림 줄이 쓰는 이름만 채운 칸을 둔다 — 셈은 GLOBAL_PID 로 묶여 어느 프로젝트 숫자에도 더해지지 않고 알림함과 대화 탭의 「앱」 묶음에만 보인다.
+	all.push({ project: { id: GLOBAL_PID, name: "앱" } as Project, issues: [], talks: appTalks, docs: [] });
 
 	const out: Notice[] = [];
 	const unread = (id: string, at: number) => at > 0 && at > Math.max(seen[id] ?? 0, since);
@@ -142,7 +145,8 @@ export function useNotices(): Notice[] {
 		for (const t of talks) {
 			const at = lastEnded(t.runs);
 			const n = unread(t.id, at) && issueNotice(t);
-			if (n) out.push({ key: `t:${t.id}`, project, view: "talks", projectId: project.id, target: "issue", id: t.id, talk: true, title: `대화 · ${t.title || "새 대화"}`, at, ...n });
+			const kind = project.id === GLOBAL_PID ? "앱 대화" : "대화";
+			if (n) out.push({ key: `t:${t.id}`, project, view: "talks", projectId: project.id, target: "issue", id: t.id, talk: true, title: `${kind} · ${t.title || "새 대화"}`, at, ...n });
 		}
 		for (const i of issues) {
 			const at = lastEnded(i.runs);
@@ -185,11 +189,14 @@ export function useNoticeCounts(): (projectId: string) => NoticeCount {
 export function usePruneSeen() {
 	const { data: projects = [] } = useProjects();
 	const qs = useQueries({
-		queries: projects.flatMap((p) => [
-			{ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id) },
-			{ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id) },
-			{ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id) },
-		]),
+		queries: [
+			...projects.flatMap((p) => [
+				{ queryKey: qk.issues(p.id) as readonly string[], queryFn: (): Promise<{ id: string }[]> => api.issues(p.id), ...focusOnly(p.id) },
+				{ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id), ...focusOnly(p.id) },
+				{ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id), ...focusOnly(p.id) },
+			]),
+			{ queryKey: qk.talks(GLOBAL_PID), queryFn: () => api.talks(GLOBAL_PID) },
+		],
 	});
 	const prune = useSeen((s) => s.prune);
 	// 모두 읽어 온 뒤에만 걷는다. 덜 읽은 때 걷으면 아직 안 온 프로젝트의 표시가 지워진다.

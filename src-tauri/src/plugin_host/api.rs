@@ -66,6 +66,7 @@ fn issue_json(store: &Store, pid: &str, iid: &str, full: bool) -> Value {
 		"plan": i.plan.as_ref().map(|p| json!({ "title": p.title, "summary": p.summary, "plan": p.plan, "risks": p.risks })),
 		"result": i.result.as_ref().map(|r| json!({ "summary": r.summary, "verification": r.verification, "followups": r.followups })),
 		"changes": changes,
+		"follows": i.follows.as_ref().map(|f| json!({ "id": f.id, "number": f.number, "title": f.title })),
 	})
 }
 
