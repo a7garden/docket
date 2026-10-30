@@ -38,6 +38,8 @@ fn text(c: Command) -> Result<String> {
 }
 
 fn norm(p: &Path) -> String {
+	// 실제 경로로 풀어 견준다. git 은 긴 실제 경로를 주므로 정션 · 8.3 짧은 이름으로 연 폴더가 다른 곳으로 보인다.
+	let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
 	p.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_lowercase()
 }
 
@@ -220,6 +222,23 @@ mod tests {
 		let mut c = git(dir);
 		c.args(args);
 		bytes(c).unwrap();
+	}
+
+	/// 같은 폴더를 다른 경로(정션 · 8.3 짧은 이름)로 열어도 저장소 맨 위로 본다.
+	#[cfg(windows)]
+	#[test]
+	fn available_sees_through_other_paths() {
+		let base = std::env::temp_dir().join(format!("docket-wt-{}", short_id()));
+		let root = base.join("repo");
+		std::fs::create_dir_all(&root).unwrap();
+		sh(&root, &["init", "-q"]);
+		let link = base.join("link");
+		let made = std::process::Command::new("cmd").args(["/c", "mklink", "/J"]).arg(&link).arg(&root).output().unwrap();
+		assert!(made.status.success());
+		assert!(available(&root));
+		assert!(available(&link));
+		std::fs::remove_dir(&link).ok();
+		std::fs::remove_dir_all(&base).ok();
 	}
 
 	/// 커밋하지 않은 변경까지 바탕에 들고, 그 사이 본 작업트리에서 바뀐 것은 합쳐 지키며, 충돌하면 아무것도 쓰지 않는다.
