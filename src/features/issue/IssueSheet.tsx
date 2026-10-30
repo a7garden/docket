@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { MoreHorizontal, RotateCcw, Undo2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, MoreHorizontal, RotateCcw, Undo2, X } from "lucide-react";
 import { toast } from "sonner";
 import { DropdownActions } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
+import { KeyTip } from "@/components/KeyTip";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -13,12 +14,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { clock, relTime } from "@/lib/format";
+import { inTyping, keyAnchor, useKey } from "@/lib/keys";
 import { lastEnded, useMarkSeen } from "@/lib/notices";
 import { useIssues, useProjects } from "@/lib/queries";
 import { stateOf } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
 import type { Issue, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useBoardNeighbor } from "../board/boardFocus";
 import { totals } from "../board/IssueCard";
 import { ChangesTab } from "./ChangesTab";
 import { ChatComposer, ChatTab, type Draft, NO_DRAFT, SessionBar, useSendKey, useTranscript } from "./ChatTab";
@@ -29,6 +32,18 @@ import { PlanTab } from "./PlanTab";
 import { type Answers, NO_ANSWERS, answeredCount, answersText } from "./Questions";
 
 type Tab = "note" | "plan" | "changes" | "chat" | "history";
+
+/** 화면에 놓인 탭 순서. Alt 1–5 가 이 순서를 따른다. Ctrl 숫자는 프로젝트 화면 전환이 쓴다. */
+const TABS: [Tab, string][] = [
+	["note", "메모"],
+	["chat", "대화"],
+	["plan", "계획"],
+	["changes", "변경"],
+	["history", "기록"],
+];
+
+/** 확인 창이 떠 있으면 창 뒤의 이슈 · 탭을 바꾸지 않는다. */
+const confirming = () => !!document.querySelector('[role="alertdialog"]');
 
 function tabFor(i: Issue): Tab {
 	if (i.run?.kind === "chat") return "chat";
@@ -55,6 +70,19 @@ export function IssueSheet({ project }: { project: Project }) {
 				onOpenAutoFocus={(e) => {
 					e.preventDefault();
 					(e.currentTarget as HTMLElement | null)?.focus();
+				}}
+				// 입력칸 · 편집기 안의 Esc 는 칸에서 빠져나오기만 한다. 글을 쓰다 Esc 한 번에 창이 닫히면 보던 자리를 잃는다.
+				// 초점은 한 박자 뒤에 옮긴다. Radix 는 이 키를 칸보다 먼저 받는데, 여기서 바로 blur 하면 제목 칸의 Esc(취소)보다 onBlur(저장)가 먼저 돈다.
+				onEscapeKeyDown={(e) => {
+					const from = document.activeElement as HTMLElement | null;
+					if (!inTyping(from)) return;
+					e.preventDefault();
+					const sheet = from?.closest<HTMLElement>('[role="dialog"]');
+					setTimeout(() => {
+						const now = document.activeElement as HTMLElement | null;
+						if (now && inTyping(now)) now.blur();
+						sheet?.focus();
+					});
 				}}
 				className="pop gap-0 overflow-hidden rounded-none p-0 outline-none data-[side=right]:top-9 data-[side=right]:bottom-0 data-[side=right]:h-auto data-[side=right]:w-[min(860px,64vw)] data-[side=right]:border-y-0 data-[side=right]:border-r-0 data-[side=right]:sm:max-w-none"
 			>
@@ -140,6 +168,11 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 	// 질문에 단 답은 탭을 오가도 남아야 하고, 계획이 새로 나오면 버린다. 질문 번호가 새 계획과 맞지 않는다.
 	const [answers, setAnswers] = useState<Answers>(NO_ANSWERS);
 	useEffect(() => setAnswers(NO_ANSWERS), [issue.plan?.runId]);
+	for (const [i, [v, label]] of TABS.entries()) {
+		// 목록이 고정이라 훅 순서가 바뀌지 않는다. 숫자 패드의 Alt 조합은 Windows 의 Alt 코드 입력이라 숫자 줄만 받는다.
+		useKey({ id: `issue.tab.${v}`, combo: `Alt+${i + 1}`, code: `Digit${i + 1}`, label, group: "상세 창", series: "issue.tab", run: () => !confirming() && (setTab(v), true) });
+	}
+	const count: Partial<Record<Tab, number>> = { chat: chats, changes: t.files };
 
 	return (
 		<div className="flex h-full min-h-0 flex-col">
@@ -149,6 +182,7 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 					{state && <Chip tone={state.tone}>{state.label}</Chip>}
 					<span title={clock(issue.updatedAt)}>{relTime(issue.updatedAt)}</span>
 					<div className="flex-1" />
+					<IssueNav issue={issue} />
 					<IssueMenu issue={issue} />
 					<Button size="icon-sm" variant="ghost" aria-label="닫기" onClick={onClose}>
 						<X />
@@ -160,23 +194,17 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 
 			<Tabs value={tab} onValueChange={(v) => setTab(v as Tab)} className="min-h-0 flex-1 gap-0">
 				<div className="border-b border-border px-6">
+					{/* 대화로도 설계하고 고친다. 단계 탭들 사이에 묻히지 않게 메모 바로 뒤에 둔다(TABS 순서). */}
 					<TabsList variant="line" className="h-9 gap-4 p-0">
-						<TabsTrigger value="note" className="px-0">
-							메모
-						</TabsTrigger>
-						{/* 대화로도 설계하고 고친다. 단계 탭들 사이에 묻히지 않게 메모 바로 뒤에 둔다. */}
-						<TabsTrigger value="chat" className="px-0">
-							대화{chats > 0 && <span className="tabular text-subtle">{chats}</span>}
-						</TabsTrigger>
-						<TabsTrigger value="plan" className="px-0">
-							계획
-						</TabsTrigger>
-						<TabsTrigger value="changes" className="px-0">
-							변경{t.files > 0 && <span className="tabular text-subtle">{t.files}</span>}
-						</TabsTrigger>
-						<TabsTrigger value="history" className="px-0">
-							기록
-						</TabsTrigger>
+						{TABS.map(([v, label]) => (
+							<KeyTip key={v} id={`issue.tab.${v}`}>
+								{/* 툴팁 트리거가 data-state(열림 · 닫힘)를 덮어 써 탭의 선택 표시가 사라지지 않게 탭 것을 직접 준다. */}
+								<TabsTrigger value={v} data-state={tab === v ? "active" : "inactive"} className="px-0" {...keyAnchor(`issue.tab.${v}`)}>
+									{label}
+									{!!count[v] && <span className="tabular text-subtle">{count[v]}</span>}
+								</TabsTrigger>
+							</KeyTip>
+						))}
 					</TabsList>
 				</div>
 				{/* 스크롤 칸 안에 두면 대화가 길어질수록 맨 위까지 올려야 닿는다. 밖에 두어 늘 보이게 한다. */}
@@ -302,24 +330,29 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 	// 계획의 질문에 답한 뒤 Ctrl+Enter 는 다시 계획, Ctrl+Shift+Enter 는 답대로 구현이다.
 	// 질문 칸에서 맨 Enter 는 이미 「다음 질문」이라 보내기 키 설정과 상관없이 Ctrl 조합으로 둔다.
 	const hotkeys = !issue.run && !ask && issue.status === "planned" && questions.length > 0;
-	const latest = useRef({ busy, answered, implementWithAnswers, replanWithAnswers });
-	latest.current = { busy, answered, implementWithAnswers, replanWithAnswers };
-	useEffect(() => {
-		if (!hotkeys) return;
-		const onKey = (e: KeyboardEvent) => {
-			if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey) || e.altKey || e.repeat || e.isComposing || e.defaultPrevented) return;
-			// 메모 편집기 · 제목 칸에서 누른 키는 그 칸의 것이다. 메모를 고치다 계획이 돌면 안 된다. 확인 창이 떠 있을 때도 넘긴다.
-			const t = e.target as HTMLElement | null;
-			if (t?.closest(".cm-editor, input") || document.querySelector('[role="alertdialog"]')) return;
-			const k = latest.current;
-			if (k.busy || !k.answered) return;
-			e.preventDefault();
-			if (e.shiftKey) k.implementWithAnswers();
-			else k.replanWithAnswers();
-		};
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, [hotkeys]);
+	const answerKey = (e: KeyboardEvent) => {
+		if (e.repeat || e.defaultPrevented) return false;
+		// 메모 편집기 · 제목 칸에서 누른 키는 그 칸의 것이다. 메모를 고치다 계획이 돌면 안 된다. 확인 창이 떠 있을 때도 넘긴다.
+		const t = e.target as HTMLElement | null;
+		if (t?.closest(".cm-editor, input") || document.querySelector('[role="alertdialog"]')) return false;
+		return !busy && answered > 0;
+	};
+	useKey({
+		id: "issue.replan",
+		combo: "Mod+Enter",
+		label: "답하고 다시 계획",
+		group: "상세 창",
+		enabled: hotkeys,
+		run: (e) => answerKey(e) && (replanWithAnswers(), true),
+	});
+	useKey({
+		id: "issue.implement",
+		combo: "Mod+Shift+Enter",
+		label: "답대로 구현",
+		group: "상세 창",
+		enabled: hotkeys,
+		run: (e) => answerKey(e) && (implementWithAnswers(), true),
+	});
 
 	const bar = "flex items-center gap-2 border-t border-border px-6 py-3.5";
 
@@ -419,9 +452,16 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 					<Button variant="outline" disabled={busy} onClick={() => setAsk({ kind: "rework", text: "" })}>
 						수정 요청
 					</Button>
-					<Button disabled={busy} onClick={() => void go(() => api.issueComplete(p, id))}>
-						완료
-					</Button>
+					{/* 워크트리에서 돈 구현은 반영해야 본 작업트리에 들어간다. 반영 전에 완료하면 수정이 잊힌다. */}
+					{issue.worktree ? (
+						<Button disabled={busy} title={issue.worktree.path} onClick={() => void go(() => api.issueMerge(p, id))}>
+							반영
+						</Button>
+					) : (
+						<Button disabled={busy} onClick={() => void go(() => api.issueComplete(p, id))}>
+							완료
+						</Button>
+					)}
 				</div>
 			);
 		case "done":
@@ -450,6 +490,42 @@ function RevertButton({ issue, disabled }: { issue: Issue; disabled: boolean }) 
 				되돌리기
 			</Button>
 			<RevertConfirm issue={issue} open={open} onOpenChange={setOpen} />
+		</>
+	);
+}
+
+/**
+ * 창을 닫지 않고 보드의 이전 · 다음 이슈를 연다. 순서는 지금 보드에 보이는 그대로다(걸러 보기 · 정렬 · 완료 숨기기 · 열 순서).
+ * 단추는 늘 같은 자리에 두고, 넘어갈 곳이 없으면(끝 · 보드에 없는 이슈 · 산출물 화면) 흐리게만 한다 — 나타났다 사라지면 옆 단추가 밀린다.
+ * 입력칸 · 편집기 안에서는 받지 않는다. 대화 입력칸에서 이슈가 바뀌면 안 되고, 편집기에서 Alt ↑↓ 는 줄 옮기기다.
+ */
+function IssueNav({ issue }: { issue: Issue }) {
+	const openIssue = useUi((s) => s.openIssue);
+	const prev = useBoardNeighbor(issue.projectId, issue.id, -1);
+	const next = useBoardNeighbor(issue.projectId, issue.id, 1);
+	const go = (id: string | null) => {
+		if (confirming()) return false;
+		if (!id) return;
+		// 메모 단계 이슈는 편집기가 열리며 초점을 가져가, 그대로 두면 다음 Alt ↑↓ 가 편집기의 줄 옮기기가 된다.
+		// 넘겨 보는 중에는 창에 초점을 돌려 이어 누를 수 있게 한다. 편집기는 마운트 뒤 효과에서 초점을 잡으므로 두 프레임 뒤에 본다.
+		const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]');
+		openIssue(id);
+		requestAnimationFrame(() => requestAnimationFrame(() => sheet?.isConnected && sheet.focus()));
+	};
+	useKey({ id: "issue.prev", combo: "Alt+ArrowUp", label: "이전 이슈", group: "상세 창", series: "issue.nav", inInput: "skip", run: () => go(prev) });
+	useKey({ id: "issue.next", combo: "Alt+ArrowDown", label: "다음 이슈", group: "상세 창", series: "issue.nav", inInput: "skip", run: () => go(next) });
+	return (
+		<>
+			<KeyTip id="issue.prev">
+				<Button size="icon-sm" variant="ghost" aria-label="이전 이슈" disabled={!prev} onClick={() => go(prev)} {...keyAnchor("issue.prev")}>
+					<ChevronUp />
+				</Button>
+			</KeyTip>
+			<KeyTip id="issue.next">
+				<Button size="icon-sm" variant="ghost" aria-label="다음 이슈" disabled={!next} onClick={() => go(next)} {...keyAnchor("issue.next")}>
+					<ChevronDown />
+				</Button>
+			</KeyTip>
 		</>
 	);
 }

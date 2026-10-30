@@ -1112,6 +1112,51 @@ pub fn log_issue(app: &AppHandle, pid: &str, iid: &str, text: String) {
 	}
 }
 
+/// 산출물의 자동 관리 기록에 한 줄을 남긴다. 이슈 흐름의 기록(log_issue)과 짝이다.
+fn log_deliverable(app: &AppHandle, pid: &str, did: &str, i: &Issue, verdict: &str, reason: &str) {
+	let e = AutoEntry { at: now_ms(), issue_id: i.id.clone(), number: i.number, verdict: verdict.into(), reason: reason.into(), version: 0 };
+	if let Ok(v) = app.state::<Store>().update_deliverable(pid, did, |d| {
+		d.push_auto(e);
+		Ok(())
+	}) {
+		runner::emit_deliverable(app, &v);
+	}
+}
+
+/// 밀린 변경을 한꺼번에 반영할 때 받는 이슈 수의 상한. 넘으면 요청이 너무 길어진다.
+pub const CATCH_UP_MAX: usize = 10;
+
+/// 「밀린 변경 반영」. 사용자가 고른 이슈들의 변경을 한 요청으로 묶어 새 판을 쓴다.
+/// 판정은 건너뛴다 — 반영할 이슈를 사람이 골랐다. 그래도 고칠 것이 없으면 Claude 가 skip 으로 답한다.
+pub fn catch_up(app: &AppHandle, pid: &str, did: &str, issue_ids: &[String]) -> Result<DeliverableView> {
+	if issue_ids.is_empty() {
+		return Err(Error::Msg("반영할 이슈를 고르세요".into()));
+	}
+	if issue_ids.len() > CATCH_UP_MAX {
+		return Err(Error::Msg(format!("한 번에 {CATCH_UP_MAX}건까지 반영합니다. 나눠서 반영하세요.")));
+	}
+	let store = app.state::<Store>();
+	let d = store.get_deliverable(pid, did)?.deliverable;
+	let last = d.versions.last().cloned().ok_or_else(|| Error::Msg("판이 하나는 있어야 반영합니다".into()))?;
+	let mut issues: Vec<Issue> = issue_ids.iter().map(|id| store.raw_issue(pid, id)).collect::<Result<_>>()?;
+	issues.sort_by_key(|i| i.number);
+	let briefs: Vec<String> = issues.iter().map(change_brief).collect();
+	let lower = last.file.to_lowercase();
+	let text_like = [".md", ".markdown", ".txt"].iter().any(|e| lower.ends_with(e));
+	let hint = if text_like { String::new() } else { store.version_path(pid, did, last.n).map(|p| format!("- 지금 판 파일: {} — 이 파일의 구성과 문구를 바탕으로 고친 새 판을 만든다. 이 파일은 고치지 않는다.\n", p.display())).unwrap_or_default() };
+	let nums: Vec<String> = issues.iter().map(|i| format!("#{}", i.number)).collect();
+	let request = format!(
+		"이슈 {} 의 코드 변경이 이 산출물에 아직 반영되지 않았다. 아래 변경을 모두 반영한 새 판을 낸다.\n\
+		- 고칠 곳은 이 변경들과 관련된 부분으로 한정하고, 나머지는 지금 판의 문구 · 구성을 그대로 둔다.\n\
+		- 변경끼리 어긋나면 번호가 큰(나중) 이슈를 따른다.\n\
+		- 반영할 것이 하나도 없으면 skip 을 true 로 하고 reason 에 까닭을 적는다. 이때 새 판을 만들지 않는다.\n\
+		{hint}\n{}",
+		nums.join(" "),
+		briefs.join("\n")
+	);
+	runner::document_job(app, pid, Some(did.to_string()), request, "", issues.iter().map(|i| i.id.clone()).collect())
+}
+
 async fn auto_update(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 	let store = app.state::<Store>();
 	let issue = store.raw_issue(pid, iid)?;
@@ -1124,16 +1169,30 @@ async fn auto_update(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 	if all.is_empty() {
 		return Ok(());
 	}
-	let (busy, mut cands): (Vec<Deliverable>, Vec<Deliverable>) = all.into_iter().partition(|d| d.job.is_some());
+	let (busy, cands): (Vec<Deliverable>, Vec<Deliverable>) = all.into_iter().partition(|d| d.job.is_some());
 	for d in &busy {
 		log_issue(app, pid, iid, format!("{} · 건너뜀 · 이미 작성 중", d.title));
+		log_deliverable(app, pid, &d.id, &issue, "busy", "이미 작성 중");
 	}
 	if cands.is_empty() {
 		return Ok(());
 	}
+	// 판정이 실패하면 후보 모두에 실패로 남긴다. 남기지 않으면 기록에는 아무 일도 없던 것처럼 보인다.
+	let ids: Vec<String> = cands.iter().map(|d| d.id.clone()).collect();
+	let res = judge_and_write(app, pid, iid, &issue, cands).await;
+	if let Err(e) = &res {
+		for did in &ids {
+			log_deliverable(app, pid, did, &issue, "failed", &format!("판정 실패 · {e}"));
+		}
+	}
+	res
+}
+
+async fn judge_and_write(app: &AppHandle, pid: &str, iid: &str, issue: &Issue, mut cands: Vec<Deliverable>) -> Result<()> {
+	let store = app.state::<Store>();
 	let settings = store.settings()?;
 	let exe = runner::resolve_claude(&settings.claude_path).ok_or_else(|| Error::Msg("claude 실행 파일을 찾지 못했습니다".into()))?;
-	let brief = change_brief(&issue);
+	let brief = change_brief(issue);
 	let (a, p, list) = (app.clone(), pid.to_string(), cands.clone());
 	let mut descs = tokio::task::spawn_blocking(move || describe(&a, &p, &list)).await.map_err(|e| Error::Msg(e.to_string()))?;
 
@@ -1160,15 +1219,18 @@ async fn auto_update(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 			Some((d.clone(), it.get("reason").and_then(|x| x.as_str()).unwrap_or("").trim().to_string()))
 		})
 		.collect();
-	let rest: Vec<&str> = cands.iter().filter(|d| !chosen.iter().any(|(c, _)| c.id == d.id)).map(|d| d.title.as_str()).collect();
+	let rest: Vec<&Deliverable> = cands.iter().filter(|d| !chosen.iter().any(|(c, _)| c.id == d.id)).collect();
 	let mut line = String::from("판정");
 	if !chosen.is_empty() {
 		line.push_str(&format!(" · 고칠 산출물: {}", chosen.iter().map(|(d, _)| d.title.as_str()).collect::<Vec<_>>().join(", ")));
 	}
 	if !rest.is_empty() {
-		line.push_str(&format!(" · 관계없음: {}", rest.join(", ")));
+		line.push_str(&format!(" · 관계없음: {}", rest.iter().map(|d| d.title.as_str()).collect::<Vec<_>>().join(", ")));
 	}
 	log_issue(app, pid, iid, line);
+	for d in &rest {
+		log_deliverable(app, pid, &d.id, issue, "unrelated", "");
+	}
 
 	for (d, reason) in chosen {
 		// 글 판이 아니면(docx · hwpx …) 본문을 프롬프트에 실을 수 없어 파일 경로를 준다.
@@ -1176,8 +1238,9 @@ async fn auto_update(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 		let lower = last.file.to_lowercase();
 		let text_like = [".md", ".markdown", ".txt"].iter().any(|e| lower.ends_with(e));
 		let hint = if text_like { None } else { store.version_path(pid, &d.id, last.n).ok().map(|p| p.to_string_lossy().to_string()) };
-		if let Err(e) = runner::document_from(app, pid, Some(d.id.clone()), auto_request(&issue, &reason, &brief, hint), iid) {
+		if let Err(e) = runner::document_from(app, pid, Some(d.id.clone()), auto_request(issue, &reason, &brief, hint), iid) {
 			log_issue(app, pid, iid, format!("{} · 실패 · {e}", d.title));
+			log_deliverable(app, pid, &d.id, issue, "failed", &e.to_string());
 		}
 	}
 	Ok(())

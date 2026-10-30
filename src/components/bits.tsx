@@ -4,7 +4,7 @@ import type { Tone } from "@/lib/status";
 
 const TONE: Record<Tone, string> = {
 	brand: "bg-brand/12 text-brand-text border-brand/45",
-	run: "bg-secondary text-foreground border-border-strong",
+	run: "bg-run/12 text-run-text border-run/40",
 	danger: "bg-danger/12 text-danger border-danger/25",
 	ok: "bg-secondary text-muted-foreground border-border",
 	muted: "bg-secondary text-muted-foreground border-border",
@@ -20,7 +20,7 @@ export function Chip({ tone = "muted", children, className }: { tone?: Tone; chi
 }
 
 export function RunDot({ className }: { className?: string }) {
-	return <span aria-hidden className={cn("run-dot inline-block size-1.5 rounded-full bg-foreground", className)} />;
+	return <span aria-hidden className={cn("run-dot inline-block size-1.5 rounded-full bg-run", className)} />;
 }
 
 /** 칸 이름. 본문보다 작고 옅게, 그러나 자리를 잡을 만큼은 굵게. */

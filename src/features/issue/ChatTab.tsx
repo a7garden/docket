@@ -1,7 +1,7 @@
-import { type ClipboardEvent, type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
+import { type ClipboardEvent, type KeyboardEvent, memo, type RefObject, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, ChevronRight, Clock, Copy, History, Image as ImageIcon, ImagePlus, SquareTerminal, StickyNote, X } from "lucide-react";
+import { ArrowDown, Check, ChevronRight, Clock, Copy, History, Image as ImageIcon, ImagePlus, SquareTerminal, StickyNote, X } from "lucide-react";
 import { toast } from "sonner";
 import { copy } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
@@ -53,25 +53,96 @@ export function useTranscript(issue: Issue) {
 	});
 }
 
+/** 입력칸과 대화 목록은 형제라 서로를 모른다. 보낸 질문이 그 대화를 맨 아래로 데려가도록 이슈 id 로 잇는다. */
+const toBottom = new Map<string, () => void>();
+
+/** 질문을 보낸 사람은 답을 보려는 것이다. 위를 읽던 중이어도 맨 아래로 데려간다. 대기열이 저절로 나갈 때는 부르지 않는다. */
+function scrollChatToBottom(issueId: string) {
+	toBottom.get(issueId)?.();
+}
+
+/**
+ * 대화 칸이 바닥에 붙어 있는지를 한 곳에서 정한다. 들어오면 붙은 채로 시작하고, 위로 올리면 떨어지며, 바닥 가까이 내리면 다시 붙는다.
+ * 붙어 있으면 내용 높이가 바뀔 때마다 내린다. 지난 기록 · 세션 기록 · 그림은 처음 그린 뒤에 읽혀 높이가 자란다 —
+ * 처음 한 번만 내리면 대화를 열었을 때 중간에서 멈춘다.
+ */
+function useStickToBottom(box: RefObject<HTMLDivElement | null>, issueId: string) {
+	const stick = useRef(true);
+	const [away, setAway] = useState(false);
+	const go = useRef<() => void>(() => {});
+
+	useLayoutEffect(() => {
+		const inner = box.current;
+		const el = inner?.closest("[data-scroll]") as HTMLElement | null;
+		if (!inner || !el) return;
+		// 부드럽게 내리는 동안의 중간 위치를 「올렸다」로 읽지 않는다. 사용자가 휠을 올리면 그만둔다.
+		let gliding = false;
+		const pin = () => {
+			if (stick.current) el.scrollTop = el.scrollHeight;
+		};
+		const onScroll = () => {
+			const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+			if (gliding && !near) return;
+			gliding = false;
+			stick.current = near;
+			setAway(!near);
+		};
+		const onWheel = (e: WheelEvent) => {
+			if (e.deltaY < 0) gliding = false;
+		};
+		const onEnd = () => {
+			gliding = false;
+			onScroll();
+		};
+		go.current = () => {
+			stick.current = true;
+			gliding = true;
+			setAway(false);
+			el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+		};
+		pin();
+		// 대화 목록이 자라거나, 입력칸 · 첨부가 커져 스크롤 칸이 줄어도 붙어 있던 자리를 지킨다.
+		const ro = new ResizeObserver(pin);
+		ro.observe(inner);
+		ro.observe(el);
+		el.addEventListener("scroll", onScroll);
+		el.addEventListener("scrollend", onEnd);
+		el.addEventListener("wheel", onWheel, { passive: true });
+		return () => {
+			ro.disconnect();
+			el.removeEventListener("scroll", onScroll);
+			el.removeEventListener("scrollend", onEnd);
+			el.removeEventListener("wheel", onWheel);
+		};
+	}, [box]);
+
+	useLayoutEffect(() => {
+		const fn = () => go.current();
+		toBottom.set(issueId, fn);
+		return () => {
+			if (toBottom.get(issueId) === fn) toBottom.delete(issueId);
+		};
+	}, [issueId]);
+
+	return { away, toBottom: () => go.current() };
+}
+
 /**
  * 이슈의 Claude 세션을 대화로 보여 준다. 계획 · 구현도 같은 세션의 한 차례라 함께 늘어놓고, 접어 둔다.
  * 질문은 그 세션을 이어(--resume) 보내므로 Claude 가 지금까지 읽고 고친 것을 기억한 채 답한다.
  * 세션 막대(SessionBar)는 여기서 그리지 않는다. 상세 창이 스크롤 칸 밖에 둔다.
+ * 초안은 상위가 들고 있어 글자마다 상위가 다시 그려진다. memo 로 감싸 그때 대화 기록까지 다시 그리지 않는다.
  */
-export function ChatTab({ issue, projectPath }: { issue: Issue; projectPath: string }) {
+export const ChatTab = memo(function ChatTab({ issue, projectPath }: { issue: Issue; projectPath: string }) {
 	const box = useRef<HTMLDivElement>(null);
-	// 질문을 보내면 맨 아래로 내린다. 답이 흘러나오는 동안은 RunLog 가 따라 내려간다.
+	// 따라 내려갈지는 대화 칸이 정한다. 안의 RunLog 는 follow 를 꺼 스스로 내리지 않는다.
+	const { away, toBottom } = useStickToBottom(box, issue.id);
 	// 터미널에서 이어 간 차례는 세션 기록에만 있다. 터미널에서 돌아와 창에 초점이 오면 다시 읽는다.
 	const { data: turns = [] } = useTranscript(issue);
 	const items: ({ at: number; run: RunRecord } | { at: number; turn: Turn })[] = [
 		...issue.runs.map((run) => ({ at: run.startedAt, run })),
 		...turns.map((turn) => ({ at: turn.at, turn })),
 	].sort((a, b) => a.at - b.at);
-
-	useLayoutEffect(() => {
-		const el = box.current?.closest("[data-scroll]") as HTMLElement | null;
-		if (el) el.scrollTop = el.scrollHeight;
-	}, [items.length]);
 
 	return (
 		<div ref={box} className="flex flex-col gap-5">
@@ -95,9 +166,26 @@ export function ChatTab({ issue, projectPath }: { issue: Issue; projectPath: str
 					<StepTurn key={x.run.id} issue={issue} root={projectPath} run={x.run} />
 				),
 			)}
+			{/* 위로 올라가 있는 동안 늘 띄운다. 칸 바닥에 붙는 높이 0 의 줄이라 상위 화면을 고치지 않고 두 화면에 함께 생긴다. -mt-5 로 목록의 gap 을 지운다. */}
+			<div className="pointer-events-none sticky bottom-0 -mt-5 h-0">
+				<Button
+					size="icon-sm"
+					variant="outline"
+					aria-label="맨 아래로"
+					title="맨 아래로"
+					tabIndex={away ? 0 : -1}
+					onClick={toBottom}
+					className={cn(
+						"absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-popover/90 shadow-md backdrop-blur transition-[opacity,translate] duration-150",
+						away ? "pointer-events-auto opacity-100" : "translate-y-1.5 opacity-0",
+					)}
+				>
+					<ArrowDown />
+				</Button>
+			</div>
 		</div>
 	);
-}
+});
 
 function Bubble({ text, from, issue, images = [] }: { text: string; from?: string; issue?: Issue; images?: string[] }) {
 	return (
@@ -150,7 +238,7 @@ function TerminalTurn({ issue, root, turn }: { issue: Issue; root: string; turn:
 		<div className="flex flex-col gap-2">
 			<Bubble text={turn.prompt} from={`터미널 · ${clock(turn.at)}`} />
 			<div className="pl-1">
-				<RunLog events={turn.events} base={issue.dir} root={root} />
+				<RunLog events={turn.events} base={issue.dir} root={root} follow={false} />
 			</div>
 		</div>
 	);
@@ -266,7 +354,7 @@ function ChatTurn({ issue, root, run, memos }: { issue: Issue; root: string; run
 		<div className="flex flex-col gap-2">
 			<Bubble text={run.prompt} issue={issue} images={run.images} />
 			<div className="pl-1">
-				<RunEvents projectId={issue.projectId} target="issue" targetId={issue.id} runId={run.id} live={live} base={issue.dir} root={root} />
+				<RunEvents projectId={issue.projectId} target="issue" targetId={issue.id} runId={run.id} live={live} base={issue.dir} root={root} follow={false} />
 				{/* Claude 가 결과를 내기 전에 죽으면 기록에 끝 줄이 없다. 그때 남은 오류를 여기 보인다. */}
 				{run.status === "error" && run.error && !run.numTurns && (
 					<div className="mt-1 text-[12px] whitespace-pre-wrap text-danger/90 selectable">{run.error}</div>
@@ -328,7 +416,7 @@ function StepTurn({ issue, root, run }: { issue: Issue; root: string; run: RunRe
 			</button>
 			{open && (
 				<div className="pt-1 pl-5.5">
-					<RunEvents projectId={issue.projectId} target="issue" targetId={issue.id} runId={run.id} live={live} base={issue.dir} root={root} />
+					<RunEvents projectId={issue.projectId} target="issue" targetId={issue.id} runId={run.id} live={live} base={issue.dir} root={root} follow={false} />
 				</div>
 			)}
 		</div>
@@ -421,6 +509,7 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 		void go(async () => {
 			await api.issueChat(p, id, draft.text, draft.edit, draft.images);
 			onDraft({ ...draft, text: "", images: [] });
+			scrollChatToBottom(id);
 		});
 	};
 	// 대기 중인 질문을 입력칸으로 되돌린다. 적던 글이 있으면 그 뒤에 잇는다.
@@ -515,7 +604,17 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 				)}
 				{/* 중지했거나 앱을 다시 켜서 남은 대기열. 저절로 보내지 않고 사용자가 이어 보낸다. */}
 				{!running && waiting > 0 && (
-					<Button variant="outline" disabled={busy} title="대기 중인 질문을 한 차례로 묶어 보냅니다" onClick={() => void go(() => api.issueQueueSend(p, id))}>
+					<Button
+						variant="outline"
+						disabled={busy}
+						title="대기 중인 질문을 한 차례로 묶어 보냅니다"
+						onClick={() =>
+							void go(async () => {
+								await api.issueQueueSend(p, id);
+								scrollChatToBottom(id);
+							})
+						}
+					>
 						대기 {waiting}건 보내기
 					</Button>
 				)}

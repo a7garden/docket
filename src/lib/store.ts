@@ -9,13 +9,17 @@ interface Ui {
 	view: View;
 	issueId: string | null;
 	deliverableId: string | null;
+	/** 산출물을 열 때 먼저 보일 탭. 상세 창이 읽고 비운다. 실행 목록에서 작성법 뽑기를 누르면 「만드는 법」으로 연다. */
+	deliverableTab: "versions" | "recipe" | "auto" | null;
 	/** 대화 화면에서 연 대화. 아직 만들지 않은 새 대화면 화면이 정한 id 다. */
 	talkId: string | null;
 	/** Claude 설정에서 보는 프로젝트. null 이면 전역. 사이드바의 현재 프로젝트와 따로 움직인다 — 설정을 둘러보고 보드로 돌아와도 보던 프로젝트가 그대로 있게. */
 	claudeProjectId: string | null;
 	/** 설정 창을 연 프로젝트. 창은 프로젝트 머리에 있지만 사이드바 우클릭에서도 연다. */
 	editingProjectId: string | null;
-	setProject: (id: string | null) => void;
+	/** 설정 화면을 열 때 스크롤해 갈 구획 id. 설정 화면이 그려진 뒤 읽고 비운다 — 화면이 아직 없을 때는 옮길 자리가 없다. */
+	settingsSection: string | null;
+	setProject:(id: string | null) => void;
 	setView: (v: View) => void;
 	setClaudeProject: (id: string | null) => void;
 	/** 그 프로젝트(null 이면 전역)를 고른 채 Claude 설정을 연다. */
@@ -26,6 +30,8 @@ interface Ui {
 	/** 다른 프로젝트 · 화면에 있어도 그 이슈 · 대화 · 산출물을 연다. 실행 목록 · 알림 · 알림함이 함께 쓴다. */
 	openTarget: (t: Target) => void;
 	editProject: (id: string | null) => void;
+	/** 설정 화면을 열고 그 구획으로 간다. */
+	openSettings: (section: string | null) => void;
 }
 
 export interface Target {
@@ -34,6 +40,8 @@ export interface Target {
 	id: string;
 	/** 프로젝트 대화. 보드가 아니라 대화 화면으로 간다. */
 	talk?: boolean;
+	/** 산출물이면 먼저 보일 탭 */
+	tab?: "versions" | "recipe" | "auto";
 }
 
 // 마지막으로 본 프로젝트와 화면(Claude 설정의 범위 포함)만 기억한다. 열어 둔 이슈까지 되살리면 시작할 때 엉뚱한 창이 뜬다.
@@ -44,9 +52,11 @@ export const useUi = create<Ui>()(
 			view: "board",
 			issueId: null,
 			deliverableId: null,
+			deliverableTab: null,
 			talkId: null,
 			claudeProjectId: null,
 			editingProjectId: null,
+			settingsSection: null,
 			setProject: (projectId) => set({ projectId, issueId: null, deliverableId: null, talkId: null }),
 			setView: (view) => set({ view }),
 			setClaudeProject: (claudeProjectId) => set({ claudeProjectId }),
@@ -54,15 +64,16 @@ export const useUi = create<Ui>()(
 			openIssue: (issueId) => set({ issueId }),
 			openDeliverable: (deliverableId) => set({ deliverableId }),
 			openTalk: (talkId) => set({ talkId }),
-			openTarget: ({ projectId, target, id, talk }) =>
+			openTarget: ({ projectId, target, id, talk, tab }) =>
 				set((s): Partial<Ui> => {
 					const base = s.projectId === projectId ? {} : { projectId, issueId: null, deliverableId: null, talkId: null };
 					if (talk) return { ...base, view: "talks", talkId: id };
-					if (target === "deliverable") return { ...base, view: "deliverables", deliverableId: id };
+					if (target === "deliverable") return { ...base, view: "deliverables", deliverableId: id, deliverableTab: tab ?? null };
 					// 이슈 창은 산출물 화면 위에도 뜬다. 보드 · 산출물 밖에 있을 때만 보드로 옮긴다.
 					return { ...base, view: s.view === "board" || s.view === "deliverables" ? s.view : "board", issueId: id };
 				}),
 			editProject: (editingProjectId) => set({ editingProjectId }),
+			openSettings: (settingsSection) => set({ view: "settings", settingsSection }),
 		}),
 		{ name: "docket-ui", partialize: (s) => ({ projectId: s.projectId, view: s.view, claudeProjectId: s.claudeProjectId }) },
 	),
@@ -101,18 +112,27 @@ export function toolLabel(name: string) {
 	return TOOL_LABEL[name] ?? name;
 }
 
+/**
+ * 실행 사건을 담는 칸의 열쇠. 작성법 뽑기는 같은 산출물의 작성과 함께 돌 수 있어 칸을 따로 둔다.
+ * 한 칸에는 실행 하나만 들어가서, 같은 id 로 두면 두 실행이 서로 덮는다.
+ */
+export function liveKey(target: RunEnvelope["target"], id: string) {
+	return target === "learn" ? `learn:${id}` : id;
+}
+
 /** 실행 중 사건은 화면에만 둔다. 지난 실행은 저장된 기록에서 다시 펼친다. */
 export const useLive = create<Live>()((set) => ({
 	byTarget: {},
 	push: (env) =>
 		set((s) => {
-			const prev = s.byTarget[env.targetId];
+			const k = liveKey(env.target, env.targetId);
+			const prev = s.byTarget[k];
 			const cur: LiveRun = prev && prev.runId === env.runId ? prev : { runId: env.runId, events: [], activity: "" };
 			const ev = env.event;
 			let activity = cur.activity;
 			if (ev.t === "tool") activity = [toolLabel(ev.name), ev.summary].filter(Boolean).join("  ");
 			else if (ev.t === "text") activity = ev.text.split("\n")[0].slice(0, 120);
 			const events = cur.events.length > 800 ? cur.events.slice(-600) : cur.events;
-			return { byTarget: { ...s.byTarget, [env.targetId]: { runId: env.runId, events: [...events, ev], activity } } };
+			return { byTarget: { ...s.byTarget, [k]: { runId: env.runId, events: [...events, ev], activity } } };
 		}),
 }));

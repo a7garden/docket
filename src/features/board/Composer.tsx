@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ImagePlus, StickyNote, X } from "lucide-react";
 import { toast } from "sonner";
@@ -9,6 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
 import { attachmentRef, delayText, fileUrl, isImage, joinPath, newId } from "@/lib/format";
+import { useKey } from "@/lib/keys";
 import { useAppInfo, useSettings } from "@/lib/queries";
 import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -34,17 +35,16 @@ export function Composer({ project }: { project: Project }) {
 
 	const draftDir = info ? joinPath(info.dataRoot, "projects", project.id, "issues", draftId) : "";
 
-	useEffect(() => {
-		const onKey = (e: KeyboardEvent) => {
-			if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
-				e.preventDefault();
-				setOpen(true);
-				setTimeout(() => editor.current?.focus(), 30);
-			}
-		};
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, []);
+	useKey({
+		id: "board.compose",
+		combo: "Mod+N",
+		label: "메모 붙이기",
+		group: "보드",
+		run: () => {
+			setOpen(true);
+			setTimeout(() => editor.current?.focus(), 30);
+		},
+	});
 
 	const addFiles = async (paths: string[]) => {
 		try {

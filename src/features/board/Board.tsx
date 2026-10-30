@@ -1,16 +1,22 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowDownUp, CalendarDays, Check, Eye, EyeOff, Search, X } from "lucide-react";
+import { Archive, ArrowDownUp, CalendarDays, Check, Eye, EyeOff, Search, Trash2, X } from "lucide-react";
+import type { ActionList } from "@/components/ActionMenu";
 import { Empty, RunDot } from "@/components/bits";
+import { SelectionBar } from "@/components/SelectionBar";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Kbd } from "@/components/ui/kbd";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useKey } from "@/lib/keys";
 import { useIssues, useSettings } from "@/lib/queries";
 import { needsDecision, STAGES, stageOf, type Stage } from "@/lib/status";
+import { useUi } from "@/lib/store";
 import type { Issue, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useBoardFocus, useBoardKeys, usePublishBoardOrder } from "./boardFocus";
 import { Composer } from "./Composer";
 import { IssueCard, type Hit } from "./IssueCard";
+import { BulkDeleteConfirm, deletable, dropMany, droppable, useBoardSelection } from "./Selection";
 
 /* ---------- 정렬 ---------- */
 
@@ -184,7 +190,7 @@ export function Board({ project }: { project: Project }) {
 	const withDropped = view.showDropped || ws.length > 0;
 	const bounds = useMemo(() => rangeBounds(view), [view]);
 	const filtering = view.filter !== "all" || ws.length > 0 || !!bounds;
-	const stages = hideDone ? STAGES.filter((s) => s.id !== "done") : STAGES;
+	const stages = useMemo(() => (hideDone ? STAGES.filter((s) => s.id !== "done") : STAGES), [hideDone]);
 
 	const hits = useMemo(() => {
 		const m = new Map<string, Hit>();
@@ -220,6 +226,50 @@ export function Board({ project }: { project: Project }) {
 		return t;
 	}, [issues]);
 
+	// 열마다 그릴 카드. 메모 열에는 보류한 것을 뒤에 붙인다. 방향키 이동도 이 순서를 그대로 따른다.
+	const columns = useMemo(
+		() => stages.map((s) => (s.id === "memo" && withDropped ? [...groups.memo, ...groups.dropped] : groups[s.id])),
+		[stages, groups, withDropped],
+	);
+	const ids = useMemo(() => columns.map((c) => c.map((i) => i.id)), [columns]);
+	const { active, focusFirst, gridProps } = useBoardFocus(ids);
+	usePublishBoardOrder(project.id, ids);
+	useBoardKeys();
+
+	// 여러 개 고르기. Shift 범위도 화면에 그린 순서(열 왼쪽부터, 열 안은 위부터)로 자른다.
+	const order = useMemo(() => columns.flat(), [columns]);
+	const sel = useBoardSelection(order);
+	const [confirmDelete, setConfirmDelete] = useState(false);
+	const sheetOpen = useUi((s) => !!s.issueId);
+	const canDrop = sel.issues.some(droppable);
+	const canDelete = sel.issues.some(deletable);
+	const drop = () => void dropMany(sel.issues).then(sel.clear);
+	const bulk: ActionList = [
+		{ label: `고른 ${sel.count}개 보류`, icon: <Archive />, disabled: !canDrop, onSelect: drop },
+		{ label: `고른 ${sel.count}개 지우기`, icon: <Trash2 />, destructive: true, disabled: !canDelete, onSelect: () => setConfirmDelete(true) },
+	];
+	// 창 · 메뉴가 떠 있으면 키는 그쪽 것이다. Esc 로 메뉴를 닫았는데 고른 것까지 풀리면 다시 골라야 한다.
+	const overlay = () => !!document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]');
+	useKey({
+		id: "board.selectAll",
+		combo: "Mod+A",
+		code: "KeyA",
+		label: "카드 모두 고르기",
+		group: "보드",
+		inInput: "skip",
+		enabled: !sheetOpen && order.length > 0,
+		run: () => (overlay() ? false : sel.all()),
+	});
+	useKey({
+		id: "board.clearSelection",
+		combo: "Escape",
+		label: "고른 카드 풀기",
+		group: "보드",
+		inInput: "skip",
+		enabled: !sheetOpen && sel.count > 0,
+		run: () => (overlay() ? false : sel.clear()),
+	});
+
 	const shown = stages.reduce((n, s) => n + groups[s.id].length, 0) + (withDropped ? groups.dropped.length : 0);
 	const all = issues.length - (withDropped ? 0 : totals.dropped) - (hideDone ? totals.done : 0);
 	const reset = () => set({ query: "", filter: "all", range: "all", from: "", to: "" });
@@ -237,7 +287,20 @@ export function Board({ project }: { project: Project }) {
 					hideDone={hideDone}
 					doneCount={hideDone ? totals.done : 0}
 					onHideDone={setHideDone}
+					onDown={focusFirst}
 				/>
+			)}
+			{sel.count > 0 && (
+				<SelectionBar count={sel.count} total={order.length} onAll={sel.all} onClear={sel.clear}>
+					<Button size="xs" variant="ghost" disabled={!canDrop} onClick={drop}>
+						<Archive />
+						보류
+					</Button>
+					<Button size="xs" variant="destructive" disabled={!canDelete} onClick={() => setConfirmDelete(true)}>
+						<Trash2 />
+						지우기
+					</Button>
+				</SelectionBar>
 			)}
 			{filtering && shown === 0 ? (
 				<div className="flex flex-1 flex-col items-center justify-center gap-3 pb-16 text-center">
@@ -254,10 +317,10 @@ export function Board({ project }: { project: Project }) {
 					</Button>
 				</div>
 			) : (
-				<div className={cn("grid min-h-0 flex-1 gap-3", hideDone ? "grid-cols-3" : "grid-cols-4")}>
-					{stages.map((s) => {
+				<div {...gridProps} className={cn("grid min-h-0 flex-1 gap-3", hideDone ? "grid-cols-3" : "grid-cols-4")}>
+					{stages.map((s, n) => {
 						const memoCol = s.id === "memo";
-						const items = memoCol && withDropped ? [...groups.memo, ...groups.dropped] : groups[s.id];
+						const items = columns[n];
 						return (
 							<Column
 								key={s.id}
@@ -275,7 +338,19 @@ export function Board({ project }: { project: Project }) {
 								}
 							>
 								{items.map((i) => (
-									<IssueCard key={i.id} issue={i} delaySec={delay} words={ws} hit={hits.get(i.id)} />
+									<IssueCard
+										key={i.id}
+										issue={i}
+										delaySec={delay}
+										words={ws}
+										hit={hits.get(i.id)}
+										tabbable={i.id === active}
+										selected={sel.has(i.id)}
+										onPick={(e) => sel.toggle(i.id, e)}
+										onOpen={sel.count > 0 ? sel.clear : undefined}
+										// 하나만 골랐으면 그 카드의 메뉴에 이미 보류 · 지우기가 있다.
+										bulk={sel.count > 1 && sel.has(i.id) ? bulk : undefined}
+									/>
 								))}
 								{filtering && items.length === 0 && <div className="rounded-xl border border-dashed border-border px-3 py-5 text-center text-[12.5px] text-subtle">없음</div>}
 								{memoCol && !isLoading && issues.length === 0 && (
@@ -288,6 +363,8 @@ export function Board({ project }: { project: Project }) {
 					})}
 				</div>
 			)}
+			{/* 확인 창은 카드 밖에 둔다. 카드 안에 두면 창의 단추를 누른 것이 카드의 onClick 까지 올라간다. */}
+			<BulkDeleteConfirm issues={sel.issues} open={confirmDelete} onOpenChange={setConfirmDelete} onDone={sel.clear} />
 		</div>
 	);
 }
@@ -301,6 +378,7 @@ function FilterBar({
 	hideDone,
 	doneCount,
 	onHideDone,
+	onDown,
 }: {
 	view: View;
 	onChange: (patch: Partial<View>) => void;
@@ -310,19 +388,20 @@ function FilterBar({
 	hideDone: boolean;
 	doneCount: number;
 	onHideDone: (on: boolean) => void;
+	/** 검색칸에서 ↓. 카드가 없으면 false. */
+	onDown: () => boolean;
 }) {
 	const input = useRef<HTMLInputElement>(null);
-	useEffect(() => {
-		const onKey = (e: KeyboardEvent) => {
-			if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
-				e.preventDefault();
-				input.current?.focus();
-				input.current?.select();
-			}
-		};
-		window.addEventListener("keydown", onKey);
-		return () => window.removeEventListener("keydown", onKey);
-	}, []);
+	useKey({
+		id: "board.search",
+		combo: "Mod+F",
+		label: "메모 찾기",
+		group: "보드",
+		run: () => {
+			input.current?.focus();
+			input.current?.select();
+		},
+	});
 	const sort = SORTS.find((s) => s.id === view.sort)!;
 
 	return (
@@ -334,6 +413,11 @@ function FilterBar({
 					value={view.query}
 					onChange={(e) => onChange({ query: e.target.value })}
 					onKeyDown={(e) => {
+						// 찾은 뒤 ↓ 로 바로 첫 카드에 간다. 마우스로 옮기지 않고 걸러 보고 열 수 있다.
+						if (e.key === "ArrowDown" && !e.nativeEvent.isComposing && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+							if (onDown()) e.preventDefault();
+							return;
+						}
 						// 처음 누르면 지우고, 빈 칸에서 한 번 더 누르면 보드로 초점을 돌려준다.
 						if (e.key !== "Escape") return;
 						if (view.query) onChange({ query: "" });

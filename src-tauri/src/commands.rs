@@ -68,6 +68,12 @@ pub async fn app_info(app: AppHandle) -> Result<AppInfo> {
 	})
 }
 
+/// 산출물을 파일로 만들 때 쓰는 도구(Python 패키지 · LibreOffice · Office · Node · 한컴)가 있는지 본다. 설정 화면의 「점검」이 부른다.
+#[tauri::command]
+pub async fn doc_tools_check(app: AppHandle) -> serde_json::Value {
+	runner::doc_tools_check(&app).await
+}
+
 /// 마지막으로 받은 구독 사용률. 한 번도 받지 않았으면(API 키로 쓰는 경우 등) 없다.
 #[tauri::command]
 pub fn usage_get() -> Option<usage::Usage> {
@@ -87,7 +93,9 @@ pub fn settings_get(store: State<Store>) -> Result<Settings> {
 
 #[tauri::command]
 pub fn settings_save(store: State<Store>, settings: Settings) -> Result<Settings> {
-	store.save_settings(&settings)
+	let saved = store.save_settings(&settings)?;
+	runner::note_settings(&saved);
+	Ok(saved)
 }
 
 #[tauri::command]
@@ -143,10 +151,15 @@ pub fn project_add(store: State<Store>, path: String) -> Result<Project> {
 	store.add_project(&path)
 }
 
+#[tauri::command]
+pub fn project_save(store: State<Store>, project: Project) -> Result<Project> {
+	store.save_project(&project)
+}
+
 /// 산출물 폴더를 바꾸면 그 폴더의 그림을 화면에 띄울 수 있게 asset 범위에 연다.
 #[tauri::command]
-pub fn project_save(app: AppHandle, project: Project) -> Result<Project> {
-	let p = app.state::<Store>().save_project(&project)?;
+pub fn deliverable_settings_save(app: AppHandle, project_id: String, settings: DeliverableSettings) -> Result<Project> {
+	let p = app.state::<Store>().save_deliverable_settings(&project_id, &settings)?;
 	if !p.deliverables_dir.is_empty() {
 		let _ = app.asset_protocol_scope().allow_directory(&p.deliverables_dir, true);
 	}
@@ -215,6 +228,7 @@ pub fn issue_create(app: AppHandle, project_id: String, issue_id: Option<String>
 }
 
 /// 제목을 손으로 고친다. 고친 제목은 메모를 바꿔도 덮지 않는다. 비우면 다시 제목 모델에 맡긴다(모델을 껐으면 첫 줄).
+/// 프로젝트 대화는 메모가 없어 첫 질문이 첫 줄 노릇을 한다. 비우면 제목 짓기 순회가 첫 문답으로 다시 짓는다.
 #[tauri::command]
 pub fn issue_set_title(app: AppHandle, project_id: String, issue_id: String, title: String) -> Result<IssueView> {
 	let store = app.state::<Store>();
@@ -222,11 +236,9 @@ pub fn issue_set_title(app: AppHandle, project_id: String, issue_id: String, tit
 	let mode = runner::new_title_mode(&store.settings()?);
 	let title: String = title.trim().chars().take(80).collect();
 	change(&app, &project_id, &issue_id, |i| {
-		if i.talk {
-			return msg("대화에는 제목을 달지 않습니다");
-		}
 		if title.is_empty() {
-			i.title = title_of(&note);
+			let first = i.runs.first().map(|r| r.prompt.clone()).unwrap_or_default();
+			i.title = title_of(if i.talk { &first } else { &note });
 			i.title_mode = mode;
 			i.titled_at = 0;
 		} else {
@@ -321,6 +333,12 @@ pub fn issue_revert(app: AppHandle, project_id: String, issue_id: String) -> Res
 	runner::revert(&app, &project_id, &issue_id)
 }
 
+/// 워크트리에서 끝난 구현을 본 작업트리에 반영한다. 파일을 합치느라 git 을 여러 번 부르므로 async 로 둔다.
+#[tauri::command]
+pub async fn issue_merge(app: AppHandle, project_id: String, issue_id: String) -> Result<IssueView> {
+	runner::merge(&app, &project_id, &issue_id).await
+}
+
 #[tauri::command]
 pub fn issue_chat(app: AppHandle, project_id: String, issue_id: String, text: String, edit: bool, images: Option<Vec<String>>) -> Result<IssueView> {
 	runner::chat(&app, &project_id, &issue_id, text, edit, images.unwrap_or_default())
@@ -377,8 +395,10 @@ pub async fn issue_open_terminal(app: AppHandle, project_id: String, issue_id: S
 	let plugin = plugin_host::terminal(&store.root, &settings)?;
 	let title = format!("#{} {}", v.issue.number, v.issue.title);
 	let session = v.issue.session_id;
+	// claude 는 실행 폴더의 자리에서 세션을 찾는다. 워크트리에서 도는 이슈는 그 폴더에서 연다.
+	let cwd = v.issue.worktree.map_or(project.path, |w| w.path);
 	tauri::async_runtime::spawn_blocking(move || {
-		runner::open_terminal(&exe, Path::new(&project.path), &session, plugin.as_ref().map(|(n, t, e)| (n.as_str(), t, e.as_path())), &title)
+		runner::open_terminal(&exe, Path::new(&cwd), &session, plugin.as_ref().map(|(n, t, e)| (n.as_str(), t, e.as_path())), &title)
 	})
 	.await
 	.map_err(|e| Error::Msg(e.to_string()))?
@@ -392,12 +412,6 @@ pub fn plugins_list(store: State<Store>) -> Result<plugin_host::PluginList> {
 		dir: plugin_host::dir(&store.root).to_string_lossy().to_string(),
 		plugins: plugin_host::load(&store.root, &store.settings()?),
 	})
-}
-
-/// 미리 만든 틀을 plugins/<id>/ 에 쓴다. 이미 있으면 덮지 않는다.
-#[tauri::command]
-pub fn plugin_create_preset(store: State<Store>, id: String) -> Result<String> {
-	Ok(plugin_host::create_preset(&store, &id)?.to_string_lossy().to_string())
 }
 
 /// 매니페스트의 권한을 허락하고 켠다. 화면이 권한 목록을 보이고 사용자가 고른 뒤에 부른다.
@@ -502,6 +516,10 @@ pub fn issue_complete(app: AppHandle, project_id: String, issue_id: String) -> R
 		if i.status != Status::Review {
 			return msg("결과를 확인하는 단계에서만 완료할 수 있습니다");
 		}
+		// 완료하면 워크트리의 수정이 본 작업트리에 들어가지 않은 채 잊힌다.
+		if i.worktree.is_some() {
+			return msg("워크트리에서 고친 것을 먼저 반영하거나 되돌리세요");
+		}
 		i.status = Status::Done;
 		i.log("done", "");
 		Ok(())
@@ -567,7 +585,13 @@ pub fn issue_stop(app: AppHandle, project_id: String, issue_id: String) -> Resul
 
 #[tauri::command]
 pub fn issue_delete(app: AppHandle, project_id: String, issue_id: String) -> Result<()> {
-	app.state::<Store>().delete_issue(&project_id, &issue_id)?;
+	let store = app.state::<Store>();
+	let worktree = store.raw_issue(&project_id, &issue_id).ok().and_then(|i| i.worktree);
+	store.delete_issue(&project_id, &issue_id)?;
+	// 이슈를 지우면 워크트리를 찾을 길이 없다. 반영하지 않은 수정도 함께 버린다 — 지우기 확인 창이 이미 물었다.
+	if let (Some(w), Ok(p)) = (worktree, store.project(&project_id)) {
+		tauri::async_runtime::spawn_blocking(move || crate::worktree::remove(Path::new(&p.path), Path::new(&w.path)));
+	}
 	let _ = app.emit("docket://issue-removed", Removed { project_id: &project_id, id: &issue_id });
 	Ok(())
 }
@@ -610,6 +634,7 @@ pub fn run_events(store: State<Store>, project_id: String, target: String, targe
 	let path = if target == "issue" {
 		store.issue_run_log(&project_id, &target_id, &run_id)?
 	} else {
+		// deliverable · learn(작성법 뽑기) 모두 산출물의 runs/ 에 남는다.
 		store.deliverable_run_log(&project_id, &target_id, &run_id)?
 	};
 	if !path.exists() {
@@ -709,7 +734,6 @@ pub struct DeliverablePatch {
 	guide: String,
 	naming: String,
 	subdir: String,
-	mode: String,
 	/// 이 칸이 생기기 전의 화면이 보낸 패치에는 없다. 그때는 지금 값을 그대로 둔다.
 	#[serde(default)]
 	auto_update: Option<bool>,
@@ -732,7 +756,6 @@ pub fn deliverable_update(app: AppHandle, project_id: String, deliverable_id: St
 		d.guide = patch.guide.clone();
 		d.naming = patch.naming.trim().to_string();
 		d.subdir = patch.subdir.trim().trim_matches(['/', '\\']).to_string();
-		d.mode = if patch.mode == "file" { "file".into() } else { "md".into() };
 		if let Some(on) = patch.auto_update {
 			d.auto_update = on;
 		}
@@ -786,10 +809,24 @@ pub fn deliverable_learn(app: AppHandle, project_id: String, deliverable_id: Str
 	recipe::start(&app, &project_id, &deliverable_id)
 }
 
-/// 뽑은 제안을 적용하거나 버린다. field: skill · vocab · format · naming · template · all
+/// 작성법 뽑기를 멈춘다. 자리를 기다리던 뽑기는 줄에서 빠진다. 칸 · 제안은 그대로 둔다.
 #[tauri::command]
-pub fn deliverable_draft_apply(app: AppHandle, project_id: String, deliverable_id: String, field: String, apply: bool) -> Result<DeliverableView> {
-	let v = app.state::<Store>().update_deliverable(&project_id, &deliverable_id, |d| recipe::apply_draft(d, &field, apply))?;
+pub fn deliverable_learn_stop(app: AppHandle, project_id: String, deliverable_id: String) -> Result<()> {
+	app.state::<runner::Runner>().stop(&runner::learn_key(&project_id, &deliverable_id));
+	Ok(())
+}
+
+/// 뽑은 제안을 적용하거나 버린다. field: skill · vocab · format · naming · template · all
+/// terms 를 주면 어휘 제안 가운데 그 말만 처리한다. 없으면 칸 전체다.
+#[tauri::command]
+pub fn deliverable_draft_apply(app: AppHandle, project_id: String, deliverable_id: String, field: String, apply: bool, terms: Option<Vec<String>>) -> Result<DeliverableView> {
+	let v = app.state::<Store>().update_deliverable(&project_id, &deliverable_id, |d| match (&terms, field.as_str()) {
+		(Some(terms), "vocab") => {
+			recipe::apply_draft_vocab(d, terms, apply);
+			Ok(())
+		}
+		_ => recipe::apply_draft(d, &field, apply),
+	})?;
 	emit_deliverable(&app, &v);
 	Ok(v)
 }
@@ -815,36 +852,60 @@ pub fn deliverable_set_template(app: AppHandle, project_id: String, deliverable_
 	Ok(v)
 }
 
-/// 산출물 어휘 하나를 프로젝트 어휘 사전으로 옮긴다. 사전에 같은 말이 있으면 피할 말 · 뜻만 보탠다.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Promoted {
+	deliverable: DeliverableView,
+	/// 사전에 새로 더한 말 수
+	added: usize,
+	/// 사전에 이미 있어 피할 말 · 뜻만 보탠 말 수
+	merged: usize,
+}
+
+/// 산출물 어휘(제안 포함)를 프로젝트 어휘 사전으로 옮긴다. 사전에 같은 말이 있으면 피할 말 · 뜻만 보탠다.
+/// 사전은 한 번만 저장한다 — 말마다 저장하면 updated_at 이 바뀌어 두 번째부터 충돌로 실패한다.
 #[tauri::command]
-pub fn deliverable_vocab_promote(app: AppHandle, project_id: String, deliverable_id: String, term: String) -> Result<DeliverableView> {
+pub fn deliverable_vocab_promote(app: AppHandle, project_id: String, deliverable_id: String, terms: Vec<String>) -> Result<Promoted> {
 	let store = app.state::<Store>();
-	let d = store.get_deliverable(&project_id, &deliverable_id)?;
-	let k = term.trim().to_lowercase();
-	let Some(t) = d.deliverable.vocab.iter().find(|t| t.term.trim().to_lowercase() == k).cloned() else { return msg("그 어휘가 없습니다") };
+	let d = store.get_deliverable(&project_id, &deliverable_id)?.deliverable;
+	let keys: Vec<String> = terms.iter().map(|t| t.trim().to_lowercase()).filter(|k| !k.is_empty()).collect();
+	let picked: Vec<Term> = d.vocab.iter().chain(&d.draft.vocab).filter(|t| keys.contains(&t.term.trim().to_lowercase())).cloned().collect();
+	if picked.is_empty() {
+		return msg("그 어휘가 없습니다");
+	}
 	let file = store.glossary(&project_id);
 	let mut entries = file.entries.clone();
-	match entries.iter_mut().find(|e| e.term.trim().to_lowercase() == k) {
-		Some(e) => {
-			for a in &t.avoid {
-				if !e.aliases.iter().any(|x| x.trim() == a.trim()) {
-					e.aliases.push(a.clone());
+	let (mut added, mut merged) = (0, 0);
+	for t in &picked {
+		let k = t.term.trim().to_lowercase();
+		match entries.iter_mut().find(|e| e.term.trim().to_lowercase() == k) {
+			Some(e) => {
+				for a in &t.avoid {
+					if !e.aliases.iter().any(|x| x.trim() == a.trim()) {
+						e.aliases.push(a.clone());
+					}
 				}
+				if e.meaning.trim().is_empty() {
+					e.meaning = t.note.clone();
+				}
+				merged += 1;
 			}
-			if e.meaning.trim().is_empty() {
-				e.meaning = t.note.clone();
+			// 사전의 「비슷한 말」은 같은 것을 가리키는 다른 표현이라 피할 말을 그리로 옮긴다.
+			None => {
+				entries.push(GlossaryEntry { term: t.term.clone(), meaning: t.note.clone(), aliases: t.avoid.clone() });
+				added += 1;
 			}
 		}
-		// 사전의 「비슷한 말」은 같은 것을 가리키는 다른 표현이라 피할 말을 그리로 옮긴다.
-		None => entries.push(GlossaryEntry { term: t.term.clone(), meaning: t.note.clone(), aliases: t.avoid.clone() }),
 	}
 	store.save_glossary_entries(&project_id, &entries, file.updated_at)?;
+	// 사전과 산출물에 같은 말을 겹쳐 두지 않는다. 제안에서 바로 올린 말도 제안에서 뺀다.
 	let v = store.update_deliverable(&project_id, &deliverable_id, |d| {
-		d.vocab.retain(|x| x.term.trim().to_lowercase() != k);
+		d.vocab.retain(|x| !keys.contains(&x.term.trim().to_lowercase()));
+		d.draft.vocab.retain(|x| !keys.contains(&x.term.trim().to_lowercase()));
 		Ok(())
 	})?;
 	emit_deliverable(&app, &v);
-	Ok(v)
+	Ok(Promoted { deliverable: v, added, merged })
 }
 
 #[tauri::command]
@@ -873,6 +934,20 @@ pub fn deliverable_generate(app: AppHandle, project_id: String, deliverable_id: 
 pub fn deliverable_stop(app: AppHandle, project_id: String, deliverable_id: String) -> Result<()> {
 	app.state::<runner::Runner>().stop(&runner::doc_key(&project_id, &deliverable_id));
 	Ok(())
+}
+
+/// 반영 대기 이슈 가운데 고른 것들을 한 번에 반영한 새 판을 쓴다(kb::catch_up).
+#[tauri::command]
+pub fn deliverable_catch_up(app: AppHandle, project_id: String, deliverable_id: String, issue_ids: Vec<String>) -> Result<DeliverableView> {
+	kb::catch_up(&app, &project_id, &deliverable_id, &issue_ids)
+}
+
+/// 자동으로 쓴 판을 검토한다. keep 이면 검토 표지만 지우고, 아니면 그 판을 휴지통으로 옮긴다.
+#[tauri::command]
+pub fn deliverable_version_review(app: AppHandle, project_id: String, deliverable_id: String, n: u32, keep: bool) -> Result<DeliverableView> {
+	let v = app.state::<Store>().review_version(&project_id, &deliverable_id, n, keep)?;
+	emit_deliverable(&app, &v);
+	Ok(v)
 }
 
 /// 이슈 하나를 메모 · 계획 · 결과 · 바꾼 파일을 묶은 문서로 남긴다. 첨부도 판 폴더에 함께 복사해 그림 링크가 살아 있게 한다.

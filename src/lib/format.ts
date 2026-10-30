@@ -85,6 +85,8 @@ export function isUnder(path: string, dir: string) {
  * `attachments/` · `shots/` 는 이슈 폴더(base), 나머지 상대 경로는 저장소(root) 기준이다. root 가 없으면 base 기준이다.
  */
 export function resolveImage(src: string, base?: string, root?: string): { url?: string; path?: string } {
+	// 빈 주소를 아래로 흘려보내면 joinPath 가 빈 조각을 걸러 저장소 루트 그 자체를 그림 경로로 돌려준다.
+	if (!src.trim()) return {};
 	if (/^(https?:|data:|blob:|asset:|http:\/\/asset\.)/i.test(src)) return { url: src };
 	let s = src;
 	try {

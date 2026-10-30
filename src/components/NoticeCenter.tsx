@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Bell, Check, PanelRight } from "lucide-react";
 import { relTime } from "@/lib/format";
-import { type Notice, type NoticeTone, useNotices, useSeen } from "@/lib/notices";
+import { type Notice, type NoticeTone, useNotices, usePruneSeen, useSeen } from "@/lib/notices";
 import { useUi } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { type ActionList, ContextActions } from "./ActionMenu";
@@ -13,6 +13,7 @@ const DOT: Record<NoticeTone, string> = { brand: "bg-brand", ok: "bg-ok", danger
 /** 제목 줄의 알림함. 모든 프로젝트에서 끝났는데 아직 열어 보지 않은 대화 답 · 계획 · 구현 · 실패 · 산출물을 모은다. */
 export function NoticeCenter() {
 	const notices = useNotices();
+	usePruneSeen();
 	const [open, setOpen] = useState(false);
 	const go = (n: Notice) => {
 		useSeen.getState().mark(n.id, n.at);
@@ -26,7 +27,7 @@ export function NoticeCenter() {
 					type="button"
 					aria-label={notices.length ? `확인할 것 ${notices.length}건` : "알림"}
 					title={notices.length ? `확인할 것 ${notices.length}건` : "확인할 것이 없습니다"}
-					className="relative mr-1 grid size-7 place-items-center rounded-md text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:bg-hover data-[state=open]:text-foreground [&_svg]:size-4"
+					className="relative grid size-7 place-items-center rounded-md text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:bg-hover data-[state=open]:text-foreground [&_svg]:size-4"
 				>
 					<Bell />
 					{notices.length > 0 && (

@@ -262,8 +262,33 @@ impl Store {
 		Ok(out)
 	}
 
-	/// 이름 · 권한 · 산출물 설정만 바꾼다. 경로와 번호 카운터는 화면에서 온 값으로 덮지 않는다.
+	/// 이름 · 권한 설정만 바꾼다. 경로와 번호 카운터는 화면에서 온 값으로 덮지 않는다.
+	/// 산출물 설정 · 지식베이스 · 어휘 사전은 각 화면이 따로 저장한다 — 여기서 덮으면 이 창이 들고 있던 옛 값이 그 화면의 변경을 지운다.
 	pub fn save_project(&self, input: &Project) -> Result<Project> {
+		let _g = self.guard();
+		let mut list: Vec<Project> = read_json(&self.projects_path())?;
+		let p = list
+			.iter_mut()
+			.find(|p| p.id == input.id)
+			.ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
+		p.name = if input.name.trim().is_empty() { p.name.clone() } else { input.name.trim().to_string() };
+		p.impl_mode = if input.impl_mode == "bypassPermissions" { input.impl_mode.clone() } else { "acceptEdits".into() };
+		p.allowed_tools = input.allowed_tools.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+		p.denied_tools = input.denied_tools.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
+		p.plan_vcs_read = input.plan_vcs_read;
+		p.parallel_impl = input.parallel_impl;
+		// 켤 때만 따진다. 하위 폴더를 프로젝트로 열었거나 git 이 아니면 워크트리 안 경로가 맞지 않는다.
+		if input.worktree && !p.worktree && !crate::worktree::available(Path::new(&p.path)) {
+			return msg("git 저장소의 맨 위 폴더인 프로젝트만 워크트리를 쓸 수 있습니다");
+		}
+		p.worktree = input.worktree;
+		let out = p.clone();
+		write_json(&self.projects_path(), &list)?;
+		Ok(out)
+	}
+
+	/// 산출물 폴더 · 파일 이름 규칙 · 지난 판 폴더만 바꾼다. 산출물 화면의 설정 창이 부른다.
+	pub fn save_deliverable_settings(&self, pid: &str, input: &DeliverableSettings) -> Result<Project> {
 		let dir = input.deliverables_dir.trim();
 		if !dir.is_empty() {
 			if !Path::new(dir).is_absolute() {
@@ -277,16 +302,7 @@ impl Store {
 		}
 		let _g = self.guard();
 		let mut list: Vec<Project> = read_json(&self.projects_path())?;
-		let p = list
-			.iter_mut()
-			.find(|p| p.id == input.id)
-			.ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
-		p.name = if input.name.trim().is_empty() { p.name.clone() } else { input.name.trim().to_string() };
-		p.impl_mode = if input.impl_mode == "bypassPermissions" { input.impl_mode.clone() } else { "acceptEdits".into() };
-		p.allowed_tools = input.allowed_tools.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
-		p.denied_tools = input.denied_tools.iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect();
-		p.plan_vcs_read = input.plan_vcs_read;
-		p.parallel_impl = input.parallel_impl;
+		let p = list.iter_mut().find(|p| p.id == pid).ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
 		p.deliverables_dir = dir.to_string();
 		p.naming = input.naming.trim().to_string();
 		p.naming_underscore = input.naming_underscore;
@@ -768,6 +784,12 @@ impl Store {
 	}
 
 	pub fn dview(&self, d: Deliverable) -> DeliverableView {
+		let done = Self::counts_pending(&d).then(|| self.done_issues(&d.project_id));
+		self.dview_with(d, done.as_deref())
+	}
+
+	/// done 은 프로젝트의 완료 이슈다. 목록은 한 번만 읽어 산출물마다 나눠 쓴다.
+	fn dview_with(&self, d: Deliverable, done: Option<&[PendingIssue]>) -> DeliverableView {
 		let p = self.project(&d.project_id).ok();
 		let n = Self::next_n(&d);
 		DeliverableView {
@@ -775,8 +797,48 @@ impl Store {
 			refs: self.list_refs(&d.project_id, &d.id).into_iter().map(|r| RefFile { template: r.name == d.template, ..r }).collect(),
 			output_dir: self.output_dir(p.as_ref(), &d, n).to_string_lossy().to_string(),
 			next_name: Self::file_name_for(p.as_ref(), &d, n, "md"),
+			pending: done.filter(|_| Self::counts_pending(&d)).map(|done| Self::pending_of(&d, done)).unwrap_or_default(),
 			deliverable: d,
 		}
+	}
+
+	/// 자동 갱신을 켜고 판이 하나는 있어야 반영 대기를 센다. 자동 갱신이 도는 조건(kb::auto_update)과 같다.
+	fn counts_pending(d: &Deliverable) -> bool {
+		d.auto_update && !d.versions.is_empty()
+	}
+
+	/// 코드를 고치고 완료된 이슈. 완료 시각은 흐름의 마지막 done 기록이다 — 이슈에 완료 시각 칸이 따로 없다.
+	fn done_issues(&self, pid: &str) -> Vec<PendingIssue> {
+		let Ok(pid) = safe_id(pid) else { return Vec::new() };
+		let Ok(rd) = fs::read_dir(self.project_dir(pid).join("issues")) else { return Vec::new() };
+		rd.filter_map(|e| e.ok())
+			.filter_map(|e| read_json::<Issue>(&e.path().join("issue.json")).ok())
+			.filter(|i| !i.talk && i.status == Status::Done && !i.changes.is_empty())
+			.filter_map(|i| {
+				let done_at = i.history.iter().rev().find(|h| h.kind == "done")?.at;
+				Some(PendingIssue { id: i.id, number: i.number, title: i.title, done_at })
+			})
+			.collect()
+	}
+
+	/// 반영 대기: 기록에서 반영이 끝나지 않았고, 최신 판보다 뒤에 완료됐거나 반영하지 못했다고 기록된 이슈.
+	/// 「반영하지 못함」(작성 중이라 건너뜀 · 실패 · 중지)은 그 뒤에 다른 판이 나와도 반영된 것이 아니어서 시각과 상관없이 남긴다.
+	fn pending_of(d: &Deliverable, done: &[PendingIssue]) -> Vec<PendingIssue> {
+		let since = d.versions.iter().map(|v| v.added_at).max().unwrap_or(0);
+		let mut out: Vec<PendingIssue> = done
+			.iter()
+			.filter(|p| {
+				let last = d.auto_log.iter().rev().find(|e| e.issue_id == p.id);
+				match last {
+					Some(e) if e.settled() => false,
+					Some(_) => true,
+					None => p.done_at > since,
+				}
+			})
+			.cloned()
+			.collect();
+		out.sort_by_key(|p| p.number);
+		out
 	}
 
 	pub fn get_deliverable(&self, pid: &str, did: &str) -> Result<DeliverableView> {
@@ -787,13 +849,11 @@ impl Store {
 		let dir = self.project_dir(safe_id(pid)?).join("deliverables");
 		let mut out = Vec::new();
 		let Ok(rd) = fs::read_dir(&dir) else { return Ok(out) };
-		for e in rd.filter_map(|e| e.ok()) {
-			let path = e.path().join("meta.json");
-			if let Ok(d) = read_json::<Deliverable>(&path)
-				&& !d.id.is_empty()
-			{
-				out.push(self.dview(d));
-			}
+		let list: Vec<Deliverable> = rd.filter_map(|e| e.ok()).filter_map(|e| read_json::<Deliverable>(&e.path().join("meta.json")).ok()).filter(|d| !d.id.is_empty()).collect();
+		// 완료 이슈는 셀 산출물이 있을 때만, 한 번만 읽는다.
+		let done = list.iter().any(Self::counts_pending).then(|| self.done_issues(pid));
+		for d in list {
+			out.push(self.dview_with(d, done.as_deref()));
 		}
 		out.sort_by_key(|v| std::cmp::Reverse(v.deliverable.updated_at));
 		Ok(out)
@@ -809,7 +869,6 @@ impl Store {
 			issue_id: issue_id.to_string(),
 			created_at: now,
 			updated_at: now,
-			mode: "md".into(),
 			..Default::default()
 		};
 		let _g = self.guard();
@@ -895,6 +954,7 @@ impl Store {
 			size: fs::metadata(path).map(|m| m.len()).unwrap_or(0),
 			source: source.into(),
 			path: path.to_string_lossy().to_string(),
+			review: false,
 		});
 	}
 
@@ -961,6 +1021,30 @@ impl Store {
 			write_atomic(&self.resolve(d, &v), content.as_bytes())?;
 			if let Some(last) = d.versions.last_mut() {
 				last.size = content.len() as u64;
+			}
+			Ok(())
+		})
+	}
+
+	/// 자동으로 쓴 판을 검토한다. keep 이면 검토 표지만 지우고, 아니면 판 파일을 휴지통으로 옮기고 판 목록에서 뺀다.
+	/// 버린 판의 자동 관리 기록은 그대로 두되 반영이 끝나지 않은 것으로 돌린다 — 그래야 그 이슈가 다시 반영 대기로 보인다.
+	pub fn review_version(&self, pid: &str, did: &str, n: u32, keep: bool) -> Result<DeliverableView> {
+		self.update_deliverable(pid, did, |d| {
+			if d.job.is_some() {
+				return msg("작성 중에는 판을 버릴 수 없습니다. 먼저 중지하세요.");
+			}
+			let idx = d.versions.iter().position(|v| v.n == n).ok_or_else(|| Error::Msg("그 판이 없습니다".into()))?;
+			if keep {
+				d.versions[idx].review = false;
+				return Ok(());
+			}
+			let v = d.versions.remove(idx);
+			let path = self.resolve(d, &v);
+			if path.is_file() {
+				self.trash(&path, &v.file)?;
+			}
+			for e in d.auto_log.iter_mut().filter(|e| e.version == n && e.settled()) {
+				e.verdict = "discarded".into();
 			}
 			Ok(())
 		})
@@ -1051,6 +1135,40 @@ impl Store {
 mod tests {
 	use super::*;
 
+	fn done(id: &str, number: u32, done_at: i64) -> PendingIssue {
+		PendingIssue { id: id.into(), number, title: String::new(), done_at }
+	}
+
+	fn entry(id: &str, verdict: &str) -> AutoEntry {
+		AutoEntry { issue_id: id.into(), verdict: verdict.into(), ..Default::default() }
+	}
+
+	/// 판 뒤에 끝난 이슈만 반영 대기이고, 반영이 끝난 기록이 있으면 빠지며, 반영하지 못한 기록은 판보다 앞서도 남는다.
+	#[test]
+	fn pending_follows_versions_and_log() {
+		let mut d = Deliverable { auto_update: true, versions: vec![Version { n: 1, added_at: 100, ..Default::default() }], ..Default::default() };
+		let all = [done("a", 1, 50), done("b", 2, 150), done("c", 3, 160), done("e", 4, 40)];
+		d.auto_log = vec![entry("c", "unrelated"), entry("e", "busy")];
+		let ids: Vec<String> = Store::pending_of(&d, &all).into_iter().map(|p| p.id).collect();
+		assert_eq!(ids, ["b", "e"]);
+		// 같은 이슈의 마지막 기록이 이긴다 — 버린 판의 이슈는 다시 대기로 돌아온다.
+		d.auto_log.push(entry("b", "updated"));
+		d.auto_log.push(entry("c", "discarded"));
+		let ids: Vec<String> = Store::pending_of(&d, &all).into_iter().map(|p| p.id).collect();
+		assert_eq!(ids, ["c", "e"]);
+	}
+
+	/// 기록은 최근 AUTO_LOG_MAX 건만 남는다.
+	#[test]
+	fn auto_log_keeps_recent() {
+		let mut d = Deliverable::default();
+		for n in 0..(AUTO_LOG_MAX as u32 + 5) {
+			d.push_auto(AutoEntry { number: n, ..Default::default() });
+		}
+		assert_eq!(d.auto_log.len(), AUTO_LOG_MAX);
+		assert_eq!(d.auto_log[0].number, 5);
+	}
+
 	/// 옛 설정의 모델 하나가 세 칸으로 옮겨지고, 다시 쓸 때는 옛 칸이 남지 않는다.
 	#[test]
 	fn legacy_model_moves_to_run_models() {
@@ -1074,14 +1192,14 @@ mod tests {
 		let store = Store { root: home, lock: Mutex::new(()) };
 		let p = store.add_project(&proj.to_string_lossy()).unwrap();
 		store
-			.save_project(&Project {
-				deliverables_dir: out.to_string_lossy().into(),
-				naming: "{제목}_v{판}".into(),
-				naming_underscore: true,
-				archive_dir: "이전판".into(),
-				..p.clone()
-			})
+			.save_deliverable_settings(
+				&p.id,
+				&DeliverableSettings { deliverables_dir: out.to_string_lossy().into(), naming: "{제목}_v{판}".into(), naming_underscore: true, archive_dir: "이전판".into() },
+			)
 			.unwrap();
+		// 프로젝트 설정 창은 산출물 설정을 연 뒤의 옛 사본을 들고 있다. 그 사본으로 저장해도 산출물 설정이 지워지면 안 된다.
+		let saved = store.save_project(&Project { name: "새 이름".into(), ..p.clone() }).unwrap();
+		assert_eq!((saved.name.as_str(), saved.naming.as_str(), saved.archive_dir.as_str()), ("새 이름", "{제목}_v{판}", "이전판"));
 		let d = store.create_deliverable(&p.id, "함수 설명서", "").unwrap();
 		store.add_version_text(&p.id, &d.id, "# 1", "editor", "").unwrap();
 		let v = store.add_version_text(&p.id, &d.id, "# 2", "editor", "").unwrap();

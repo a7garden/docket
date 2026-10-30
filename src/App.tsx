@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FolderPlus } from "lucide-react";
+import { CommandPalette } from "@/components/CommandPalette";
+import { KeyBadges } from "@/components/KeyBadges";
+import { KeyHelp } from "@/components/KeyHelp";
 import { Sidebar, pickProject } from "@/components/Sidebar";
 import { Mark, TitleBar } from "@/components/TitleBar";
 import { Button } from "@/components/ui/button";
@@ -13,14 +16,15 @@ import { Deliverables } from "@/features/deliverables/Deliverables";
 import { Glossary } from "@/features/glossary/Glossary";
 import { IssueSheet } from "@/features/issue/IssueSheet";
 import { Knowledge } from "@/features/knowledge/Knowledge";
-import { ProjectHeader } from "@/features/project/ProjectHeader";
+import { goProject, PROJECT_TABS, ProjectHeader } from "@/features/project/ProjectHeader";
 import { Settings } from "@/features/settings/Settings";
 import { UpdateConfirm } from "@/features/settings/UpdateConfirm";
 import { Talks } from "@/features/talk/Talks";
 import { useDocketEvents } from "@/lib/events";
+import { useKey } from "@/lib/keys";
 import { useUpdater } from "@/lib/updater";
 import { useAppInfo, useProjects, useSettings } from "@/lib/queries";
-import { useUi } from "@/lib/store";
+import { useUi, type View } from "@/lib/store";
 
 /** index.html 이 첫 화면 전에 읽는 키다. */
 const THEME_KEY = "docket.theme";
@@ -54,10 +58,39 @@ function useTheme(theme: string | undefined): "dark" | "light" {
 	return dark ? "dark" : "light";
 }
 
+/** 어디서나 쓰는 화면 전환 키. 입력칸 안에서도 받는다 — Ctrl 조합이라 글자를 먹지 않는다. */
+function GlobalKeys() {
+	const { data: projects = [] } = useProjects();
+	const setView = useUi((s) => s.setView);
+	// 사이드바와 같은 순서로 옮긴다. 끝에서는 멈춘다 — 돌아 들어가면 맨 아래에서 ↓ 를 눌렀을 때 어디로 갔는지 놓친다.
+	const step = (d: number) => {
+		if (!projects.length) return false;
+		const i = projects.findIndex((p) => p.id === useUi.getState().projectId);
+		const next = projects[i < 0 ? 0 : i + d];
+		if (next) goProject(next.id);
+	};
+	useKey({ id: "project.prev", combo: "Mod+Alt+ArrowUp", label: "이전 프로젝트", group: "어디서나", series: "project", run: () => step(-1) });
+	useKey({ id: "project.next", combo: "Mod+Alt+ArrowDown", label: "다음 프로젝트", group: "어디서나", series: "project", run: () => step(1) });
+	useKey({ id: "view.settings", combo: "Mod+,", label: "설정", group: "어디서나", run: () => setView("settings") });
+	return (
+		<>
+			{PROJECT_TABS.map(([v, label], i) => (
+				<ViewKey key={v} view={v} label={label} n={i + 1} />
+			))}
+		</>
+	);
+}
+
+function ViewKey({ view, label, n }: { view: View; label: string; n: number }) {
+	const setView = useUi((s) => s.setView);
+	useKey({ id: `view.${view}`, combo: `Mod+${n}`, label, group: "어디서나", series: "views", run: () => setView(view) });
+	return null;
+}
+
 export default function App() {
 	useDocketEvents();
-	useUpdater();
 	const { data: settings } = useSettings();
+	useUpdater(settings?.autoUpdateCheck);
 	const theme = useTheme(settings?.theme);
 	const { data: projects, isLoading } = useProjects();
 	const { projectId, view, setProject } = useUi();
@@ -71,6 +104,10 @@ export default function App() {
 	const projectView = view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary";
 	return (
 		<div className="flex h-full flex-col">
+			<GlobalKeys />
+			<KeyBadges />
+			<KeyHelp />
+			<CommandPalette />
 			<TitleBar />
 			<div className="flex min-h-0 flex-1 border-t border-border">
 				<Sidebar />

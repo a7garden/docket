@@ -11,6 +11,7 @@ mod recipe;
 mod runner;
 mod store;
 mod usage;
+mod worktree;
 
 use tauri::Manager;
 
@@ -32,6 +33,7 @@ pub fn run() {
 			if let Err(e) = store.recover_interrupted() {
 				eprintln!("끊긴 실행을 정리하지 못함: {e}");
 			}
+			runner::note_settings(&store.settings().unwrap_or_default());
 			// 첨부 이미지를 화면에 띄우려면 데이터 폴더를 asset 프로토콜에 연다. DOCKET_HOME 으로 옮겨도 따라가도록 실행 때 연다.
 			app.asset_protocol_scope().allow_directory(&store.root, true)?;
 			// 프로젝트마다 정한 산출물 폴더도 연다. 그 폴더의 그림 판을 화면에서 미리 본다.
@@ -46,6 +48,8 @@ pub fn run() {
 					let _ = w.set_background_color(Some(tauri::window::Color(247, 247, 247, 255)));
 				}
 			}
+			// 예전에 「herdr 정의 만들기」로 만든 파일은 이제 코어 플러그인이 맡는다. 남겨 두면 같은 id 가 둘이 된다.
+			plugin_host::core::retire_on_start(&store);
 			usage::init(app.handle().clone(), &store.root);
 			app.manage(store);
 			app.manage(runner::Runner::default());
@@ -57,6 +61,7 @@ pub fn run() {
 		})
 		.invoke_handler(tauri::generate_handler![
 			commands::app_info,
+			commands::doc_tools_check,
 			commands::usage_get,
 			commands::spend_summary,
 			commands::settings_get,
@@ -66,6 +71,7 @@ pub fn run() {
 			commands::projects_list,
 			commands::project_add,
 			commands::project_save,
+			commands::deliverable_settings_save,
 			commands::naming_preview,
 			commands::project_remove,
 			commands::project_allow,
@@ -86,6 +92,7 @@ pub fn run() {
 			commands::issue_rework,
 			commands::runs_stop_all,
 			commands::issue_revert,
+			commands::issue_merge,
 			commands::issue_chat,
 			commands::issue_queue_remove,
 			commands::issue_queue_send,
@@ -94,7 +101,6 @@ pub fn run() {
 			commands::issue_sessions,
 			commands::issue_set_session,
 			commands::plugins_list,
-			commands::plugin_create_preset,
 			commands::plugin_grant,
 			commands::plugin_inspect,
 			commands::plugin_install,
@@ -127,8 +133,11 @@ pub fn run() {
 			commands::deliverable_delete,
 			commands::deliverable_generate,
 			commands::deliverable_stop,
+			commands::deliverable_catch_up,
+			commands::deliverable_version_review,
 			commands::deliverable_from_issue,
 			commands::deliverable_learn,
+			commands::deliverable_learn_stop,
 			commands::deliverable_draft_apply,
 			commands::deliverable_set_template,
 			commands::deliverable_vocab_promote,

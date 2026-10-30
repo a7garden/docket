@@ -26,3 +26,6 @@ dist-ssr
 # 실행 중 남는 임시 파일
 accept.jsonl
 err.txt
+
+# 앱에 싣는 스킬의 파이썬 캐시
+__pycache__/

@@ -1,13 +1,14 @@
 /*
  * 설정 › 플러그인.
- * - 목록 Plugins · 한 줄 PluginRow · 설정 칸 PluginFields · 권한 허락 창 GrantDialog · 설명 글 summary · 권한 뜻 permissionText
+ * - 목록 Plugins · 묶음 머리 Section · 한 줄 PluginRow · 설정 칸 PluginFields · 권한 허락 창 GrantDialog · 설명 글 summary · 권한 뜻 permissionText
+ * - 코어(앱에 들어 있음)와 커뮤니티(설치한 것)로 나눠 보인다. 코어는 파일이 없어 켜고 끄기만 하고, 허락 창 · 더 보기 메뉴가 없다.
  * - 매니페스트(plugin.json)는 화면에서 고치지 않는다. 인자 칸을 두면 같은 정의를 두 곳에서 고치게 된다.
  *   여기서는 설치 · 켜고 끄기 · 권한 허락 · 설정 칸 값 · 지우기 · 문제 보기만 한다.
  */
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { FileText, FolderOpen, MoreHorizontal, PackagePlus, Plus, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
+import { FileText, FolderOpen, MoreHorizontal, PackagePlus, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { DropdownActions, attempt } from "@/components/ActionMenu";
 import {
@@ -79,7 +80,9 @@ function summary(p: PluginView): string[] {
 	].filter(Boolean) as string[];
 	const lines = [what.join(" · ")];
 	if (p.permissions.length) lines.push(`권한: ${p.permissions.join(" · ")}`);
-	if (p.problem) lines.push(`쓸 수 없음: ${p.problem}`);
+	// 꺼 둔 코어는 쓰겠다고 한 적이 없으므로 문제를 빨갛게 띄우지 않고 켜기 전에 알 것으로 보인다(herdr 가 없는 PC).
+	if (p.problem && p.core && !p.enabled) lines.push(`켜기 전에 확인: ${p.problem}`);
+	else if (p.problem) lines.push(`쓸 수 없음: ${p.problem}`);
 	else if (p.missing.length) lines.push(`허락하지 않은 권한이 있어 쉬고 있습니다: ${p.missing.join(" · ")}`);
 	else if (p.warning) lines.push(p.warning);
 	if (p.description) lines.push(p.description);
@@ -87,19 +90,17 @@ function summary(p: PluginView): string[] {
 }
 
 function kindText(p: PluginView) {
-	return p.legacy ? "옛 정의" : p.main ? "wasm" : "선언형";
+	return p.core ? "코어" : p.legacy ? "옛 정의" : p.main ? "wasm" : "선언형";
 }
 
 export function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (id: string, on: boolean) => Promise<void> }) {
 	const qc = useQueryClient();
 	const { data, refetch } = usePlugins();
 	const plugins = data?.plugins ?? [];
+	const core = plugins.filter((p) => p.core);
+	const community = plugins.filter((p) => !p.core);
 	const [grant, setGrant] = useState<PluginView | null>(null);
 	const [install, setInstall] = useState<{ path: string; manifest: PluginManifest; problem: string; installed: string } | null>(null);
-	const herdr = plugins.find((p) => p.id === "herdr");
-	// 인자를 하나도 채우지 않은 옛 정의는 앱이 새 틀로 바꿔 준다(plugin_host create_preset). 손으로 채운 것은 건드리지 않는다.
-	const t = herdr?.contributes.terminal;
-	const herdrBlank = !!herdr && herdr.legacy && !herdr.problem.startsWith("정의를 읽지 못했습니다") && !!t && [t.probe, t.focus, t.attach, t.launch].every((a) => a.length === 0);
 
 	// 설치 · 허락은 서버가 settings.json 을 고친다. 설정 화면이 쥔 사본도 다시 읽어야 다음 저장이 그것을 덮지 않는다.
 	const refresh = () => {
@@ -125,13 +126,18 @@ export function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (i
 
 	return (
 		<Group id="plugins">
-			{plugins.length === 0 && (
+			{core.length > 0 && <Section title="코어" hint="앱에 들어 있습니다. 켜고 끄기만 합니다." />}
+			{core.map((p) => (
+				<PluginRow key={`core-${p.id}`} p={p} on={enabled.includes(p.id)} onToggle={(v) => toggle(p, v)} onGrant={() => setGrant(p)} onRemoved={refresh} />
+			))}
+			<Section title="커뮤니티" hint="zip · plugin.json 으로 설치한 플러그인입니다." />
+			{community.length === 0 && (
 				<p className="px-4 py-3.5 text-[12.5px] leading-relaxed break-keep text-subtle">
-					아직 플러그인이 없습니다. 「설치」로 zip 이나 plugin.json 을 고르거나, 아래에서 herdr 터미널 플러그인을 만듭니다. 플러그인은 메뉴 항목 · 사건 · 설정 칸 · 터미널을 더하고, 코드는
-					샌드박스(wasm)에서 허락한 권한으로만 돕니다.
+					아직 설치한 플러그인이 없습니다. 「설치」로 zip 이나 plugin.json 을 고릅니다. 플러그인은 메뉴 항목 · 사건 · 설정 칸 · 터미널을 더하고, 코드는 샌드박스(wasm)에서 허락한 권한으로만
+					돕니다.
 				</p>
 			)}
-			{plugins.map((p) => (
+			{community.map((p) => (
 				<PluginRow key={p.file} p={p} on={enabled.includes(p.id)} onToggle={(v) => toggle(p, v)} onGrant={() => setGrant(p)} onRemoved={refresh} />
 			))}
 			<div className="flex flex-wrap items-center gap-2 px-4 py-3">
@@ -143,22 +149,6 @@ export function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (i
 					<FolderOpen />
 					폴더 열기
 				</Button>
-				{(!herdr || herdrBlank) && (
-					<Button
-						variant="outline"
-						size="sm"
-						onClick={() =>
-							void attempt(async () => {
-								await api.pluginCreatePreset("herdr");
-								toast.success(herdrBlank ? "herdr 정의의 인자를 채웠습니다. 켜면 씁니다." : "herdr 정의를 만들었습니다. 켜면 씁니다.");
-								void refetch();
-							})
-						}
-					>
-						<Plus />
-						{herdrBlank ? "herdr 정의 새로 채우기" : "herdr 정의 만들기"}
-					</Button>
-				)}
 				<Button variant="ghost" size="sm" onClick={() => void refetch()}>
 					<RefreshCw />
 					다시 읽기
@@ -199,6 +189,16 @@ export function Plugins({ enabled, onToggle }: { enabled: string[]; onToggle: (i
 	);
 }
 
+/** 묶음 머리. Group 의 구분선 사이에 한 줄로 들어간다. */
+function Section({ title, hint }: { title: string; hint: string }) {
+	return (
+		<div className="flex items-baseline gap-2 bg-muted/40 px-4 py-2">
+			<span className="text-[12px] font-semibold text-muted-foreground">{title}</span>
+			<span className="text-[12px] break-keep text-subtle">{hint}</span>
+		</div>
+	);
+}
+
 function PluginRow({ p, on, onToggle, onGrant, onRemoved }: { p: PluginView; on: boolean; onToggle: (on: boolean) => void; onGrant: () => void; onRemoved: () => void }) {
 	const [confirm, setConfirm] = useState(false);
 	const lines = summary(p);
@@ -234,16 +234,19 @@ function PluginRow({ p, on, onToggle, onGrant, onRemoved }: { p: PluginView; on:
 						권한 허락
 					</Button>
 				)}
-				<DropdownMenu>
-					<DropdownMenuTrigger asChild>
-						<Button size="icon-sm" variant="ghost" aria-label="더 보기">
-							<MoreHorizontal />
-						</Button>
-					</DropdownMenuTrigger>
-					<DropdownMenuContent align="end" className="pop w-44">
-						<DropdownActions items={items} />
-					</DropdownMenuContent>
-				</DropdownMenu>
+				{/* 코어는 파일이 없어 폴더 · 지우기가 쓸모없고, 코드도 없어 기록이 남지 않는다. */}
+				{!p.core && (
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<Button size="icon-sm" variant="ghost" aria-label="더 보기">
+								<MoreHorizontal />
+							</Button>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="end" className="pop w-44">
+							<DropdownActions items={items} />
+						</DropdownMenuContent>
+					</DropdownMenu>
+				)}
 				<Switch checked={on} onCheckedChange={onToggle} />
 			</div>
 			{on && !p.problem && p.missing.length === 0 && p.contributes.settings.length > 0 && <PluginFields p={p} />}

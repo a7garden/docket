@@ -3,8 +3,10 @@
 //! - 이름 규칙 · 템플릿 · 형식은 파일 이름과 확장자만 보면 되므로 앱이 먼저 정한다(local_fill). Claude 를 부르지 않는다.
 //!   글을 읽어야 아는 작성법 · 어휘만 Claude 가 맡는다.
 //! - 뽑은 값은 빈 칸에만 바로 넣고, 값이 있는 칸은 draft 에 제안으로 둔다. 사용자가 적는 작성 지침(guide)은 건드리지 않는다.
-//! - 호출은 quick_call(도구 없음 · 세션 남기지 않음)이고, 모델은 산출물 작성과 같은 구현 모델이다.
+//! - 호출은 watched_call(quick_call 과 같이 도구 없음 · 세션 남기지 않음)이고, 모델은 산출물 작성과 같은 구현 모델이다.
 //!   글자를 프롬프트에 실어 보내 저장소를 읽지 않으므로 프로젝트 실행 줄에 서지 않는다. 동시에 둘까지만 돈다.
+//! - 그래도 사용자가 보고 멈출 수 있게 Runner 에 learn_key 로 등록하고 실행 사건을 target "learn" 으로 보낸다.
+//!   기록은 산출물의 runs/<run_id>.jsonl 에 남지만 d.runs 에는 넣지 않는다 — 넣으면 「작성 끝」 알림이 뜬다.
 //! - 뽑은 것은 앱 데이터(산출물의 meta.json)에만 둔다. 프로젝트 폴더 · ~/.claude 에는 아무것도 쓰지 않는다.
 //!
 //! 목차
@@ -22,7 +24,7 @@ use tauri::{AppHandle, Manager};
 use crate::error::{Error, Result, msg};
 use crate::extract;
 use crate::model::*;
-use crate::runner::{self, emit_deliverable};
+use crate::runner::{self, Quick, RunCtl, RunEvent, Runner, emit_deliverable};
 use crate::store::Store;
 
 /// 템플릿으로 삼는 형식. Claude 가 그 형식의 스킬로 「복사해 채우는」 쪽을 고를 수 있는 것만 둔다.
@@ -262,33 +264,48 @@ fn merge(d: &mut Deliverable, got: Learned, refs: &[String], known: &[String]) {
 	}
 }
 
-async fn learn(app: &AppHandle, pid: &str, did: &str) -> Result<()> {
+/// 멈추면 아무 칸도 바꾸지 않고 Ok 로 끝난다. 앞서 둔 제안 · 비용 합도 그대로다.
+async fn learn(app: &AppHandle, pid: &str, did: &str, run_id: &str, ctl: &RunCtl) -> Result<()> {
 	let store = app.state::<Store>();
 	let settings = store.settings()?;
 	let project = store.project(pid)?;
 	let view = fill_saved(&store, pid, did)?;
 	emit_deliverable(app, &view);
+	let emit = |ev: &RunEvent| runner::emit_run(app, pid, "learn", did, run_id, ev);
 
 	let srcs = sources(&store, pid, &view);
+	let names: Vec<String> = srcs.iter().map(|s| s.label.clone()).collect();
 	let material = tokio::task::spawn_blocking(move || gather(&srcs)).await.map_err(|e| Error::Msg(e.to_string()))?;
+	if ctl.cancelled() {
+		return Ok(());
+	}
 	let Some(material) = material else {
 		return msg("템플릿 · 참고 자료 · 판에서 글자를 읽지 못해 작성법을 뽑지 못했습니다. 이름 규칙 · 형식 · 템플릿만 정했습니다.");
 	};
+	// 도구 없이 글만 받는 호출이라 기록에 보일 것이 적다. 무엇을 읽혔는지 한 줄 먼저 보인다. 이 줄은 저장된 기록에는 없다.
+	emit(&RunEvent::Text { text: format!("자료 {}개 · 약 {}자를 읽혔습니다\n{}", names.len(), material.chars().count(), names.join("\n")) });
 	// 사전이 꺼져 있으면 작성 때 붙지 않으므로, 그 말도 이 산출물 어휘로 받아 둔다.
 	let known: Vec<String> =
 		if project.glossary.enabled { crate::glossary::merged(&store, &project).into_iter().map(|m| key(&m.entry.term)).filter(|k| !k.is_empty()).collect() } else { Vec::new() };
 	let exe = runner::resolve_claude(&settings.claude_path).ok_or_else(|| Error::Msg("claude 실행 파일을 찾지 못했습니다. 설정에서 경로를 지정하세요.".into()))?;
 	let dir = PathBuf::from(&view.dir);
 	let model = runner::pick_model(&settings, "", RunKind::Document).to_string();
-	let (answer, cost) = runner::quick_call(exe, (pid, "learn"), &model, SYSTEM, prompt(&view, &material, &known), &dir, dir.join("learn.last.jsonl"), 300)
-		.await
-		.ok_or_else(|| Error::Msg("작성법 뽑기 호출이 실패했습니다. 산출물 폴더의 learn.last.jsonl 에 응답이 남아 있습니다.".into()))?;
+	let log = store.deliverable_run_log(pid, did, run_id)?;
+	let (answer, cost) =
+		match runner::watched_call(exe, (pid, "learn"), &model, SYSTEM, prompt(&view, &material, &known), &dir, log, 300, run_id, ctl, emit).await {
+			Quick::Done(answer, cost) => (answer, cost),
+			Quick::Stopped => return Ok(()),
+			Quick::Failed => return msg("작성법 뽑기 호출이 실패했습니다. 「기록」에서 응답을 보세요."),
+		};
 	let got = read_answer(&answer);
 	let read = got.is_some();
 	let refs: Vec<String> = store.list_refs(pid, did).into_iter().map(|r| r.name).collect();
 	let v = store.update_deliverable(pid, did, |d| {
 		d.learn_cost_usd += cost;
 		if let Some(got) = got {
+			// 지난 제안은 새 답을 합칠 때 비운다. 시작할 때 비우면 멈춘 뽑기가 지난 제안까지 지운다.
+			d.draft = RecipeDraft::default();
+			local_fill(d, &refs, Some(&project));
 			merge(d, got, &refs, &known);
 			d.learned_at = now_ms();
 		}
@@ -296,7 +313,7 @@ async fn learn(app: &AppHandle, pid: &str, did: &str) -> Result<()> {
 	})?;
 	emit_deliverable(app, &v);
 	if !read {
-		return msg("작성법 답을 읽지 못했습니다. 산출물 폴더의 learn.last.jsonl 을 보세요.");
+		return msg("작성법 답을 읽지 못했습니다. 「기록」에서 응답을 보세요.");
 	}
 	Ok(())
 }
@@ -304,6 +321,7 @@ async fn learn(app: &AppHandle, pid: &str, did: &str) -> Result<()> {
 /* ---------- 4. 시작 · 제안 적용 ---------- */
 
 /// 뽑기를 뒤에서 돌린다. 이미 뽑는 중이면 그대로 둔다.
+/// 실행 줄에 등록해 「Claude 실행」 목록에 보이고, 중지 · 모두 중지 · 창 닫기로 멈춘다. 자리를 기다리는 동안 멈춰도 바로 빠진다.
 pub fn start(app: &AppHandle, pid: &str, did: &str) -> Result<DeliverableView> {
 	let store = app.state::<Store>();
 	let run_id = short_id();
@@ -311,24 +329,48 @@ pub fn start(app: &AppHandle, pid: &str, did: &str) -> Result<DeliverableView> {
 		if d.learn.is_some() {
 			return msg("이미 작성법을 뽑는 중입니다");
 		}
-		d.learn = Some(LearnJob { run_id: run_id.clone(), started_at: now_ms() });
+		d.learn = Some(LearnJob { run_id: run_id.clone(), started_at: now_ms(), phase: Phase::Queued });
 		d.learn_error.clear();
-		d.draft = RecipeDraft::default();
 		Ok(())
 	})?;
 	emit_deliverable(app, &view);
+	let key = runner::learn_key(pid, did);
+	let ctl = app.state::<Runner>().register(&key);
 	let (app, pid, did) = (app.clone(), pid.to_string(), did.to_string());
 	tauri::async_runtime::spawn(async move {
 		let res = {
-			let _permit = SLOTS.acquire().await;
-			learn(&app, &pid, &did).await
+			let permit = tokio::select! {
+				p = SLOTS.acquire() => p.ok(),
+				_ = ctl.wait_cancel() => None,
+			};
+			match permit {
+				Some(_permit) => {
+					if let Ok(v) = app.state::<Store>().update_deliverable(&pid, &did, |d| {
+						if let Some(j) = d.learn.as_mut().filter(|j| j.run_id == run_id) {
+							j.phase = Phase::Running;
+						}
+						Ok(())
+					}) {
+						emit_deliverable(&app, &v);
+					}
+					learn(&app, &pid, &did, &run_id, &ctl).await
+				}
+				None => Ok(()),
+			}
 		};
-		let err = res.err().map(|e| e.to_string()).unwrap_or_default();
-		if let Ok(v) = app.state::<Store>().update_deliverable(&pid, &did, |d| {
+		app.state::<Runner>().release(&key);
+		let err = if ctl.cancelled() { String::new() } else { res.err().map(|e| e.to_string()).unwrap_or_default() };
+		let store = app.state::<Store>();
+		// claude 를 부르기 전에 멈췄거나 끝났으면 펼칠 기록이 없다. 그때는 앞선 기록을 그대로 가리킨다.
+		let logged = store.deliverable_run_log(&pid, &did, &run_id).map(|p| p.exists()).unwrap_or(false);
+		if let Ok(v) = store.update_deliverable(&pid, &did, |d| {
 			// 그사이 다시 뽑기를 시작했으면 그쪽 상태를 지우지 않는다.
 			if d.learn.as_ref().is_some_and(|j| j.run_id == run_id) {
 				d.learn = None;
 				d.learn_error = err;
+				if logged {
+					d.learn_last_run = run_id.clone();
+				}
 			}
 			Ok(())
 		}) {
@@ -374,6 +416,21 @@ pub fn apply_draft(d: &mut Deliverable, field: &str, apply: bool) -> Result<()> 
 		}
 	}
 	Ok(())
+}
+
+/// 어휘 제안 가운데 고른 말만 적용하거나 버린다. 고르지 않은 말은 제안으로 남는다.
+/// 이미 칸에 있는 말은 덮지 않는다 — 사용자가 고친 피할 말 · 뜻이 사라진다.
+pub fn apply_draft_vocab(d: &mut Deliverable, terms: &[String], apply: bool) {
+	let keys: Vec<String> = terms.iter().map(|t| key(t)).collect();
+	let (picked, rest): (Vec<Term>, Vec<Term>) = std::mem::take(&mut d.draft.vocab).into_iter().partition(|t| keys.contains(&key(&t.term)));
+	d.draft.vocab = rest;
+	if apply {
+		for t in picked {
+			if !d.vocab.iter().any(|v| key(&v.term) == key(&t.term)) {
+				d.vocab.push(t);
+			}
+		}
+	}
 }
 
 #[cfg(test)]
@@ -434,5 +491,21 @@ mod tests {
 		assert_eq!(d.vocab.len(), 2);
 		assert!(d.draft.skill.is_empty() && d.draft.vocab.is_empty());
 		assert!(apply_draft(&mut d, "모름", true).is_err());
+	}
+
+	#[test]
+	fn draft_vocab_applies_only_picked_terms() {
+		let mine = Term { term: "회신".into(), note: "내가 적은 뜻".into(), ..Default::default() };
+		let mut d = Deliverable { vocab: vec![mine.clone()], ..Default::default() };
+		d.draft.vocab = vec![t("접수"), t("피해이력"), t("경사도"), t("회신")];
+
+		// 대소문자 · 앞뒤 빈칸은 가리지 않고, 이미 있는 말은 덮지 않는다
+		apply_draft_vocab(&mut d, &[" 접수 ".into(), "회신".into()], true);
+		assert_eq!(d.vocab, vec![mine, t("접수")]);
+		assert_eq!(d.draft.vocab, vec![t("피해이력"), t("경사도")]);
+
+		apply_draft_vocab(&mut d, &["경사도".into()], false);
+		assert_eq!(d.vocab.len(), 2);
+		assert_eq!(d.draft.vocab, vec![t("피해이력")]);
 	}
 }

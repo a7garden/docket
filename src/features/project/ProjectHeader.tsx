@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { BookA, BookMarked, Check, ChevronRight, Copy, FileStack, FolderOpen, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, attempt, copy, DropdownActions } from "@/components/ActionMenu";
 import { Label } from "@/components/bits";
+import { KeyTip } from "@/components/KeyTip";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -12,13 +12,27 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
+import { keyAnchor } from "@/lib/keys";
+import { type NoticeView, useNoticeCounts } from "@/lib/notices";
 import { qk } from "@/lib/queries";
 import { useUi, type View } from "@/lib/store";
 import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+/**
+ * 프로젝트 머리의 화면 탭. Ctrl+1~5 가 이 순서를 그대로 따른다 — 숫자가 곧 탭 자리다.
+ * 탭 순서를 바꾸면 키 숫자도 함께 바뀐다.
+ */
+export const PROJECT_TABS: [View, string][] = [
+	["board", "보드"],
+	["talks", "대화"],
+	["deliverables", "산출물"],
+	["knowledge", "지식베이스"],
+	["glossary", "어휘 사전"],
+];
+
 /** 프로젝트를 고르고(이미 보던 것이면 연 이슈를 닫지 않는다) 그 프로젝트의 화면으로 간다. */
-function goProject(id: string, view?: View) {
+export function goProject(id: string, view?: View) {
 	const ui = useUi.getState();
 	if (ui.projectId !== id) ui.setProject(id);
 	// 프로젝트 머리는 보드 · 대화 · 산출물 · 지식베이스 · 어휘 사전에만 있다. Claude 설정 · 설정 화면에서 불렀으면 보드로 간다.
@@ -59,6 +73,7 @@ export function ProjectHeader({ project }: { project: Project }) {
 	const setView = useUi((s) => s.setView);
 	const editing = useUi((s) => s.editingProjectId === project.id);
 	const editProject = useUi((s) => s.editProject);
+	const notices = useNoticeCounts()(project.id);
 	return (
 		<header className="flex items-center gap-4">
 			<div className="min-w-0">
@@ -74,24 +89,28 @@ export function ProjectHeader({ project }: { project: Project }) {
 			</div>
 			<div className="flex-1" />
 			<div className="inline-flex rounded-lg bg-secondary p-0.5">
-				{(
-					[
-						["board", "보드"],
-						["talks", "대화"],
-						["deliverables", "산출물"],
-						["knowledge", "지식베이스"],
-						["glossary", "어휘 사전"],
-					] as [View, string][]
-				).map(([v, label]) => (
-					<button
-						key={v}
-						type="button"
-						onClick={() => setView(v)}
-						className={cn("h-7 rounded-md px-3.5 text-[13px] font-medium text-muted-foreground transition-colors", view === v && "bg-hover text-foreground shadow-[inset_0_0_0_1px_var(--border-strong)]")}
-					>
-						{label}
-					</button>
-				))}
+				{PROJECT_TABS.map(([v, label]) => {
+					// 지식베이스 · 어휘 사전에는 알림이 없다. 보고 있는 탭의 숫자도 남긴다 — 탭을 연 것만으로는 항목을 본 것이 아니다.
+					const n = v in notices ? notices[v as NoticeView] : 0;
+					return (
+						<KeyTip key={v} id={`view.${v}`} extra={n ? `확인할 것 ${n}건` : undefined}>
+							<button
+								type="button"
+								onClick={() => setView(v)}
+								{...keyAnchor(`view.${v}`)}
+								className={cn(
+									"flex h-7 items-center gap-1.5 rounded-md px-3.5 text-[13px] font-medium text-muted-foreground transition-colors",
+									view === v && "bg-hover text-foreground shadow-[inset_0_0_0_1px_var(--border-strong)]",
+								)}
+							>
+								{label}
+								{n > 0 && (
+									<span className="tabular grid h-4 min-w-4 place-items-center rounded-full bg-brand px-1 text-[10px] leading-none font-bold text-brand-ink">{n > 99 ? "99+" : n}</span>
+								)}
+							</button>
+						</KeyTip>
+					);
+				})}
 			</div>
 			<DropdownMenu>
 				<DropdownMenuTrigger asChild>
@@ -115,14 +134,6 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 	const [deny, setDeny] = useState(project.deniedTools.join("\n"));
 	const [removing, setRemoving] = useState(false);
 	const [wipe, setWipe] = useState(false);
-	const [preview, setPreview] = useState("");
-	useEffect(() => {
-		if (!open) return;
-		const t = setTimeout(() => {
-			api.namingPreview(project.id, p.naming || "{제목}_v{판}_{날짜}", "테이블 정의서", 3, p.namingUnderscore).then(setPreview, () => setPreview(""));
-		}, 150);
-		return () => clearTimeout(t);
-	}, [open, project.id, p.naming, p.namingUnderscore]);
 	useEffect(() => {
 		if (open) {
 			setP(project);
@@ -242,63 +253,24 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 							<span className="flex flex-col gap-0.5">
 								<span className="font-medium">파일이 겹치지 않는 구현은 함께 돌리기</span>
 								<span className="text-[12px] leading-relaxed break-keep text-subtle">
-									계획에 적힌 파일이 겹치지 않을 때만 둘까지 함께 돌고, 다른 구현이 잡은 파일은 고치지 못하게 막습니다. 계획에 폴더 · 와일드카드가 있거나 「모두 허용」이면 한 줄로 섭니다.
+									계획에 적힌 파일이 겹치지 않으면 몇 개든 함께 돌고, 다른 구현이 잡은 파일은 고치지 못하게 막습니다. 계획에 폴더 · 와일드카드가 있거나 「모두 허용」이면 한 줄로 섭니다.
+								</span>
+							</span>
+						</label>
+						{/* 함께 돌리기를 끄면 모두 한 줄로 서라는 뜻이라 워크트리로 비켜 가지 않는다. */}
+						<label className="flex items-start gap-3 text-[13px]">
+							<Switch checked={p.parallelImpl && !!p.worktree} disabled={!p.parallelImpl} onCheckedChange={(worktree) => setP({ ...p, worktree })} className="mt-0.5" />
+							<span className="flex flex-col gap-0.5">
+								<span className="font-medium">기다려야 할 구현은 워크트리에서 돌리기</span>
+								<span className="text-[12px] leading-relaxed break-keep text-subtle">
+									파일이 겹쳐 줄을 서야 할 구현만 저장소 옆 「저장소이름.worktrees」 폴더에 지금 작업트리의 사본을 만들어 바로 돌립니다. 결과 확인 때 「반영」을 눌러야 본 작업트리에 들어가고, 반영하거나 되돌리면 사본을 지웁니다.
+									사본에는 .gitignore 로 빠진 파일(node_modules · 빌드 결과 · .env)이 없어 처음 빌드가 오래 걸립니다. 저장소가 크면 켜지 마세요. git 저장소의 맨 위 폴더만 됩니다.
 								</span>
 							</span>
 						</label>
 						<EffectiveRules projectId={project.id} open={open} />
 
-						<section className="flex flex-col gap-4 border-t border-border pt-5">
-							<h3 className="text-[14px] font-semibold">산출물</h3>
-							<div className="flex flex-col gap-1.5">
-								<Label>산출물 폴더</Label>
-								<div className="flex gap-2">
-									<Input
-										value={p.deliverablesDir}
-										onChange={(e) => setP({ ...p, deliverablesDir: e.target.value })}
-										placeholder="비우면 앱 데이터 폴더"
-										className="mono h-8 text-[12.5px] placeholder:font-sans md:text-[12.5px]"
-									/>
-									<Button
-										variant="outline"
-										onClick={async () => {
-											const dir = await openDialog({ directory: true, title: "산출물 폴더", defaultPath: p.deliverablesDir || project.path });
-											if (typeof dir === "string") setP({ ...p, deliverablesDir: dir });
-										}}
-									>
-										고르기
-									</Button>
-								</div>
-								<p className="text-[12px] leading-relaxed break-keep text-subtle">판 파일을 이 폴더에 둡니다. 템플릿 · 작성 기록은 앱 데이터에 둡니다.</p>
-							</div>
-							<div className="flex flex-col gap-1.5">
-								<Label>기본 파일 이름 규칙</Label>
-								<Input
-									value={p.naming}
-									onChange={(e) => setP({ ...p, naming: e.target.value })}
-									placeholder="{제목}_v{판}_{날짜}"
-									className="h-8 text-[13px] md:text-[13px]"
-								/>
-								<p className="text-[12px] leading-relaxed text-subtle">
-									쓸 수 있는 자리: <span className="mono text-muted-foreground">{"{제목} {판} {날짜} {시각} {프로젝트}"}</span>
-									{preview && (
-										<>
-											<br />
-											예: <span className="font-medium text-foreground">{preview}</span>
-										</>
-									)}
-								</p>
-							</div>
-							<label className="flex items-center justify-between gap-3 text-[13px]">
-								<span>이름의 빈칸을 _ 로 바꾸기</span>
-								<Switch checked={p.namingUnderscore} onCheckedChange={(v) => setP({ ...p, namingUnderscore: v })} />
-							</label>
-							<div className="flex flex-col gap-1.5">
-								<Label>지난 판을 옮길 폴더</Label>
-								<Input value={p.archiveDir} onChange={(e) => setP({ ...p, archiveDir: e.target.value })} placeholder="예: 이전판 (비우면 옮기지 않음)" className="h-8 text-[13px]" />
-								<p className="text-[12px] leading-relaxed break-keep text-subtle">새 판이 생기면 지난 판 파일을 산출물 폴더 안의 이 폴더로 옮깁니다. 산출물 폴더를 정했을 때만 씁니다.</p>
-							</div>
-						</section>
+						<p className="text-[12px] leading-relaxed break-keep text-subtle">산출물 폴더 · 파일 이름 규칙은 산출물 화면의 「산출물 설정」에서 정합니다.</p>
 
 						<DialogFooter className="items-center">
 							<Button variant="ghost" className="mr-auto text-danger hover:text-danger" onClick={() => setRemoving(true)}>

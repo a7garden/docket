@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Hash, PanelRight, Paperclip, Square } from "lucide-react";
+import { Check, Copy, Hash, PanelRight, Paperclip, Square } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, ContextActions, copy } from "@/components/ActionMenu";
 import { Chip, Diffstat, RunDot } from "@/components/bits";
@@ -77,8 +77,40 @@ function Marked({ text, words }: { text: string; words: string[] }) {
 	);
 }
 
-export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; delaySec: number; words?: string[]; hit?: Hit }) {
+/** 실행 중 카드의 Ctrl+Enter 는 이 안에 한 번 더 눌러야 멈춘다. 키 한 번에 돌던 구현이 멈추면 안 된다. */
+const STOP_CONFIRM_MS = 1500;
+
+export function IssueCard({
+	issue,
+	delaySec,
+	words = [],
+	hit,
+	tabbable = true,
+	selected = false,
+	onPick,
+	onOpen,
+	bulk,
+}: {
+	issue: Issue;
+	delaySec: number;
+	words?: string[];
+	hit?: Hit;
+	/** 보드에서 Tab 이 멈추는 카드인지. 나머지 카드는 방향키로 간다. */
+	tabbable?: boolean;
+	/** 여러 개 고르기에 들어 있는지. */
+	selected?: boolean;
+	/** 주면 Ctrl(맥은 Cmd) · Shift 클릭이 상세 창을 여는 대신 카드를 고른다. */
+	onPick?: (e: React.MouseEvent) => void;
+	/** 그냥 클릭 · Enter 로 열 때 먼저 부른다. 탐색기처럼 고른 것을 푼다. */
+	onOpen?: () => void;
+	/** 고른 카드를 우클릭했을 때 맨 위에 붙일 「고른 N개」 항목. */
+	bulk?: ActionList;
+}) {
 	const openIssue = useUi((s) => s.openIssue);
+	const open = () => {
+		onOpen?.();
+		openIssue(issue.id);
+	};
 	const activity = useLive((s) => (issue.run ? s.byTarget[issue.id]?.activity : undefined));
 	const waitingAuto = issue.status === "inbox" && issue.autoPlan && !issue.run && !issue.error;
 	const now = useNow(waitingAuto);
@@ -114,9 +146,37 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 		e.stopPropagation();
 		if (primary) void act(primary.call);
 	};
+	// 상태 줄에 단추가 보이는 경우. 아래 상태 줄의 갈래와 같다 — 단추가 없으면(완료 · 보류의 다시 열기, 자동 계획 대기) Ctrl+Enter 도 아무것도 하지 않는다.
+	// 우클릭 메뉴에만 있는 동작이 키 한 번에 보이지 않게 실행되면 안 된다.
+	const button =
+		issue.run || (!issue.error && ((issue.status === "planned" && questions === 0) || issue.status === "review" || (issue.status === "inbox" && !waitingAuto)))
+			? primary
+			: null;
+	const [armed, setArmed] = useState(0);
+	useEffect(() => {
+		if (!armed) return;
+		const t = setTimeout(() => setArmed(0), STOP_CONFIRM_MS);
+		return () => clearTimeout(t);
+	}, [armed]);
+	const pressKey = () => {
+		if (!button || busy || button.disabled) return;
+		if (issue.run && !armed) {
+			setArmed(Date.now());
+			toast(`한 번 더 누르면 ${issue.run.phase === "queued" ? "줄에서 뺍니다" : "중지합니다"}`, { id: `stop:${issue.id}`, duration: STOP_CONFIRM_MS });
+			return;
+		}
+		setArmed(0);
+		toast.dismiss(`stop:${issue.id}`);
+		void act(button.call);
+	};
+	// 키보드로 초점이 간 카드에서만 주 단추에 테두리를 켠다. 「Ctrl+Enter 가 이 단추를 누른다」는 표시다.
+	// 글자 줄을 끼우면 카드 높이가 바뀌어 아래 카드가 밀리므로 자리를 차지하지 않는 ring(box-shadow)만 쓴다. 마우스로 누를 때는 :focus-visible 이 아니라 켜지지 않는다.
+	const cue = "group-focus-visible:ring-2 group-focus-visible:ring-ring";
 	const { items, dialogs } = useIssueActions(issue);
 	const menu: ActionList = [
-		{ label: "열기", icon: <PanelRight />, onSelect: () => openIssue(issue.id) },
+		...(bulk ?? []),
+		"sep",
+		{ label: "열기", icon: <PanelRight />, onSelect: open },
 		primaryItem(primary, (fn) => void act(fn), busy),
 		"sep",
 		{ label: "번호 복사", icon: <Hash />, onSelect: () => void copy(`#${issue.number}`, "번호") },
@@ -128,10 +188,33 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 	const card = (
 		<div
 			role="button"
-			tabIndex={0}
-			onClick={() => openIssue(issue.id)}
+			tabIndex={tabbable ? 0 : -1}
+			data-issue-id={issue.id}
+			aria-selected={onPick ? selected : undefined}
+			onMouseDown={(e) => {
+				// Shift 클릭으로 범위를 고를 때 카드 사이 글자가 끌려 선택되지 않게 한다.
+				if (onPick && e.shiftKey) e.preventDefault();
+			}}
+			onClick={(e) => {
+				if (onPick && (e.ctrlKey || e.metaKey || e.shiftKey)) onPick(e);
+				else open();
+			}}
 			onKeyDown={(e) => {
-				if (e.key === "Enter") openIssue(issue.id);
+				// 카드 안 단추에서 누른 키는 그 단추의 것이다.
+				if (e.target !== e.currentTarget || e.nativeEvent.isComposing || e.altKey) return;
+				const mod = e.ctrlKey || e.metaKey;
+				if (e.key === "Enter") {
+					// Ctrl+Enter 는 단추가 없어도 카드를 열지 않는다 — 단추를 누르려던 키로 창이 열리면 헷갈린다.
+					e.preventDefault();
+					if (!mod) open();
+					else if (!e.shiftKey && !e.repeat) pressKey();
+					return;
+				}
+				// 한글 입력 상태에서도 되도록 글자(e.key)가 아니라 자판 자리(e.code)로 본다.
+				if (e.code === "KeyC" && !mod && !e.shiftKey && !e.repeat) {
+					e.preventDefault();
+					void copy(`#${issue.number}`, "번호");
+				}
 			}}
 			className={cn(
 				"surface group flex flex-col gap-1.5 rounded-xl p-3 text-left transition-[border-color,background-color] outline-none hover:border-[var(--border-strong)] focus-visible:ring-2 focus-visible:ring-ring",
@@ -139,9 +222,12 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 				issue.error && !issue.run && "border-danger/30",
 				// 결정할 차례인 카드만 노랗게 띄운다. 보드에서 사용자가 먼저 봐야 할 것은 이 카드들이다.
 				decide && "border-brand/90 hover:border-brand",
+				// 고른 카드는 무채색으로 띄운다. 노랑 · 빨강은 결정할 것 · 실패만 뜻한다.
+				selected && "border-foreground/70 bg-secondary shadow-[inset_0_0_0_1px_var(--foreground)] hover:border-foreground/70",
 			)}
 		>
 			<div className="flex items-center gap-2 text-[11.5px] text-subtle">
+				{selected && <Check aria-hidden className="-mr-1 size-3 text-foreground" />}
 				<span className="mono tabular">#{issue.number}</span>
 				<span>{relTime(issue.updatedAt)}</span>
 				<div className="flex-1" />
@@ -182,7 +268,12 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 							aria-label="중지"
 							title={issue.run.phase === "queued" ? "줄에서 빼기" : "중지"}
 							disabled={busy}
-							className="shrink-0 text-subtle hover:text-danger"
+							tabIndex={-1}
+							className={cn(
+								"shrink-0 text-subtle hover:text-danger group-focus-visible:ring-2 group-focus-visible:ring-danger/50",
+								// 한 번 눌러 두 번째를 기다리는 동안은 빨갛게 — 한 번 더 누르면 멈춘다는 표시다.
+								armed > 0 && "text-danger group-focus-visible:ring-danger",
+							)}
 							onClick={press}
 						>
 							<Square className="size-2.5 fill-current" />
@@ -202,8 +293,8 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 							issue.plan && issue.plan.files.length > 0 && <span className="min-w-0 truncate text-[12px] text-subtle">파일 {issue.plan.files.length}개</span>
 						)}
 						<div className="flex-1" />
-						{questions === 0 && (
-							<Button size="xs" disabled={busy} onClick={press}>
+						{button && (
+							<Button size="xs" disabled={busy} tabIndex={-1} className={cue} onClick={press}>
 								승인하고 구현
 							</Button>
 						)}
@@ -217,7 +308,7 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 							</span>
 						)}
 						<div className="flex-1" />
-						<Button size="xs" disabled={busy} onClick={press}>
+						<Button size="xs" disabled={busy} tabIndex={-1} className={cue} onClick={press}>
 							완료
 						</Button>
 					</>
@@ -227,7 +318,7 @@ export function IssueCard({ issue, delaySec, words = [], hit }: { issue: Issue; 
 						{remain > 0 ? `자동 계획 ${remain}초 뒤` : "곧 계획을 시작합니다"}
 					</span>
 				) : issue.status === "inbox" ? (
-					<Button size="xs" variant="secondary" disabled={busy} onClick={press}>
+					<Button size="xs" variant="secondary" disabled={busy} tabIndex={-1} className={cue} onClick={press}>
 						계획 세우기
 					</Button>
 				) : (

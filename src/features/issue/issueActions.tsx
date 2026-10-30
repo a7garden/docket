@@ -62,8 +62,14 @@ export function RevertConfirm({ issue, open, onOpenChange }: { issue: Issue; ope
 				<AlertDialogHeader>
 					<AlertDialogTitle>#{issue.number} 의 구현을 되돌릴까요?</AlertDialogTitle>
 					<AlertDialogDescription>
-						Claude 가 이 이슈에서 바꾼 파일 {files}개를 기록한 변경분대로 거꾸로 고칩니다. 그 뒤에 직접 고친 줄은 지키라고 지시합니다.
-						{created > 0 && ` 새로 만든 파일 ${created}개는 앱 데이터의 휴지통 폴더로 옮깁니다.`} 끝나면 계획 단계로 돌아가 다시 승인하거나 다시 계획할 수 있습니다.
+						{issue.worktree ? (
+							<>워크트리에서 고친 것을 반영하지 않고 워크트리를 지웁니다. 본 작업트리는 건드리지 않습니다. 계획 단계로 돌아가 다시 승인하거나 다시 계획할 수 있습니다.</>
+						) : (
+							<>
+								Claude 가 이 이슈에서 바꾼 파일 {files}개를 기록한 변경분대로 거꾸로 고칩니다. 그 뒤에 직접 고친 줄은 지키라고 지시합니다.
+								{created > 0 && ` 새로 만든 파일 ${created}개는 앱 데이터의 휴지통 폴더로 옮깁니다.`} 끝나면 계획 단계로 돌아가 다시 승인하거나 다시 계획할 수 있습니다.
+							</>
+						)}
 					</AlertDialogDescription>
 				</AlertDialogHeader>
 				<AlertDialogFooter>
@@ -123,7 +129,7 @@ export function useIssueActions(issue: Issue): { items: ActionList; dialogs: Rea
 				<AlertDialogContent className="pop">
 					<AlertDialogHeader>
 						<AlertDialogTitle>#{issue.number} 를 지울까요?</AlertDialogTitle>
-						<AlertDialogDescription>메모 · 계획 · 첨부 · 실행 기록을 앱 데이터의 휴지통 폴더로 옮깁니다. 이미 고친 코드는 그대로 남습니다.</AlertDialogDescription>
+						<AlertDialogDescription>메모 · 계획 · 첨부 · 실행 기록을 앱 데이터의 휴지통 폴더로 옮깁니다. 이미 고친 코드는 그대로 남습니다.{issue.worktree && " 반영하지 않은 워크트리는 함께 지웁니다."}</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>
 						<AlertDialogCancel>취소</AlertDialogCancel>

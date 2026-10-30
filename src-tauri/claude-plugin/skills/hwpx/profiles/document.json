@@ -1,0 +1,5 @@
+{
+  "default": {},
+  "neutral": {"font": "맑은 고딕", "body_size": 11, "accent": "334155"},
+  "public": {"font": "맑은 고딕", "body_size": 12, "accent": "245A81"}
+}

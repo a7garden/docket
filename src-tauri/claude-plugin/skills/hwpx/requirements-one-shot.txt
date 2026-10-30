@@ -1,0 +1,4 @@
+lxml>=4.9
+jsonschema>=4.18
+Pillow>=10
+pywin32>=306; sys_platform == "win32"

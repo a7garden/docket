@@ -4,7 +4,7 @@ import { PanelRight, Square } from "lucide-react";
 import { toast } from "sonner";
 import { api, errorText } from "@/lib/api";
 import { type Job, useJobs } from "@/lib/jobs";
-import { useLive, useUi } from "@/lib/store";
+import { liveKey, useLive, useUi } from "@/lib/store";
 import { type ActionList, ContextActions } from "./ActionMenu";
 import { RunDot } from "./bits";
 import { NoticeCenter } from "./NoticeCenter";
@@ -34,8 +34,6 @@ export function TitleBar() {
 	}, []);
 
 	const jobs = useJobs();
-	const running = jobs.filter((j) => j.phase === "running").length;
-	const queued = jobs.length - running;
 
 	// 실행 중에 닫으면 묻는다. ✕ 단추 · Alt+F4 · 작업 표시줄 닫기가 모두 이 사건으로 온다.
 	// 묻고 나서는 destroy 로 닫는다. close 를 다시 부르면 이 사건이 또 와서 창이 닫히지 않는다.
@@ -60,28 +58,15 @@ export function TitleBar() {
 				</span>
 			</div>
 			<div data-tauri-drag-region className="flex-1 self-stretch" />
-			<UsageMeter />
+			{/* 2026.10.29 : 사용량 · 종 · 실행 → 실행 · 사용량 │ 종. 생겼다 사라지던 실행 단추가 사용량 · 종을 밀어 자리가 흔들렸다.
+			    실행 단추는 쉴 때도 늘 두고, 종은 창 단추 옆에 따로 세워 자리를 외우게 한다. */}
+			<div className="flex items-center gap-1">
+				<RunQueue jobs={jobs} />
+				<UsageMeter />
+			</div>
+			<Divider />
 			<NoticeCenter />
-			{jobs.length > 0 && (
-				<Popover>
-					<PopoverTrigger asChild>
-						<button
-							type="button"
-							title="실행 중인 작업 보기 · 중지"
-							className="mr-2 flex h-7 items-center gap-2 rounded-md px-2.5 text-[12px] text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:bg-hover data-[state=open]:text-foreground"
-						>
-							<RunDot />
-							<span className="tabular">
-								Claude 실행 {running}
-								{queued > 0 && ` · 대기 ${queued}`}
-							</span>
-						</button>
-					</PopoverTrigger>
-					<PopoverContent align="end" className="pop w-96 p-0">
-						<JobList jobs={jobs} />
-					</PopoverContent>
-				</Popover>
-			)}
+			<Divider />
 			<div className="flex h-full">
 				<WinButton label="최소화" onClick={() => void win.minimize()}>
 					<path d="M1 5.5h9" />
@@ -138,6 +123,54 @@ export function TitleBar() {
 	);
 }
 
+/** 제목 줄 묶음 사이의 세로선. */
+function Divider() {
+	return <span aria-hidden className="mx-1.5 h-4 w-px shrink-0 bg-border" />;
+}
+
+/**
+ * 실행 · 대기 중인 Claude 작업. 작업이 없어도 「쉬는 중」으로 남는다 — 단추가 생겼다 사라지면 옆 단추들이 밀린다.
+ * jobs 는 창 닫기 경고와 같은 목록을 받는다. 따로 세면 두 곳의 건수가 어긋난다.
+ */
+function RunQueue({ jobs }: { jobs: Job[] }) {
+	const running = jobs.filter((j) => j.phase === "running").length;
+	const queued = jobs.length - running;
+	return (
+		<Popover>
+			<PopoverTrigger asChild>
+				<button
+					type="button"
+					title={jobs.length ? "Claude 실행 중인 작업 보기 · 중지" : "Claude 가 돌리는 작업이 없습니다"}
+					className="flex h-7 items-center gap-2 rounded-md px-2.5 text-[12px] text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:bg-hover data-[state=open]:text-foreground"
+				>
+					{jobs.length ? (
+						<>
+							<RunDot className={running ? undefined : "bg-subtle [animation:none]"} />
+							<span className="tabular">
+								실행 {running}
+								{queued > 0 && ` · 대기 ${queued}`}
+							</span>
+						</>
+					) : (
+						<>
+							<RunDot className="bg-subtle [animation:none]" />
+							<span>쉬는 중</span>
+						</>
+					)}
+				</button>
+			</PopoverTrigger>
+			<PopoverContent align="end" className="pop w-96 p-0">
+				{jobs.length ? <JobList jobs={jobs} /> : <p className="px-3 py-8 text-center text-[13px] text-subtle">돌고 있는 작업이 없습니다</p>}
+			</PopoverContent>
+		</Popover>
+	);
+}
+
+function stopJob(j: Job) {
+	if (j.target === "issue") return api.issueStop(j.project.id, j.id);
+	return j.learn ? api.deliverableLearnStop(j.project.id, j.id) : api.deliverableStop(j.project.id, j.id);
+}
+
 function JobList({ jobs }: { jobs: Job[] }) {
 	const [busy, setBusy] = useState(false);
 	const stop = async (fn: () => Promise<unknown>) => {
@@ -151,7 +184,7 @@ function JobList({ jobs }: { jobs: Job[] }) {
 		<div className="flex flex-col">
 			<ul className="flex max-h-80 flex-col overflow-y-auto py-1">
 				{jobs.map((j) => (
-					<JobRow key={j.key} job={j} onStop={() => void stop(() => (j.target === "issue" ? api.issueStop(j.project.id, j.id) : api.deliverableStop(j.project.id, j.id)))} />
+					<JobRow key={j.key} job={j} onStop={() => void stop(() => stopJob(j))} />
 				))}
 			</ul>
 			<div className="flex items-center justify-between border-t border-border px-3 py-2">
@@ -176,8 +209,8 @@ function JobList({ jobs }: { jobs: Job[] }) {
 }
 
 function JobRow({ job, onStop }: { job: Job; onStop: () => void }) {
-	const activity = useLive((s) => (job.phase === "running" ? s.byTarget[job.id]?.activity : undefined));
-	const go = () => useUi.getState().openTarget({ projectId: job.project.id, target: job.target, id: job.id, talk: job.talk });
+	const activity = useLive((s) => (job.phase === "running" ? s.byTarget[liveKey(job.learn ? "learn" : job.target, job.id)]?.activity : undefined));
+	const go = () => useUi.getState().openTarget({ projectId: job.project.id, target: job.target, id: job.id, talk: job.talk, tab: job.learn ? "recipe" : undefined });
 	const menu: ActionList = [
 		{ label: job.talk ? "대화 열기" : job.target === "issue" ? "이슈 열기" : "산출물 열기", icon: <PanelRight />, onSelect: go },
 		"sep",

@@ -1,8 +1,8 @@
 /*
  * 설정 화면.
- * - 목차 SECTIONS · 화면 Settings (왼쪽 목차 + 본문 두 단)
+ * - 목차 SECTIONS · 구획별 항목 이름 SETTING_ROWS(Ctrl+K 로 찾는다) · 화면 Settings (왼쪽 목차 + 본문 두 단)
  * - 구획: Claude · 자동 계획 · 지식베이스 · 산출물 · 플러그인(Plugins.tsx) · 화면 · 업데이트(Updates.tsx) · 저장 위치
- * - 틀: Group · Row (Updates.tsx · Plugins.tsx 도 쓴다)
+ * - 틀: Group · Row (Updates.tsx · Plugins.tsx · DocTools.tsx 도 쓴다)
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -16,8 +16,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { api, errorText } from "@/lib/api";
 import { qk, useAppInfo, useSettings } from "@/lib/queries";
+import { useUi } from "@/lib/store";
 import type { Settings as S } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { DocTools } from "./DocTools";
 import { Plugins } from "./Plugins";
 import { RunPicker } from "./RunPicker";
 import { Updates } from "./Updates";
@@ -37,7 +39,7 @@ const KB_MODELS = [
 ];
 
 /** 구획 id 와 제목. 목차와 각 Group 의 제목이 여기 한 곳에서 나온다. 순서가 화면 순서다. */
-const SECTIONS = {
+export const SECTIONS = {
 	claude: "Claude",
 	autoPlan: "자동 계획",
 	knowledge: "지식베이스",
@@ -47,8 +49,23 @@ const SECTIONS = {
 	updates: "업데이트",
 	storage: "저장 위치",
 } as const;
-type SectionId = keyof typeof SECTIONS;
-const SECTION_IDS = Object.keys(SECTIONS) as SectionId[];
+export type SectionId = keyof typeof SECTIONS;
+export const SECTION_IDS = Object.keys(SECTIONS) as SectionId[];
+
+/**
+ * 구획마다 든 항목 이름. Ctrl+K 팔레트가 「계획 모델」로 찾으면 그 구획으로 간다.
+ * 행을 더하거나 이름을 바꾸면 여기도 고친다 — 고치지 않으면 팔레트에서 그 항목을 못 찾을 뿐 화면은 그대로다.
+ */
+export const SETTING_ROWS: Record<SectionId, string[]> = {
+	claude: ["실행 파일", "계획 모델", "구현 모델", "대화 모델", "제목 모델", "MCP 서버"],
+	autoPlan: ["새 메모에 켜기", "기다리는 시간"],
+	knowledge: ["카드 모델"],
+	deliverables: ["파일을 넣으면 작성법 뽑기", "한컴으로 확인", "문서 도구"],
+	plugins: [],
+	screen: ["테마", "보내기 키"],
+	updates: ["지금 판", "자동으로 확인", "새 판", "바뀐 내용"],
+	storage: ["앱 데이터", "Claude 설정 폴더"],
+};
 const sectionDom = (id: SectionId) => `settings-${id}`;
 
 /**
@@ -100,6 +117,15 @@ export function Settings() {
 		if (settings) setS(settings);
 	}, [settings]);
 	const { scrollRef, active, go } = useActiveSection(s !== null);
+	// 팔레트에서 고른 구획. 설정이 처음 그려질 때는 s 가 오기 전이라 구획이 없다 — 그려진 뒤에 옮기고 비운다.
+	const pending = useUi((u) => u.settingsSection);
+	const ready = s !== null;
+	useEffect(() => {
+		if (!ready || !pending) return;
+		if (pending in SECTIONS) go(pending as SectionId);
+		useUi.setState({ settingsSection: null });
+		// eslint-disable-next-line react-hooks/exhaustive-deps -- go 는 렌더마다 새 함수지만 같은 일을 한다
+	}, [ready, pending]);
 
 	const save = async (patch: Partial<S>) => {
 		if (!s) return;
@@ -184,7 +210,7 @@ export function Settings() {
 								/>
 							</Row>
 						))}
-						<Row label="제목 모델" hint="새 메모의 제목을 이 모델이 지어 붙입니다. 메모를 고치면 몇 초 뒤 다시 짓습니다. 끄면 첫 줄이 제목입니다.">
+						<Row label="제목 모델" hint="새 메모의 제목을 이 모델이 지어 붙입니다. 메모를 고치면 몇 초 뒤 다시 짓습니다. 대화는 첫 답이 끝난 뒤 한 번 짓습니다. 끄면 첫 줄 · 첫 질문이 제목입니다.">
 							<Select value={s.titleModel || "off"} onValueChange={(v) => void save({ titleModel: v === "off" ? "" : v })}>
 								<SelectTrigger className="w-48">
 									<SelectValue />
@@ -253,6 +279,14 @@ export function Settings() {
 						>
 							<Switch checked={s.recipeAuto} onCheckedChange={(v) => void save({ recipeAuto: v })} />
 						</Row>
+						<Row
+							label="한컴으로 확인"
+							hint="켜면 한글 산출물을 한컴오피스로 열어 보고 쪽 수를 정확히 잽니다. 한컴 자동화 보안 모듈이 등록되지 않았으면 열 때마다 접근 확인 창이 뜹니다. 끄면 앱에 든 한글 렌더러로 그리고 읽어 보며, 쪽 나눔은 한컴과 조금 다를 수 있습니다."
+							inline
+						>
+							<Switch checked={s.hancomCheck} onCheckedChange={(v) => void save({ hancomCheck: v })} />
+						</Row>
+						<DocTools />
 					</Group>
 
 					<Plugins enabled={s.enabledPlugins} onToggle={togglePlugin} />
@@ -299,7 +333,7 @@ export function Settings() {
 						</Row>
 					</Group>
 
-					<Updates version={info?.version} />
+					<Updates version={info?.version} auto={s.autoUpdateCheck} onAutoChange={(v) => void save({ autoUpdateCheck: v })} />
 
 					<Group id="storage">
 						<Row

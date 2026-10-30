@@ -4,8 +4,8 @@
 //! - 계획과 문서 작성은 읽기 도구(Read · Grep · Glob)만 열어 저장소를 고칠 수 없게 한다.
 //! - 결과는 --json-schema 로 받는다. 화면이 계획 · 결과를 칸별로 보여 주려면 구조가 필요하다.
 //! - 한 프로젝트 안의 구현 · 되돌리기 · 파일로 만드는 산출물은 줄에 선다. 두 구현이 같은 파일을 동시에 고치지 않게 한다.
-//!   구현은 계획에 적힌 파일을 잡고, 겹치지 않으면 IMPL_SLOTS 개까지 함께 돈다. 근거가 애매하면 프로젝트 전체를 잡는다(Claims).
-//!   계획 · 대화 · 마크다운 산출물은 줄을 기다리지 않고 프로젝트마다 READ_SLOTS 개까지 함께 돈다.
+//!   구현은 계획에 적힌 파일을 잡고, 겹치지 않으면 몇 개든 함께 돈다. 근거가 애매하면 프로젝트 전체를 잡는다(Claims).
+//!   계획 · 대화 · 마크다운 산출물은 저장소를 고치지 않으므로 줄을 기다리지 않고 바로 돈다.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,13 +30,24 @@ const PLAN_SCHEMA: &str = r#"{"type":"object","properties":{"title":{"type":"str
 const IMPL_SCHEMA: &str = r#"{"type":"object","properties":{"summary":{"type":"string"},"changed":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"what":{"type":"string"}},"required":["path","what"]}},"verification":{"type":"string"},"followups":{"type":"array","items":{"type":"string"}},"screenshots":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"caption":{"type":"string"}},"required":["path","caption"]}}},"required":["summary","changed","verification"]}"#;
 
 /// skip · reason 은 자동 갱신이 「반영할 것이 없다」고 답하는 칸이다. 요청이 그렇게 시킬 때만 쓴다.
-const DOC_SCHEMA: &str = r#"{"type":"object","properties":{"title":{"type":"string"},"document":{"type":"string"},"skip":{"type":"boolean"},"reason":{"type":"string"}},"required":["title","document"]}"#;
-
 const FILE_SCHEMA: &str = r#"{"type":"object","properties":{"title":{"type":"string"},"summary":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"skip":{"type":"boolean"},"reason":{"type":"string"}},"required":["title","summary","files"]}"#;
 
 /// 파일로 만들 때 저장소 안 편집을 막는다. cwd 가 저장소라 ./** 가 저장소 전체다. 산출물 폴더(--add-dir)는 걸리지 않는다.
 /// 2026-10-28 실측: Edit 가 「denied by your permission settings」로 거부되고 --add-dir 폴더의 Write 는 통과했다.
 const DENY_REPO_EDITS: &[&str] = &["Edit(./**)", "Write(./**)"];
+
+/// 파일 산출물에서 막는 계정 · 사용자 스킬. 같은 일을 앱에 실은 docket:* 스킬이 맡는다 — 이 PC 에 무엇이 깔렸는지에 따라 꼴이 달라지지 않게.
+/// docs 는 「문서면 무엇이든 먼저 이 스킬」이라 적혀 있어 템플릿 채우기를 가로챌 수 있다. hwpx 는 사용자 전역에 같은 이름이 있다.
+/// 2026-10-29 실측: Skill(anthropic-skills:docx) 거부 규칙으로 그 스킬 호출이 막혔다.
+const DENY_FOREIGN_DOC_SKILLS: &[&str] = &[
+	"Skill(anthropic-skills:docx)",
+	"Skill(anthropic-skills:xlsx)",
+	"Skill(anthropic-skills:pptx)",
+	"Skill(anthropic-skills:pdf)",
+	"Skill(anthropic-skills:docs)",
+	"Skill(hwpx)",
+	"Skill(anti-slop)",
+];
 
 const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
 
@@ -90,6 +101,11 @@ pub fn emit_issue(app: &AppHandle, v: &IssueView) {
 
 pub fn emit_deliverable(app: &AppHandle, v: &DeliverableView) {
 	let _ = app.emit("docket://deliverable", v);
+}
+
+/// 실행 사건 하나를 화면으로 보낸다. 이 모듈 밖에서 도는 실행(작성법 뽑기)이 쓴다.
+pub fn emit_run(app: &AppHandle, pid: &str, target: &str, target_id: &str, run_id: &str, ev: &RunEvent) {
+	let _ = app.emit("docket://run", Envelope { project_id: pid, target, target_id, run_id, event: ev });
 }
 
 /// 결정할 일이 생겼는데 창이 뒤에 있으면 작업 표시줄에서 깜빡인다.
@@ -271,6 +287,25 @@ fn job_perms(job: &Job, p: &Project) -> Perms {
 	}
 }
 
+/// 계획 · 구현 · 대화 · 산출물 실행에 얹는 설정. 거부 목록과 함께 --settings 한 번으로 넘긴다 — 두 번 주면 앞의 것을 덮는지 확인하지 못했다.
+/// 2026.10.29 : 사용자 전역 CLAUDE.md 를 빼고(claudeMdExcludes) 자동 메모리를 껐다. 전역 지침은 docket 이 시키는 일과 관계없는
+///   개인 운영 규칙이라 실행마다 7,400 토큰쯤을 캐시에 새로 쓰고 차례마다 다시 읽었다. 빼니 12,316 → 4,177 토큰(CLI 2.1.311 실측).
+///   저장소 · 상위 폴더 CLAUDE.md 는 그대로 실린다. --safe-mode 는 저장소 지침까지 끄고, --setting-sources 로 사용자 설정을 빼면
+///   사용자 settings.json 의 거부 규칙(SVN 쓰기 금지 등) · 훅까지 빠져 쓰지 않는다. 사용자 스킬 목록은 150 토큰쯤이라 남긴다.
+fn run_settings(deny: &[&str]) -> Value {
+	// 값은 glob 이라 \ 가 이스케이프로 읽힐 수 있다. / 로 적어도 Windows 경로에 맞는 것을 확인했다.
+	let home = crate::claude_files::claude_home().to_string_lossy().replace('\\', "/");
+	let home = home.trim_end_matches('/');
+	let mut v = serde_json::json!({
+		"claudeMdExcludes": [format!("{home}/CLAUDE.md"), format!("{home}/rules/**")],
+		"autoMemoryEnabled": false,
+	});
+	if !deny.is_empty() {
+		v["permissions"] = serde_json::json!({ "deny": deny });
+	}
+	v
+}
+
 /// --allowedTools 는 값을 여럿 받으므로 뒤에 곧바로 다른 플래그가 와야 한다. 거부 목록은 --settings 로 건다.
 /// 사용자 전역 · 저장소 설정의 규칙도 CLI 가 함께 읽어 합친다.
 fn perm_args(a: &mut Vec<String>, perms: &Perms, extra_deny: &[&str]) {
@@ -283,9 +318,7 @@ fn perm_args(a: &mut Vec<String>, perms: &Perms, extra_deny: &[&str]) {
 		a.extend(perms.allow.iter().cloned());
 	}
 	let deny: Vec<&str> = perms.deny.iter().map(String::as_str).chain(extra_deny.iter().copied()).collect();
-	if !deny.is_empty() {
-		a.extend(["--settings".into(), serde_json::json!({ "permissions": { "deny": deny } }).to_string()]);
-	}
+	a.extend(["--settings".into(), run_settings(&deny).to_string()]);
 }
 
 pub struct Parser {
@@ -528,6 +561,17 @@ fn valid_session_id(sid: &str) -> bool {
 }
 
 /// 폴더 이름 규칙은 CLI 판마다 바뀔 수 있다. 정한 자리에 없으면 모든 프로젝트 폴더에서 찾는다.
+/// 세션 기록을 다른 폴더의 자리로 복사한다. claude 는 실행 폴더의 자리에서만 세션을 찾아 이어 붙인다 — 워크트리를 오갈 때 쓴다.
+/// 못 찾으면 그만둔다. 이어 붙이기가 실패하면 새 세션으로 한 번 더 간다(run_issue_job).
+pub(crate) fn copy_transcript(sid: &str, from: &str, to: &str) {
+	let Some(src) = transcript_path(from, sid) else { return };
+	let dir = transcripts_dir(to);
+	let dst = dir.join(format!("{sid}.jsonl"));
+	if src != dst && std::fs::create_dir_all(&dir).is_ok() {
+		let _ = std::fs::copy(&src, &dst);
+	}
+}
+
 pub fn transcript_path(cwd: &str, sid: &str) -> Option<PathBuf> {
 	if !valid_session_id(sid) {
 		return None;
@@ -827,29 +871,25 @@ impl RunCtl {
 		Self { cancel: AtomicBool::new(false), notify: Notify::new() }
 	}
 
-	fn cancelled(&self) -> bool {
+	pub(crate) fn cancelled(&self) -> bool {
 		self.cancel.load(Ordering::SeqCst)
 	}
 
-	async fn wait_cancel(&self) {
+	pub(crate) async fn wait_cancel(&self) {
 		while !self.cancelled() {
 			self.notify.notified().await;
 		}
 	}
 }
 
-/// 줄 밖에서 한 프로젝트가 함께 돌리는 실행 수.
-/// 2026.10.28 : 3. 자동 계획이 메모를 한꺼번에 띄워도 사용량이 예측되게 묶는다.
-const READ_SLOTS: usize = 3;
-
-/// 파일이 겹치지 않아 함께 도는 구현의 상한.
-/// 2026.10.29 : 2. 한 저장소에서 빌드 · 테스트 명령이 겹치는 부담을 줄이려고 낮게 잡았다.
-const IMPL_SLOTS: usize = 2;
-
-/// 실행이 잡고 도는 차례. 실행이 끝나 놓아야 다음 실행이 들어온다.
+/// 실행이 잡고 도는 차례. 잡은 범위는 실행이 끝나 놓아야 겹치는 다음 실행이 들어온다.
+/// 2026.10.29 : 함께 도는 수의 상한(구현 2 · 줄 밖 3)을 없앴다. 겹치지 않는데도 수에 걸려 기다리면 효율이 떨어진다 — 기다릴지는 잡은 파일이 겹치는지로만 정한다.
 enum Seat {
 	Claim(#[allow(dead_code)] ClaimGuard),
-	Slot(#[allow(dead_code)] tokio::sync::OwnedSemaphorePermit),
+	/// 줄 밖 실행. 잡는 것이 없다.
+	Free,
+	/// 기다려야 했지만 워크트리로 비켜 간다. 본 작업트리에서 잡는 것이 없다.
+	Branch,
 }
 
 /// 줄에 서는 실행이 잡는 범위. 구현끼리 같은 파일을 함께 고치지 않게 하려는 것이다.
@@ -930,9 +970,6 @@ impl Claims {
 		if let Some(c) = book.held.iter().find_map(|c| shared(c, me).map(|p| (c, p))) {
 			return Err(wait_text(me, &c.0.label, &c.1));
 		}
-		if me.files.is_some() && book.held.len() >= IMPL_SLOTS {
-			return Err(format!("함께 도는 구현이 {IMPL_SLOTS}개라 기다림"));
-		}
 		if let Some(c) = book.waiting[..at].iter().find(|(_, c)| shared(c, me).is_some()) {
 			return Err(wait_text(me, &c.1.label, ""));
 		}
@@ -946,6 +983,16 @@ impl Claims {
 			book.held.retain(|c| c.key != key);
 		}
 		self.freed.notify_waiters();
+	}
+
+	/// 이 파일들을 잡고 도는 실행. 워크트리 반영이 고치는 중인 파일을 덮지 않게 한다. 전체를 잡은 실행은 모든 파일과 겹친다.
+	fn busy(&self, pid: &str, files: &[String]) -> Option<String> {
+		let books = self.books.lock().unwrap();
+		let book = books.get(pid)?;
+		book.held
+			.iter()
+			.find(|c| c.files.as_ref().is_none_or(|held| held.iter().any(|h| files.iter().any(|f| path_overlap(h, f)))))
+			.map(|c| c.label.clone())
 	}
 
 	/// 다른 실행이 잡고 있는 파일. 이번 실행이 고치지 못하게 거부 규칙으로 건다.
@@ -990,24 +1037,19 @@ impl Drop for ClaimGuard {
 pub struct Runner {
 	/// 구현 · 되돌리기 · 파일로 만드는 산출물이 잡는 범위
 	claims: Arc<Claims>,
-	/// 줄 밖 실행의 자리. 프로젝트마다 READ_SLOTS 개.
-	slots: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
 	active: Mutex<HashMap<String, Arc<RunCtl>>>,
 	/// 제목을 짓고 있는 이슈. 실행 줄 · 「실행 중」 목록과는 따로 센다. 도구 없이 글 한 줄만 받는 짧은 호출이다.
 	titling: Mutex<HashSet<String>>,
 }
 
 impl Runner {
-	fn project_slots(&self, pid: &str) -> Arc<tokio::sync::Semaphore> {
-		self.slots.lock().unwrap().entry(pid.to_string()).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(READ_SLOTS))).clone()
-	}
-	fn register(&self, key: &str) -> Arc<RunCtl> {
+	pub(crate) fn register(&self, key: &str) -> Arc<RunCtl> {
 		let ctl = Arc::new(RunCtl::new());
 		self.active.lock().unwrap().insert(key.to_string(), ctl.clone());
 		ctl
 	}
 
-	fn release(&self, key: &str) {
+	pub(crate) fn release(&self, key: &str) {
 		self.active.lock().unwrap().remove(key);
 	}
 
@@ -1034,14 +1076,12 @@ impl Runner {
 	}
 }
 
-/// 차례를 기다린다. claim 이 있으면 그 범위를 잡고, 없으면 READ_SLOTS 자리 하나를 받는다.
+/// 차례를 기다린다. claim 이 있으면 그 범위를 잡고, 없으면 기다리지 않는다.
 /// 기다리는 까닭이 바뀔 때마다 on_wait 로 알린다. 기다리는 동안 중지되면 None. 그래야 「줄에서 빼기」가 바로 먹는다.
-async fn wait_turn(claims: Arc<Claims>, slots: Arc<tokio::sync::Semaphore>, pid: &str, claim: Option<Claim>, ctl: &RunCtl, on_wait: impl Fn(&str)) -> Option<Seat> {
+/// branch 면 기다려야 할 때 줄에서 빠져 Seat::Branch 를 돌려준다 — 워크트리에서 돌 구현이다.
+async fn wait_turn(claims: Arc<Claims>, pid: &str, claim: Option<Claim>, ctl: &RunCtl, branch: bool, on_wait: impl Fn(&str)) -> Option<Seat> {
 	let Some(claim) = claim else {
-		return tokio::select! {
-			p = slots.acquire_owned() => p.ok().map(Seat::Slot),
-			_ = ctl.wait_cancel() => None,
-		};
+		return (!ctl.cancel.load(Ordering::SeqCst)).then_some(Seat::Free);
 	};
 	let key = claim.key.clone();
 	let seq = claims.enqueue(pid, claim);
@@ -1053,6 +1093,11 @@ async fn wait_turn(claims: Arc<Claims>, slots: Arc<tokio::sync::Semaphore>, pid:
 		freed.as_mut().enable();
 		match claims.try_take(pid, seq) {
 			Ok(()) => return Some(Seat::Claim(ClaimGuard { claims: claims.clone(), pid: pid.to_string(), key })),
+			// 줄에서 빠져야 뒤에 선 실행이 이 구현을 기다리지 않는다.
+			Err(_) if branch => {
+				claims.leave(pid, seq);
+				return Some(Seat::Branch);
+			}
 			Err(why) if why != last => {
 				on_wait(&why);
 				last = why;
@@ -1137,6 +1182,19 @@ pub fn doc_key(pid: &str, did: &str) -> String {
 	format!("doc:{pid}/{did}")
 }
 
+/// 작성법 뽑기. 같은 산출물의 작성과 함께 돌 수 있어 doc_key 와 따로 잡는다.
+pub fn learn_key(pid: &str, did: &str) -> String {
+	format!("learn:{pid}/{did}")
+}
+
+/// 설정 「한컴으로 확인」. 모든 claude 실행에 DOCKET_HANCOM 으로 넘겨, 앱에 실은 한글 스킬 · 쪽 그림 도구가 한컴을 띄울지 정하게 한다.
+/// 실행마다 설정 파일을 다시 읽지 않으려고 켤 때와 설정을 저장할 때 여기 적어 둔다(note_settings).
+static HANCOM: AtomicBool = AtomicBool::new(false);
+
+pub fn note_settings(s: &Settings) {
+	HANCOM.store(s.hancom_check, Ordering::Relaxed);
+}
+
 struct Spec {
 	exe: PathBuf,
 	cwd: PathBuf,
@@ -1166,6 +1224,7 @@ async fn exec(spec: Spec, ctl: &RunCtl, mut emit: impl FnMut(&RunEvent, &Parser)
 	}
 	let mut cmd = command(&spec.exe);
 	cmd.args(&spec.args)
+		.env("DOCKET_HANCOM", if HANCOM.load(Ordering::Relaxed) { "1" } else { "0" })
 		.current_dir(&spec.cwd)
 		.stdin(std::process::Stdio::piped())
 		.stdout(std::process::Stdio::piped())
@@ -1379,7 +1438,7 @@ impl Job {
 
 	/// 프로젝트 줄에 서는가. 줄은 구현끼리 같은 파일을 함께 고치지 않게 하려는 것이다.
 	/// 2026.10.28 : 대화는 편집 권한이어도 줄 밖에서 돈다. 구현 중에도 바로 답하게 하려고, 함께 고칠 위험을 받아들였다.
-	/// 2026.10.29 : 줄은 프로젝트 전체가 아니라 계획에 적힌 파일을 잡는다(issue_claim). 겹치지 않으면 IMPL_SLOTS 개까지 함께 돈다.
+	/// 2026.10.29 : 줄은 프로젝트 전체가 아니라 계획에 적힌 파일을 잡는다(issue_claim). 겹치지 않으면 함께 돈다.
 	fn exclusive(&self) -> bool {
 		matches!(self, Job::Implement { .. } | Job::Rework { .. } | Job::Revert)
 	}
@@ -1611,16 +1670,22 @@ fn doc_material(v: &DeliverableView, request: &str, current: Option<&str>) -> St
 	s
 }
 
-fn doc_prompt(material: &str) -> String {
-	format!(
-		"이 저장소를 읽고 아래 산출물을 마크다운으로 작성하라. 파일을 만들거나 고치지 않는다 (읽기 도구만 열려 있다). \
-		문서 제목은 title, 본문 전체는 document 에 넣는다. 근거가 된 코드 위치는 `경로:행` 으로 적고, 확인하지 못한 것은 확인하지 못했다고 적는다.\n\n\
-		{material}\n{RULES}\n"
-	)
-}
-
 /// format 이 있으면 확장자를 그것으로 못 박는다. 비우면 템플릿을 따르고, 템플릿도 없으면 md 다.
-fn doc_file_prompt(material: &str, dir: &Path, base: &str, format: &str) -> String {
+/// plugin 은 앱에 실은 플러그인 폴더다. 쪽 그림 도구(scripts/render.py)는 어느 스킬에도 딸리지 않아 절대 경로로 알려 준다.
+/// check 는 쪽 그림을 그릴 폴더다. 실행이 끝나면 앱이 지운다.
+/// hancom 은 설정 「한컴으로 확인」이다. 끄면 한글 스킬이 한컴을 부르는 길(원샷 품질 검사 · --hancom · 한컴 변환)을 쓰지 않게 이른다.
+/// 도구 쪽에서도 DOCKET_HANCOM=0 이면 한컴을 띄우지 않는다(hancom_worker.py · convert_hwp_hancom.ps1 · render.py) — 말로만 막으면
+/// 스킬 본문의 「전달 전 반드시」를 따라 다시 부를 수 있어서다.
+fn doc_file_prompt(material: &str, dir: &Path, base: &str, format: &str, plugin: Option<&Path>, check: &Path, hancom: bool) -> String {
+	let check = check.display();
+	let hancom_line = if hancom {
+		"- 한컴오피스로 확인한다(설정이 켜져 있다). 쪽 수를 정확히 맞춰야 하면 render.py 에 `--engine hancom` 을 붙여 다시 본다."
+	} else {
+		"- 한컴오피스는 쓰지 않는다(설정이 꺼져 있다 — 띄울 때마다 접근 확인 창이 뜬다). 원샷 명세는 `\"quality\": {\"hancom\": \"off\"}` 로 두고, \
+		`--hancom` 검사와 `convert_hwp_hancom.ps1` 를 부르지 않는다. hwp 템플릿은 `convert_hwp.py`(rhwp)로 바꾼다. \
+		한컴 열기 검사 · 정확한 쪽 수는 확인하지 못했다고 summary 에 적는다."
+	};
+	let render = plugin.map(|p| p.join("scripts").join("render.py").display().to_string()).unwrap_or_else(|| "render.py(앱 플러그인 폴더를 찾지 못했다 — 그리지 못했다고 적는다)".into());
 	let ext = format.trim().trim_start_matches('.').to_lowercase();
 	let name_line = if ext.is_empty() { format!("{base}.<확장자>  확장자는 템플릿 형식을 따르고, 템플릿이 없으면 md 로 한다.") } else { format!("{base}.{ext}") };
 	format!(
@@ -1628,7 +1693,16 @@ fn doc_file_prompt(material: &str, dir: &Path, base: &str, format: &str) -> Stri
 		## 결과 파일\n\
 		- 폴더: {}\n\
 		- 이름: {name_line}\n\
-		- 한글(hwpx) · 워드(docx) · 엑셀(xlsx) · 파워포인트(pptx)는 그 형식을 다루는 스킬로 만든다. 템플릿 파일이 있으면 복사해 내용을 채우는 쪽을 먼저 고른다.\n\
+		- 한글(hwpx)은 `docket:hwpx`, 워드(docx)는 `docket:docx`, 엑셀(xlsx)은 `docket:xlsx`, 파워포인트(pptx)는 `docket:pptx` 스킬로 만든다. 템플릿 파일이 있으면 복사해 내용을 채우는 쪽을 먼저 고른다.\n\
+		- 순서: 템플릿을 훑는다 → 넣을 글(원고)을 모두 쓴다 → 원고를 다듬는다 → 파일에 한 번 넣는다 → 서식을 견준다 → 쪽 그림을 보고 고친다. \
+		파일에 넣은 뒤 문장을 고치려고 다시 채우지 않는다.\n\
+		- 원고 다듬기는 `docket:anti-slop` 스킬의 `references/editorial-method.md` 와 `references/writing-profile.md`(한국어) 두 파일만 읽고 한다. \
+		사실 · 수치 · 작성 지침 · 템플릿의 문체는 바꾸지 않는다. 표 칸의 짧은 값은 다듬지 않는다.\n\
+		- 쪽 그림은 `python \"{render}\" <결과 파일> \"{check}\\<1부터 늘리는 번호>\"` 로 그려 Read 로 본다. 그 폴더는 실행이 끝나면 앱이 지운다. 그리지 못했으면 까닭을 summary 에 적는다.\n\
+		- `docket:hwpx` 스킬이 `view_file` 로 보라고 하는 것은 Read 로 본다. 그 스킬의 `render_hwpx.py` 대신 위 render.py 를 쓴다(한컴이 없어도 그린다).\n\
+		{hancom_line}\n\
+		- 마크다운(md)이면 스킬 없이 Write 로 그 폴더에 쓴다. 쪽 그림 확인은 하지 않는다.\n\
+		- 근거가 된 코드 위치는 `경로:행` 으로 적고, 확인하지 못한 것은 확인하지 못했다고 적는다.\n\
 		- 그 폴더에는 결과 파일만 남긴다. 중간 파일은 시스템 임시 폴더에 두고 끝나면 지운다.\n\
 		- 저장소 안의 파일은 고치지 않는다. 편집 도구는 저장소 안에서 막혀 있고, 명령으로도 저장소에 쓰지 않는다.\n\
 		- 끝나면 만든 파일의 전체 경로를 files 에, 무엇을 담았는지 한두 문장을 summary 에, 문서 제목을 title 에 넣는다.\n\n\
@@ -1696,6 +1770,68 @@ fn job_args(job: &Job, s: &Settings, p: &Project, issue: &Issue, add_dir: &Path,
 	a
 }
 
+/// 이 세션의 지난 실행이 아직 보내지 않은 구획만 남긴다. 구획은 원본 경로와 소제목으로 가른다.
+/// session_id 칸이 생기기 전의 기록은 비어 있어 「보내지 않았다」로 친다 — 한 번 더 붙는 쪽이 빠뜨리는 쪽보다 낫다.
+fn unsent_hits(hits: &[KbHit], runs: &[RunRecord], session: &str) -> Vec<KbHit> {
+	if session.is_empty() {
+		return hits.to_vec();
+	}
+	let sent: HashSet<(&str, &str)> = runs
+		.iter()
+		.filter(|r| r.session_id == session)
+		.flat_map(|r| r.kb_hits.iter().map(|h| (h.path.as_str(), h.section.as_str())))
+		.collect();
+	hits.iter().filter(|h| !sent.contains(&(h.path.as_str(), h.section.as_str()))).cloned().collect()
+}
+
+/// 앱에 실은 Claude 플러그인 폴더(src-tauri/claude-plugin → 설치본의 리소스 폴더). 한글 · 워드 · 엑셀 · 파워포인트 스킬과
+/// 문장 다듬기(anti-slop)가 들어 있어, 이 PC 의 Claude 에 무엇이 깔렸든 같은 꼴로 만든다. 개발 실행에서는 빌드가 target/<프로필> 아래로 복사해 둔다.
+fn plugin_dir(app: &AppHandle) -> Option<PathBuf> {
+	let dir = app.path().resource_dir().ok()?.join("claude-plugin");
+	dir.join(".claude-plugin").join("plugin.json").is_file().then_some(dir)
+}
+
+/// 산출물 파일 도구 점검. 플러그인의 scripts/doctor.py 를 돌려 그 JSON 을 그대로 돌려준다 — 무엇을 보는지는 그 스크립트 한 곳에서 정한다.
+/// 파이썬부터 없으면 스크립트를 못 돌리니 그 사실만 담아 돌려준다. Windows 의 python.exe 는 스토어로 안내하는 가짜일 수 있어 py 를 먼저 본다.
+pub async fn doc_tools_check(app: &AppHandle) -> Value {
+	let no_python = serde_json::json!({
+		"python": "",
+		"items": [{ "key": "python", "label": "Python", "ok": false, "detail": "없음", "need": "required", "usedFor": "워드 · 엑셀 · 파워포인트 · 한글" }],
+		"install": "",
+	});
+	let Some(dir) = plugin_dir(app) else {
+		return serde_json::json!({ "python": "", "items": [], "install": "", "error": "앱에 실은 플러그인 폴더를 찾지 못했다" });
+	};
+	let script = dir.join("scripts").join("doctor.py");
+	for (exe, pre) in [("py", vec!["-3"]), ("python", vec![]), ("python3", vec![])] {
+		let Ok(path) = which(exe) else { continue };
+		let run = command(&path).args(&pre).arg(&script).env("PYTHONIOENCODING", "utf-8").output();
+		let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(60), run).await else { continue };
+		if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {
+			return v;
+		}
+	}
+	no_python
+}
+
+/// PATH 에서 실행 파일을 찾는다. Windows 는 PATHEXT 를 붙여 본다.
+fn which(name: &str) -> std::result::Result<PathBuf, ()> {
+	let exts: Vec<String> = if cfg!(windows) {
+		std::env::var("PATHEXT").unwrap_or(".EXE;.CMD;.BAT".into()).split(';').map(|e| e.to_lowercase()).collect()
+	} else {
+		vec![String::new()]
+	};
+	for dir in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+		for ext in &exts {
+			let p = dir.join(format!("{name}{ext}"));
+			if p.is_file() {
+				return Ok(p);
+			}
+		}
+	}
+	Err(())
+}
+
 /// 지식베이스의 글자 사본 · 끌어 놓은 자료를 Read 로 열 수 있게 한다. 이미 있는 --add-dir 목록 맨 앞에 끼운다 —
 /// 같은 인자를 한 번 더 주면 앞의 목록을 덮는지 확인하지 못해서다.
 fn kb_add_dir(args: &mut Vec<String>, store: &Store, pid: &str) {
@@ -1728,6 +1864,7 @@ fn finish(rec: &mut RunRecord, o: &Outcome) {
 	rec.ended_at = now_ms();
 	rec.status = if o.stopped { "stopped" } else if o.ok { "ok" } else { "error" }.into();
 	rec.model = o.parser.model.clone();
+	rec.session_id = o.parser.session_id.clone();
 	rec.error = o.error.chars().take(2000).collect();
 	rec.commands = o.parser.commands.clone();
 	rec.denials = o.parser.denials.clone();
@@ -1757,7 +1894,122 @@ pub fn rework(app: &AppHandle, pid: &str, iid: &str, feedback: String, allow_all
 
 /// 이 이슈에서 Claude 가 바꾼 것을 되돌린다. 기록한 변경분을 넘겨 Claude 가 거꾸로 고치게 하고, 새로 만든 파일은 앱이 치운다.
 pub fn revert(app: &AppHandle, pid: &str, iid: &str) -> Result<IssueView> {
+	if app.state::<Store>().raw_issue(pid, iid)?.worktree.is_some() {
+		return discard(app, pid, iid);
+	}
 	start_issue(app, pid, iid, Job::Revert)
+}
+
+/// 워크트리에서 돈 구현을 되돌린다. 본 작업트리는 건드린 적이 없으니 Claude 를 부르지 않고 워크트리를 지운다.
+fn discard(app: &AppHandle, pid: &str, iid: &str) -> Result<IssueView> {
+	let store = app.state::<Store>();
+	let project = store.project(pid)?;
+	let mut gone = None;
+	let v = store.update_issue(pid, iid, |i| {
+		if i.run.is_some() {
+			return msg("실행 중에는 되돌릴 수 없습니다. 먼저 중지하세요.");
+		}
+		gone = i.worktree.take();
+		i.log("revert", "");
+		i.log("reverted", "워크트리를 지웠습니다. 본 작업트리는 그대로입니다.");
+		i.changes.clear();
+		i.result = None;
+		i.status = if i.plan.is_some() { Status::Planned } else { Status::Inbox };
+		i.auto_plan = false;
+		Ok(())
+	})?;
+	emit_issue(app, &v);
+	if let Some(w) = gone {
+		// 세션을 본 폴더로 되가져와야 다시 계획 · 구현할 때 이어 붙는다.
+		copy_transcript(&v.issue.session_id, &w.path, &project.path);
+		let root = PathBuf::from(&project.path);
+		tauri::async_runtime::spawn_blocking(move || crate::worktree::remove(&root, Path::new(&w.path)));
+	}
+	crate::plugin_host::dispatch(app, "reverted", crate::plugin_host::api::Target { project_id: pid.to_string(), issue_id: iid.to_string(), ..Default::default() });
+	Ok(v)
+}
+
+/// 워크트리에서 끝난 구현을 본 작업트리에 옮기고 워크트리를 지운다. 결과 확인 단계에서 사람이 누른다.
+/// 그 사이 본 작업트리에서 같은 곳이 바뀌어 합치지 못하면 아무것도 쓰지 않고 워크트리를 남긴다.
+pub async fn merge(app: &AppHandle, pid: &str, iid: &str) -> Result<IssueView> {
+	let store = app.state::<Store>();
+	let project = store.project(pid)?;
+	let issue = store.raw_issue(pid, iid)?;
+	let Some(w) = issue.worktree.clone() else { return msg("워크트리에서 돈 구현이 아닙니다") };
+	if issue.run.is_some() {
+		return msg("실행 중에는 반영할 수 없습니다");
+	}
+	if issue.status != Status::Review {
+		return msg("결과를 확인하는 단계에서만 반영할 수 있습니다");
+	}
+	let (root, at, base) = (PathBuf::from(&project.path), PathBuf::from(&w.path), w.base.clone());
+	let files = {
+		let (at, base) = (at.clone(), base.clone());
+		tauri::async_runtime::spawn_blocking(move || crate::worktree::changed(&at, &base)).await.map_err(|e| Error::Msg(e.to_string()))??
+	};
+	let rels: Vec<String> = files.into_iter().map(|(_, rel)| rel).collect();
+	// 고치는 중인 파일을 덮으면 그 구현이 읽어 둔 내용과 디스크가 어긋난다.
+	if let Some(who) = app.state::<Runner>().claims.busy(pid, &rels) {
+		return msg(format!("{who} 이(가) 같은 파일을 고치고 있습니다. 끝난 뒤에 반영하세요."));
+	}
+	let res = {
+		let (root, at) = (root.clone(), at.clone());
+		tauri::async_runtime::spawn_blocking(move || crate::worktree::apply(&root, &at, &base)).await.map_err(|e| Error::Msg(e.to_string()))??
+	};
+	let applied = match res {
+		Ok(a) => a,
+		Err(conflicts) => {
+			let text = conflicts.join(", ");
+			let v = store.update_issue(pid, iid, |i| {
+				i.log("merge-conflict", text.clone());
+				Ok(())
+			})?;
+			emit_issue(app, &v);
+			return msg(format!("그 사이 본 작업트리에서 같은 곳이 바뀌어 반영하지 못했습니다: {text}. 워크트리는 그대로 둡니다 — 되돌린 뒤 다시 구현하세요."));
+		}
+	};
+	copy_transcript(&issue.session_id, &w.path, &project.path);
+	let main = project.path.trim_end_matches(['\\', '/']).to_string();
+	let v = store.update_issue(pid, iid, |i| {
+		// 바꾼 파일 기록을 본 작업트리 경로로 옮긴다. 다음 되돌리기 · 새 파일 치우기가 본 작업트리를 보게.
+		for c in i.changes.iter_mut() {
+			c.path = format!("{main}\\{}", c.rel.replace('/', "\\"));
+		}
+		i.worktree = None;
+		i.log("merged", applied.files.join(", "));
+		Ok(())
+	})?;
+	emit_issue(app, &v);
+	tauri::async_runtime::spawn_blocking(move || crate::worktree::remove(&root, &at));
+	Ok(v)
+}
+
+/// 워크트리를 만들어 이슈에 적고, 계획 세션을 그 폴더 자리로 복사해 구현이 이어 붙게 한다.
+async fn branch_out(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
+	let store = app.state::<Store>();
+	let project = store.project(pid)?;
+	let issue = store.raw_issue(pid, iid)?;
+	let root = PathBuf::from(&project.path);
+	let number = issue.number;
+	let (at, base) = tauri::async_runtime::spawn_blocking(move || -> Result<(PathBuf, String)> {
+		if !crate::worktree::available(&root) {
+			return msg("git 저장소의 맨 위 폴더가 아닙니다");
+		}
+		let at = crate::worktree::dest(&root, number);
+		let base = crate::worktree::create(&root, &at)?;
+		Ok((at, base))
+	})
+	.await
+	.map_err(|e| Error::Msg(e.to_string()))??;
+	let path = at.to_string_lossy().to_string();
+	copy_transcript(&issue.session_id, &project.path, &path);
+	let v = store.update_issue(pid, iid, |i| {
+		i.log("worktree", path.clone());
+		i.worktree = Some(crate::worktree::record(&at, base.clone()));
+		Ok(())
+	})?;
+	emit_issue(app, &v);
+	Ok(())
 }
 
 /// 진행 중인 이슈에 질문을 보낸다. 계획 · 구현과 같은 세션을 이으므로 Claude 가 지금까지 읽고 고친 것을 기억한다.
@@ -1848,6 +2100,7 @@ fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueV
 	let store = app.state::<Store>();
 	// 이슈를 실행 중으로 바꾸기 전에 읽는다. 바꾼 뒤에 실패하면 이슈가 실행 중인 채로 남는다.
 	let project = store.project(pid)?;
+	let title_mode = new_title_mode(&store.settings()?);
 	let run_id = short_id();
 	let kind = job.kind();
 	let view = store.update_issue(pid, iid, |i| {
@@ -1891,9 +2144,11 @@ fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueV
 			Job::Chat { text, .. } => {
 				i.log("chat", text.chars().take(300).collect::<String>());
 				i.auto_plan = false;
-				// 프로젝트 대화에는 메모가 없다. 첫 질문을 목록에 보일 제목으로 쓴다.
+				// 프로젝트 대화에는 메모가 없다. 첫 질문을 목록에 보일 임시 제목으로 쓰고, 제목 모델이 있으면 첫 답 뒤에 지어 바꾼다.
 				if i.talk && i.title.is_empty() {
 					i.title = crate::store::title_of(text);
+					i.title_mode = title_mode;
+					i.titled_at = 0;
 				}
 			}
 		}
@@ -1905,9 +2160,13 @@ fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueV
 
 	let runner = app.state::<Runner>();
 	let key = issue_key(pid, iid);
-	let claim = job.exclusive().then(|| issue_claim(&job, &view.issue, &project, &key));
+	// 워크트리에서 도는 이슈는 본 작업트리를 고치지 않으므로 줄에 서지 않는다.
+	let in_worktree = view.issue.worktree.is_some();
+	let claim = (job.exclusive() && !in_worktree).then(|| issue_claim(&job, &view.issue, &project, &key));
+	// 기다려야 하는 첫 구현만 워크트리로 비켜 간다. 이미 본 작업트리에 남긴 변경이 있으면 그 기록과 섞이지 않게 줄에 선다.
+	let branch = matches!(job, Job::Implement { .. }) && project.worktree && project.parallel_impl && !in_worktree && view.issue.changes.is_empty();
 	let ctl = runner.register(&key);
-	let (claims, slots) = (runner.claims.clone(), runner.project_slots(pid));
+	let claims = runner.claims.clone();
 	let (app, pid, iid) = (app.clone(), pid.to_string(), iid.to_string());
 	tauri::async_runtime::spawn(async move {
 		// 무엇을 기다리는지 이슈에 적어 화면이 보이게 한다. 그 사이 실행이 바뀌었으면 건드리지 않는다.
@@ -1921,7 +2180,20 @@ fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueV
 				emit_issue(&app, &v);
 			}
 		};
-		let turn = wait_turn(claims, slots, &pid, claim, &ctl, on_wait).await;
+		let mut turn = wait_turn(claims.clone(), &pid, claim.clone(), &ctl, branch, &on_wait).await;
+		if let Some(Seat::Branch) = turn {
+			on_wait("워크트리를 만드는 중");
+			if let Err(e) = branch_out(&app, &pid, &iid).await {
+				// 만들지 못했으면 지금까지처럼 줄에서 기다린다.
+				if let Ok(v) = app.state::<Store>().update_issue(&pid, &iid, |i| {
+					i.log("worktree", format!("만들지 못해 기다립니다 · {e}"));
+					Ok(())
+				}) {
+					emit_issue(&app, &v);
+				}
+				turn = wait_turn(claims, &pid, claim, &ctl, false, &on_wait).await;
+			}
+		}
 		let res = match turn {
 			Some(_g) => run_issue_job(&app, &pid, &iid, &job, &run_id, &ctl).await,
 			None => Ok(()),
@@ -2064,9 +2336,12 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 	let kind = job.kind();
 	let key = issue_key(pid, iid);
 	let claims = app.state::<Runner>().claims.clone();
+	// 워크트리에서 도는 이슈는 그 폴더에서 돌고, 본 작업트리의 잡기 장부와 상관없다.
+	let worktree = store.raw_issue(pid, iid)?.worktree;
+	let cwd = worktree.as_ref().map_or_else(|| project.path.clone(), |w| w.path.clone());
 	// 함께 도는 구현이 잡은 파일은 이번 실행이 고치지 못하게 막는다. 막을 목록에 더해 인자 · 실행 기록이 같은 값을 쓰게 한다.
 	// Edit · Write 도구만 막는다. 명령으로 쓰는 것은 막지 못해 「모두 허용」은 함께 돌리지 않는다(claim_files).
-	if job.exclusive() {
+	if job.exclusive() && worktree.is_none() {
 		for f in claims.others(pid, &key) {
 			project.denied_tools.extend([format!("Edit(./{f})"), format!("Write(./{f})")]);
 		}
@@ -2109,22 +2384,11 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 		};
 		crate::glossary::prompt_block(&gl_list, &q)
 	};
-	let mut kb_block = String::new();
+	let mut kb_hits: Vec<KbHit> = Vec::new();
 	if let Some(q) = kb_query.filter(|_| project.kb.enabled) {
 		// 사전의 비슷한 말을 덧붙여 찾는다. 문서가 다른 말로 적었어도 걸리게 한다.
 		let q = crate::glossary::expand_query(&gl_list, &q);
-		let hits = crate::kb::find(app, &project, &settings, &q, "").await;
-		if !hits.is_empty() {
-			kb_block = crate::kb::prompt_block(&hits);
-			if let Ok(v) = store.update_issue(pid, iid, |i| {
-				if let Some(rec) = i.runs.iter_mut().find(|r| r.id == run_id) {
-					rec.kb_hits = crate::kb::brief(&hits);
-				}
-				Ok(())
-			}) {
-				emit_issue(app, &v);
-			}
-		}
+		kb_hits = crate::kb::find(app, &project, &settings, &q, "").await;
 	}
 
 	// 첫 계획만 새 세션으로 연다. 그 뒤로는 같은 세션을 이어 Claude 가 읽은 코드와 계획을 기억하게 한다.
@@ -2140,6 +2404,13 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 	let outcome = loop {
 		let mut args = job_args(job, &settings, &project, &view.issue, Path::new(&view.dir), resumed.then_some(view.issue.session_id.as_str()));
 		let mut prompt = issue_prompt(job, &view, resumed);
+		// 계획은 본 저장소에서 세웠다. 계획에 적힌 전체 경로를 따라 본 저장소를 고치지 않게 알린다 — 고치려 해도 실행 폴더 밖이라 막힌다.
+		if let Some(w) = &worktree {
+			prompt.push_str(&format!(
+				"\n\n이 실행은 본 저장소({}) 가 아니라 그 사본인 워크트리({})에서 돈다. 앞에서 본 경로가 본 저장소를 가리키면 같은 상대 경로의 이 폴더 파일을 읽고 고친다.\n",
+				project.path, w.path
+			));
+		}
 		if project.kb.enabled {
 			kb_add_dir(&mut args, &store, pid);
 		}
@@ -2155,17 +2426,29 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 				emit_issue(app, &v);
 			}
 		}
-		if !kb_block.is_empty() {
+		// 이어 붙인 세션은 앞 차례에 붙인 구획을 이미 문맥에 들고 있다. 다시 붙이면 차례마다 같은 발췌가 쌓여 매번 다시 읽힌다.
+		// 새 세션으로 다시 가면(아래 continue) 앞 문맥이 없으니 모두 붙인다.
+		let hits = if resumed { unsent_hits(&kb_hits, &view.issue.runs, &view.issue.session_id) } else { kb_hits.clone() };
+		if !hits.is_empty() {
 			prompt.push('\n');
-			prompt.push_str(&kb_block);
+			prompt.push_str(&crate::kb::prompt_block(&hits));
+		}
+		if !kb_hits.is_empty()
+			&& let Ok(v) = store.update_issue(pid, iid, |i| {
+				if let Some(rec) = i.runs.iter_mut().find(|r| r.id == run_id) {
+					rec.kb_hits = crate::kb::brief(&hits);
+				}
+				Ok(())
+			}) {
+			emit_issue(app, &v);
 		}
 		let spec = Spec {
 			exe: exe.clone(),
-			cwd: PathBuf::from(&project.path),
+			cwd: PathBuf::from(&cwd),
 			args,
 			prompt,
 			log: log.clone(),
-			root: project.path.clone(),
+			root: cwd.clone(),
 			run_id: run_id.to_string(),
 			project: pid.to_string(),
 			kind: kind_name(job.kind()),
@@ -2175,7 +2458,8 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 				"docket://run",
 				Envelope { project_id: pid, target: "issue", target_id: iid, run_id, event: ev },
 			);
-			if let RunEvent::Change { rel, .. } = ev
+			if worktree.is_none()
+				&& let RunEvent::Change { rel, .. } = ev
 				&& let Some(who) = claims.touch(pid, &key, rel)
 				&& overlapped.insert(norm_path(rel))
 				&& let Ok(v) = store.update_issue(pid, iid, |i| {
@@ -2351,6 +2635,11 @@ pub fn document(app: &AppHandle, pid: &str, did: Option<String>, request: String
 
 /// issue_id 는 이슈를 완료해 자동 갱신으로 시작했을 때 그 이슈다. 끝난 결과를 그 이슈의 흐름에 남긴다.
 pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: String, issue_id: &str) -> Result<DeliverableView> {
+	document_job(app, pid, did, request, issue_id, Vec::new())
+}
+
+/// catch_up 은 「밀린 변경 반영」이 한꺼번에 반영하는 이슈들이다. 새 판이 나오면 자동 관리 기록에 남기고 검토 표지를 단다.
+pub fn document_job(app: &AppHandle, pid: &str, did: Option<String>, request: String, issue_id: &str, catch_up: Vec<String>) -> Result<DeliverableView> {
 	let store = app.state::<Store>();
 	let did = match did {
 		Some(d) => {
@@ -2368,7 +2657,7 @@ pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: S
 		if d.job.is_some() {
 			return msg("이미 작성 중입니다");
 		}
-		d.job = Some(DocJob { run_id: run_id.clone(), phase: Phase::Queued, request: request.clone(), queued_at: now_ms(), issue_id: issue_id.to_string() });
+		d.job = Some(DocJob { run_id: run_id.clone(), phase: Phase::Queued, request: request.clone(), queued_at: now_ms(), issue_id: issue_id.to_string(), catch_up: catch_up.clone() });
 		d.error.clear();
 		Ok(())
 	})?;
@@ -2377,13 +2666,12 @@ pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: S
 	let runner = app.state::<Runner>();
 	let key = doc_key(pid, &did);
 	let ctl = runner.register(&key);
-	let (claims, slots) = (runner.claims.clone(), runner.project_slots(pid));
-	// 파일로 만들기는 명령을 열어 두어 저장소를 쓸 수 있으므로 줄에 선다. 무엇을 쓸지 미리 알 수 없어 프로젝트 전체를 잡는다.
-	// 마크다운으로 받기는 읽기 도구만 연다.
-	let claim = (view.deliverable.mode == "file").then(|| Claim { key: key.clone(), label: format!("산출물 「{}」", view.deliverable.title), files: None, solo: String::new() });
+	let claims = runner.claims.clone();
+	// 산출물은 명령을 열어 두고 파일로 만들어 저장소를 쓸 수 있으므로 줄에 선다. 무엇을 쓸지 미리 알 수 없어 프로젝트 전체를 잡는다.
+	let claim = Some(Claim { key: key.clone(), label: format!("산출물 「{}」", view.deliverable.title), files: None, solo: String::new() });
 	let (app, pid) = (app.clone(), pid.to_string());
 	tauri::async_runtime::spawn(async move {
-		let turn = wait_turn(claims, slots, &pid, claim, &ctl, |_| {}).await;
+		let turn = wait_turn(claims, &pid, claim, &ctl, false, |_| {}).await;
 		let res = match turn {
 			Some(_g) => run_doc_job(&app, &pid, &did, &request, &run_id, &ctl).await,
 			None => Ok(()),
@@ -2409,23 +2697,22 @@ pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: S
 	Ok(view)
 }
 
-/// 문서 작성 인자. out 이 있으면 파일로 만든다: 결과 폴더를 열고 편집 · 명령을 허용하되 저장소 안 편집은 권한 규칙으로 막는다.
-fn doc_args(s: &Settings, p: &Project, data_dir: &Path, out: Option<&Path>) -> Vec<String> {
-	match out {
-		Some(dir) => {
-			let mut a = base_args(s, pick_model(s, "", RunKind::Document), pick_effort(s, "", RunKind::Document), &[data_dir, dir]);
-			let perms = Perms { tools: None, mode: "acceptEdits", allow: vec!["Bash".into(), "Skill".into()], deny: p.denied_tools.clone(), label: String::new() };
-			perm_args(&mut a, &perms, DENY_REPO_EDITS);
-			a.extend(["--json-schema".into(), FILE_SCHEMA.into()]);
-			a
-		}
-		None => {
-			let mut a = base_args(s, pick_model(s, "", RunKind::Document), pick_effort(s, "", RunKind::Document), &[data_dir]);
-			perm_args(&mut a, &read_perms(p), &[]);
-			a.extend(["--json-schema".into(), DOC_SCHEMA.into()]);
-			a
-		}
+/// 문서 작성 인자. 결과 폴더(out)를 열고 편집 · 명령을 허용하되 저장소 안 편집은 권한 규칙으로 막는다.
+/// plugin 은 앱에 실은 문서 스킬 플러그인 폴더다(plugin_dir). 산출물 실행에만 건다 — 다른 실행에까지 실으면 스킬 목록이 실행마다 붙는다.
+/// 2026.10.29 : 읽기 도구만 열고 앱이 .md 로 저장하던 「마크다운으로 받기」 갈래를 없앴다. 마크다운도 형식의 하나로 파일로 만든다.
+fn doc_args(s: &Settings, p: &Project, data_dir: &Path, out: &Path, plugin: Option<&Path>) -> Vec<String> {
+	// 플러그인 폴더도 연다. 프롬프트가 문장 다듬기 기준(anti-slop 의 references)을 Read 로 읽게 한다.
+	let mut dirs = vec![data_dir, out];
+	dirs.extend(plugin);
+	let mut a = base_args(s, pick_model(s, "", RunKind::Document), pick_effort(s, "", RunKind::Document), &dirs);
+	let perms = Perms { tools: None, mode: "acceptEdits", allow: vec!["Bash".into(), "Skill".into()], deny: p.denied_tools.clone(), label: String::new() };
+	let deny: Vec<&str> = DENY_REPO_EDITS.iter().chain(DENY_FOREIGN_DOC_SKILLS).copied().collect();
+	perm_args(&mut a, &perms, &deny);
+	if let Some(pd) = plugin {
+		a.extend(["--plugin-dir".into(), pd.to_string_lossy().to_string()]);
 	}
+	a.extend(["--json-schema".into(), FILE_SCHEMA.into()]);
+	a
 }
 
 /// 폴더 안 파일과 수정 시각. 실행 전후를 견주어 Claude 가 만든 파일을 찾는다.
@@ -2466,6 +2753,7 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		.and_then(|v| store.version_path(pid, did, v.n).ok())
 		.and_then(|p| std::fs::read_to_string(p).ok());
 	let origin = view.deliverable.job.as_ref().map(|j| j.issue_id.clone()).unwrap_or_default();
+	let catch_up = view.deliverable.job.as_ref().map(|j| j.catch_up.clone()).unwrap_or_default();
 	let mut material = doc_material(&view, request, current.as_deref());
 	// 지식베이스에서 이 산출물과 가까운 자료를 붙인다. 자기 자신(이 산출물의 판)은 근거로 붙이지 않는다.
 	let d = &view.deliverable;
@@ -2495,16 +2783,19 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 			emit_deliverable(app, &v);
 		}
 	}
-	let as_file = view.deliverable.mode == "file";
 	let data_dir = PathBuf::from(&view.dir);
 
-	let (mut args, prompt, target) = if as_file {
-		let (dir, base) = store.plan_file_output(pid, did)?;
-		let before = snapshot(&dir);
-		(doc_args(&settings, &project, &data_dir, Some(&dir)), doc_file_prompt(&material, &dir, &base, &view.deliverable.format), Some((dir, before)))
-	} else {
-		(doc_args(&settings, &project, &data_dir, None), doc_prompt(&material), None)
-	};
+	// 쪽 그림을 그릴 폴더. 산출물 폴더(--add-dir) 안이라 Read 로 열 수 있다 — 시스템 임시 폴더는 실행 중에 묻지 못해 Read 가 막힌다.
+	// 실행이 끝나면 지운다. 결과 폴더에 두지 않는 까닭: 그 폴더는 결과 파일만 남겨 새 판으로 거둔다.
+	let check_dir = data_dir.join("check").join(run_id);
+	let (dir, base) = store.plan_file_output(pid, did)?;
+	let before = snapshot(&dir);
+	let plugin = plugin_dir(app);
+	if plugin.is_none() {
+		eprintln!("문서 스킬 플러그인 폴더가 없다 — 계정 문서 스킬도 막혀 있어 파일 산출물이 실패할 수 있다");
+	}
+	let prompt = doc_file_prompt(&material, &dir, &base, &view.deliverable.format, plugin.as_deref(), &check_dir, settings.hancom_check);
+	let mut args = doc_args(&settings, &project, &data_dir, &dir, plugin.as_deref());
 	if project.kb.enabled {
 		kb_add_dir(&mut args, &store, pid);
 	}
@@ -2528,6 +2819,7 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		);
 	})
 	.await;
+	let _ = std::fs::remove_dir_all(&check_dir);
 
 	let out = outcome.parser.structured();
 	let field = |k: &str| out.as_ref().and_then(|d| d.get(k)).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -2543,54 +2835,36 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 	let before_n = view.deliverable.versions.len();
 
 	if outcome.ok && skipped.is_none() {
-		match &target {
-			None => {
-				let body = out
-					.as_ref()
-					.and_then(|d| d.get("document"))
-					.and_then(|x| x.as_str())
-					.map(|s| s.to_string())
-					.unwrap_or_else(|| outcome.parser.result_text());
-				if body.trim().is_empty() {
-					outcome.ok = false;
-					outcome.error = "Claude 가 빈 문서를 냈습니다".into();
-				} else {
-					store.add_version_text(pid, did, &body, "claude", &note)?;
+		// 새로 생겼거나 실행 중에 바뀐 파일을 고른다. Claude 가 알려 준 파일을 먼저 본다.
+		let after = snapshot(&dir);
+		let fresh: Vec<String> = after
+			.iter()
+			.filter(|(name, t)| before.get(*name).map(|old| old != *t).unwrap_or(true) && **t >= started)
+			.map(|(name, _)| name.clone())
+			.collect();
+		let reported: Vec<String> = out
+			.as_ref()
+			.and_then(|d| d.get("files"))
+			.and_then(|x| x.as_array())
+			.map(|a| a.iter().filter_map(|f| f.as_str()).filter_map(|f| Path::new(f).file_name().map(|n| n.to_string_lossy().to_string())).collect())
+			.unwrap_or_default();
+		let main = reported
+			.iter()
+			.find(|n| fresh.iter().any(|f| f.eq_ignore_ascii_case(n)))
+			.cloned()
+			.or_else(|| fresh.iter().max_by_key(|n| after.get(*n)).cloned());
+		match main {
+			Some(name) => {
+				let others: Vec<&String> = fresh.iter().filter(|f| **f != name).collect();
+				let mut note = { let s = field("summary"); if s.is_empty() { note.clone() } else { s } };
+				if !others.is_empty() {
+					note.push_str(&format!(" (함께 생긴 파일: {})", others.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
 				}
+				store.add_version_existing(pid, did, &dir.join(&name), "claude", &note)?;
 			}
-			Some((dir, before)) => {
-				// 새로 생겼거나 실행 중에 바뀐 파일을 고른다. Claude 가 알려 준 파일을 먼저 본다.
-				let after = snapshot(dir);
-				let fresh: Vec<String> = after
-					.iter()
-					.filter(|(name, t)| before.get(*name).map(|old| old != *t).unwrap_or(true) && **t >= started)
-					.map(|(name, _)| name.clone())
-					.collect();
-				let reported: Vec<String> = out
-					.as_ref()
-					.and_then(|d| d.get("files"))
-					.and_then(|x| x.as_array())
-					.map(|a| a.iter().filter_map(|f| f.as_str()).filter_map(|f| Path::new(f).file_name().map(|n| n.to_string_lossy().to_string())).collect())
-					.unwrap_or_default();
-				let main = reported
-					.iter()
-					.find(|n| fresh.iter().any(|f| f.eq_ignore_ascii_case(n)))
-					.cloned()
-					.or_else(|| fresh.iter().max_by_key(|n| after.get(*n)).cloned());
-				match main {
-					Some(name) => {
-						let others: Vec<&String> = fresh.iter().filter(|f| **f != name).collect();
-						let mut note = { let s = field("summary"); if s.is_empty() { note.clone() } else { s } };
-						if !others.is_empty() {
-							note.push_str(&format!(" (함께 생긴 파일: {})", others.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
-						}
-						store.add_version_existing(pid, did, &dir.join(&name), "claude", &note)?;
-					}
-					None => {
-						outcome.ok = false;
-						outcome.error = format!("Claude 가 결과 폴더에 파일을 만들지 않았습니다: {}", dir.display());
-					}
-				}
+			None => {
+				outcome.ok = false;
+				outcome.error = format!("Claude 가 결과 폴더에 파일을 만들지 않았습니다: {}", dir.display());
 			}
 		}
 	}
@@ -2608,6 +2882,23 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		};
 		(n, what)
 	});
+	// 자동 관리 기록에 남길 결과. 판을 만들었는지는 아래에서 판 수로 가린다.
+	let verdict = if outcome.stopped {
+		"stopped"
+	} else if skipped.is_some() {
+		"skipped"
+	} else if outcome.ok {
+		"updated"
+	} else {
+		"failed"
+	};
+	let reason = match (&skipped, outcome.ok || outcome.stopped) {
+		(Some(r), _) => r.clone(),
+		(None, false) => outcome.error.chars().take(200).collect(),
+		_ => String::new(),
+	};
+	// 밀린 변경 반영은 판을 만들었을 때만 이슈들을 기록한다. 실패하면 남기지 않아 반영 대기에 그대로 남는다.
+	let catch_issues: Vec<Issue> = catch_up.iter().filter_map(|id| store.raw_issue(pid, id).ok()).collect();
 	let v = store.update_deliverable(pid, did, |d| {
 		if let Some(rec) = d.runs.iter_mut().find(|r| r.id == run_id) {
 			finish(rec, &outcome);
@@ -2617,8 +2908,28 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 			d.title = if title.is_empty() { "제목 없는 문서".into() } else { title.clone() };
 		}
 		d.error = if outcome.stopped || outcome.ok { String::new() } else { outcome.error.clone() };
+		let made = d.versions.len() > before_n;
+		let at = now_ms();
+		let version = if made { d.versions.last().map(|v| v.n).unwrap_or(0) } else { 0 };
 		if let Some((n, what)) = &auto_line {
 			d.auto_last = format!("#{n} · {what}");
+			d.push_auto(AutoEntry { at, issue_id: origin.clone(), number: *n, verdict: verdict.into(), reason: reason.clone(), version });
+		}
+		// 「반영할 것이 없다」는 답도 반영이 끝난 것으로 남긴다. 남기지 않으면 그 이슈들이 반영 대기에서 빠지지 않는다.
+		if !catch_issues.is_empty() && (made || skipped.is_some()) {
+			let (what, why) = if made { ("catchup", String::new()) } else { ("skipped", reason.clone()) };
+			for i in &catch_issues {
+				d.push_auto(AutoEntry { at, issue_id: i.id.clone(), number: i.number, verdict: what.into(), reason: why.clone(), version });
+			}
+			let nums: Vec<String> = catch_issues.iter().map(|i| format!("#{}", i.number)).collect();
+			d.auto_last = if made { format!("{} · v{version} 반영", nums.join(" ")) } else { format!("{} · 건너뜀", nums.join(" ")) };
+		}
+		// 자동으로 쓴 판은 사람이 한 번 보도록 표지를 단다.
+		if made
+			&& (auto_line.is_some() || !catch_issues.is_empty())
+			&& let Some(last) = d.versions.last_mut()
+		{
+			last.review = true;
 		}
 		Ok(())
 	})?;
@@ -2647,13 +2958,24 @@ const TITLE_SYSTEM: &str = "너는 개발 이슈 메모에 제목을 붙인다. 
 
 /// 그림 줄과 첨부 경로는 제목에 쓸 데가 없어 걷어 낸다. 긴 메모는 앞부분만 넘긴다. 제목은 앞에서 정해지고, 다 넘기면 호출이 비싸진다.
 fn title_prompt(note: &str) -> String {
-	let body: String = note
+	format!("아래 메모에 붙일 제목 한 줄만 답한다.\n\n## 메모\n{}\n", title_body(note, 4000))
+}
+
+fn title_body(text: &str, max: usize) -> String {
+	let body: String = text
 		.lines()
 		.filter(|l| !l.trim_start().starts_with("![") && !l.contains("attachments/"))
 		.collect::<Vec<_>>()
 		.join("\n");
-	let body: String = body.trim().chars().take(4000).collect();
-	format!("아래 메모에 붙일 제목 한 줄만 답한다.\n\n## 메모\n{body}\n")
+	body.trim().chars().take(max).collect()
+}
+
+/// 대화는 바꿀 일이 아니라 묻고 답한 것을 담는다. 메모처럼 「~한다」로 지으면 목록에서 일감처럼 읽혀 주제를 담는 명사구로 짓는다.
+const TALK_TITLE_SYSTEM: &str = "너는 개발 도구에서 나눈 대화에 제목을 붙인다. 한국어 한 줄, 40자 안팎의 명사구로 무엇을 묻고 답했는지 주제를 적는다. 따옴표 · 머리표 · 설명 없이 제목만 답한다.";
+
+/// 첫 질문과 첫 답의 앞부분만 넘긴다. 주제는 첫 문답에서 드러나고, 답을 다 넘기면 호출이 비싸진다.
+fn talk_title_prompt(question: &str, answer: &str) -> String {
+	format!("아래 대화에 붙일 제목 한 줄만 답한다.\n\n## 질문\n{}\n\n## 답\n{}\n", title_body(question, 2000), title_body(answer, 2000))
 }
 
 /// 모델이 설명을 덧붙이거나 따옴표 · 머리표를 달아도 첫 줄의 글자만 남긴다.
@@ -2676,6 +2998,23 @@ fn clean_title(text: &str) -> String {
 ///   제목 한 번에 9,492 토큰이 들었다. 붙이니 779 토큰으로 줄고 구독 로그인 그대로 답이 왔다(CLI 2.1.311 실측).
 ///   --bare 는 쓰지 않는다. 그 모드는 ANTHROPIC_API_KEY 만 받고 구독(OAuth) 로그인을 읽지 않는다.
 pub async fn quick_call(exe: PathBuf, meter: (&str, &'static str), model: &str, system: &str, prompt: String, cwd: &Path, log: PathBuf, secs: u64) -> Option<(String, f64)> {
+	match watched_call(exe, meter, model, system, prompt, cwd, log, secs, "quick", &RunCtl::new(), |_| {}).await {
+		Quick::Done(text, cost) => Some((text, cost)),
+		_ => None,
+	}
+}
+
+/// 감시받는 짧은 호출의 끝.
+pub enum Quick {
+	Done(String, f64),
+	Stopped,
+	Failed,
+}
+
+/// quick_call 과 같은 호출이되, ctl 로 멈출 수 있고 실행 사건을 emit 으로 넘긴다.
+/// 사용자가 보고 멈출 수 있어야 하는 호출(작성법 뽑기)이 쓴다. 인자는 quick_call 과 같아 비용도 같다.
+#[allow(clippy::too_many_arguments)]
+pub async fn watched_call(exe: PathBuf, meter: (&str, &'static str), model: &str, system: &str, prompt: String, cwd: &Path, log: PathBuf, secs: u64, run_id: &str, ctl: &RunCtl, mut emit: impl FnMut(&RunEvent)) -> Quick {
 	let mut args: Vec<String> = [
 		"-p", "--output-format", "stream-json", "--verbose",
 		"--tools", "",
@@ -2698,17 +3037,17 @@ pub async fn quick_call(exe: PathBuf, meter: (&str, &'static str), model: &str, 
 		prompt,
 		log,
 		root: cwd.to_string_lossy().to_string(),
-		run_id: "quick".into(),
+		run_id: run_id.into(),
 		project: meter.0.to_string(),
 		kind: meter.1,
 	};
-	let ctl = RunCtl::new();
-	match tokio::time::timeout(Duration::from_secs(secs), exec(spec, &ctl, |_, _| {})).await {
+	match tokio::time::timeout(Duration::from_secs(secs), exec(spec, ctl, |ev, _| emit(ev))).await {
 		Ok(o) if o.ok => {
 			let cost = o.parser.result.as_ref().and_then(|r| r.get("total_cost_usd")).and_then(|x| x.as_f64()).unwrap_or(0.0);
-			Some((o.parser.result_text(), cost))
+			Quick::Done(o.parser.result_text(), cost)
 		}
-		_ => None,
+		Ok(o) if o.stopped => Quick::Stopped,
+		_ => Quick::Failed,
 	}
 }
 
@@ -2741,8 +3080,53 @@ async fn make_title(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 	Ok(())
 }
 
+/// 프로젝트 대화의 제목을 지을 때가 됐는지. 첫 답이 끝난 뒤 한 번만 짓는다 — 질문만으로는 「이거 봐 줘」처럼 주제가 안 드러나고,
+/// 차례마다 다시 지으면 목록 제목이 흔들린다. 손으로 고친 제목(manual)과 이 기능 전의 대화(first_line)는 건드리지 않는다.
+pub fn talk_title_due(i: &Issue) -> bool {
+	i.talk && i.title_mode == TitleMode::Auto && i.titled_at == 0 && i.runs.iter().any(|r| r.status == "ok")
+}
+
+/// 대화 한 개의 제목을 짓는다. 첫 성공한 차례의 질문과 그 실행 기록에서 다시 읽은 답 글을 넘긴다.
+async fn make_talk_title(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
+	let store = app.state::<Store>();
+	let settings = store.settings()?;
+	let view = store.get_issue(pid, iid)?;
+	let Some(run) = view.issue.runs.iter().find(|r| r.status == "ok") else { return Ok(()) };
+	let mut title = String::new();
+	// 그 사이 제목 모델을 껐으면 부르지 않는다. 비운 채 넘기면 CLI 기본 모델(비싼 모델)이 제목을 짓는다.
+	if !settings.title_model.trim().is_empty() {
+		let answer = replay(&store.issue_run_log(pid, iid, &run.id)?, &view.dir)
+			.unwrap_or_default()
+			.into_iter()
+			.filter_map(|e| if let RunEvent::Text { text } = e { Some(text) } else { None })
+			.collect::<Vec<_>>()
+			.join("\n");
+		let exe = resolve_claude(&settings.claude_path).ok_or_else(|| Error::Msg("claude 실행 파일을 찾지 못했습니다".into()))?;
+		let dir = PathBuf::from(&view.dir);
+		if let Some((t, _)) = quick_call(exe, (pid, "title"), settings.title_model.trim(), TALK_TITLE_SYSTEM, talk_title_prompt(&run.prompt, &answer), &dir, dir.join("title.jsonl"), 90).await {
+			title = clean_title(&t);
+		}
+	}
+	let v = store.update_issue(pid, iid, |i| {
+		// 짓는 사이 손으로 고쳤으면 그 제목이 앞선다.
+		if i.title_mode != TitleMode::Auto || i.titled_at != 0 {
+			return Ok(());
+		}
+		// 짓지 못해도 지은 것으로 적는다. 같은 대화로 되풀이해 부르지 않고, 첫 질문 제목이 남는다.
+		i.titled_at = now_ms();
+		if !title.is_empty() && title != i.title {
+			i.title = title.clone();
+			i.log("titled", title.clone());
+		}
+		Ok(())
+	})?;
+	emit_issue(app, &v);
+	Ok(())
+}
+
 /// 메모가 잠잠해지면 제목을 짓는다. 고칠 때마다 다시 짓되 쓰는 도중에는 부르지 않는다.
 /// title_mode 가 auto 인 이슈만 본다. 옛 이슈(first_line)와 손으로 고친 제목(manual)은 건드리지 않는다.
+/// 프로젝트 대화는 첫 답이 끝난 뒤에 짓는다(talk_title_due). 손으로 비운 대화도 이 순회가 다시 짓는다.
 pub fn spawn_titler(app: AppHandle) {
 	tauri::async_runtime::spawn(async move {
 		loop {
@@ -2757,13 +3141,18 @@ pub fn spawn_titler(app: AppHandle) {
 			let now = now_ms();
 			let runner = app.state::<Runner>();
 			for p in projects {
-				let Ok(list) = store.list_issues(&p.id) else { continue };
+				let Ok(mut list) = store.list_issues(&p.id) else { continue };
+				list.extend(store.list_talks(&p.id).unwrap_or_default());
 				for v in list {
 					let i = &v.issue;
-					let due = i.title_mode == TitleMode::Auto
-						&& i.titled_at < i.note_updated_at
-						&& !v.note.trim().is_empty()
-						&& now - i.note_updated_at >= delay;
+					let due = if i.talk {
+						talk_title_due(i)
+					} else {
+						i.title_mode == TitleMode::Auto
+							&& i.titled_at < i.note_updated_at
+							&& !v.note.trim().is_empty()
+							&& now - i.note_updated_at >= delay
+					};
 					if !due {
 						continue;
 					}
@@ -2775,9 +3164,10 @@ pub fn spawn_titler(app: AppHandle) {
 							continue;
 						}
 					}
-					let (app, pid, iid) = (app.clone(), p.id.clone(), i.id.clone());
+					let (app, pid, iid, talk) = (app.clone(), p.id.clone(), i.id.clone(), i.talk);
 					tauri::async_runtime::spawn(async move {
-						if let Err(e) = make_title(&app, &pid, &iid).await {
+						let made = if talk { make_talk_title(&app, &pid, &iid).await } else { make_title(&app, &pid, &iid).await };
+						if let Err(e) = made {
 							eprintln!("제목을 짓지 못함 #{iid}: {e}");
 						}
 						app.state::<Runner>().titling.lock().unwrap().remove(&key);
@@ -2864,6 +3254,26 @@ mod tests {
 		assert_eq!(new_title_mode(&Settings { title_model: " ".into(), ..Default::default() }), TitleMode::FirstLine);
 	}
 
+	/// 대화 제목: 질문 · 답 모두 그림 줄을 걷고 앞부분만 넘기며, 첫 답이 성공한 뒤 한 번만 짓는다.
+	#[test]
+	fn talk_title_waits_for_first_answer_once() {
+		let p = talk_title_prompt("이거 왜 이래?\n![캡처](attachments/a.png)", &"가".repeat(5000));
+		assert!(p.contains("이거 왜 이래?") && !p.contains("attachments/"));
+		assert_eq!(p.matches('가').count(), 2000, "답을 자르지 않았다");
+		let run = |status: &str| RunRecord { status: status.into(), ..Default::default() };
+		let mut i = Issue { talk: true, title_mode: TitleMode::Auto, ..Default::default() };
+		assert!(!talk_title_due(&i), "답이 오기 전에 지었다");
+		i.runs.push(run("error"));
+		assert!(!talk_title_due(&i), "실패한 차례로 지었다");
+		i.runs.push(run("ok"));
+		assert!(talk_title_due(&i));
+		i.titled_at = 1;
+		assert!(!talk_title_due(&i), "한 번 지은 대화를 또 지었다");
+		i.titled_at = 0;
+		i.title_mode = TitleMode::Manual;
+		assert!(!talk_title_due(&i), "손으로 고친 제목을 덮었다");
+	}
+
 	/// 터미널 변경 담기: 같은 변경은 두 번 담지 않고, 이슈 전 · 되돌린 뒤보다 앞선 것은 버리고, 담으면 결과 확인으로 옮긴다.
 	#[test]
 	fn absorb_terminal_dedups_and_respects_cutoff() {
@@ -2906,7 +3316,7 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&root);
 	}
 
-	/// 잡기 장부: 겹치지 않으면 IMPL_SLOTS 개까지 함께, 겹치면 · 전체를 잡은 것이 있으면 기다리고, 겹치는 것끼리는 먼저 선 차례대로 들어간다.
+	/// 잡기 장부: 겹치지 않으면 몇 개든 함께, 겹치면 · 전체를 잡은 것이 있으면 기다리고, 겹치는 것끼리는 먼저 선 차례대로 들어간다.
 	#[test]
 	fn claims_let_disjoint_files_run_together() {
 		let c = Claims::default();
@@ -2920,8 +3330,8 @@ mod tests {
 		let d = c.enqueue("p", files("3", &["SRC/A.rs"]));
 		assert_eq!(c.try_take("p", d), Err("파일이 겹쳐 기다림 · #1 · src/a.rs".into()), "대소문자만 달라도 같은 파일이다");
 		let e = c.enqueue("p", files("4", &["src/e.rs"]));
-		assert_eq!(c.try_take("p", e), Err(format!("함께 도는 구현이 {IMPL_SLOTS}개라 기다림")));
-		assert_eq!(c.others("p", "1"), vec!["src/b.rs".to_string()]);
+		assert_eq!(c.try_take("p", e), Ok(()), "겹치지 않으면 수에 걸리지 않는다");
+		assert_eq!(c.others("p", "1"), vec!["src/b.rs".to_string(), "src/e.rs".to_string()]);
 
 		// 1 이 끝나면 3 이 들어간다. 1 이 고친 계획 밖 파일은 1 이 놓을 때까지 1 의 것이다.
 		assert_eq!(c.touch("p", "1", "src/x.rs"), None);
@@ -2932,7 +3342,7 @@ mod tests {
 		// 전체를 잡는 것은 도는 것이 모두 끝나야 들어가고, 뒤에 온 것은 그것을 앞지르지 않는다.
 		let w = c.enqueue("p", whole("5"));
 		assert_eq!(c.try_take("p", w), Err("앞선 작업을 기다림 · #2 · 계획에 폴더가 있어 한 줄로 섬".into()));
-		c.leave("p", e);
+		c.free("p", "4");
 		c.free("p", "2");
 		c.free("p", "3");
 		let f = c.enqueue("p", files("6", &["src/f.rs"]));
@@ -2967,6 +3377,67 @@ mod tests {
 		assert_eq!(job_perms(&Job::Implement { instruction: None, allow_all: true }, &p).label, "모두 허용 · 이번만");
 	}
 
+	fn at_settings(a: &[String]) -> String {
+		a.iter().position(|x| x == "--settings").map(|i| a[i + 1].clone()).unwrap_or_default()
+	}
+
+	/// 큰 실행은 거부 목록이 비어도 --settings 를 한 번만 넘기고, 사용자 전역 CLAUDE.md 를 빼고 자동 메모리를 끈다.
+	/// 사용자 설정 출처는 빼지 않는다 — 빼면 사용자 settings.json 의 거부 규칙이 함께 빠진다.
+	#[test]
+	fn runs_skip_global_instructions_but_keep_user_settings() {
+		let p = Project { denied_tools: vec![], ..Default::default() };
+		let (s, i, dir) = (Settings::default(), Issue::default(), Path::new("x"));
+		let all = [
+			job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None),
+			job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None),
+			job_args(&Job::Chat { text: "물음".into(), edit: true, images: vec![] }, &s, &p, &i, dir, None),
+			doc_args(&s, &p, dir, dir, None),
+		];
+		for a in &all {
+			assert_eq!(a.iter().filter(|x| *x == "--settings").count(), 1, "--settings 가 하나가 아니다: {a:?}");
+			let v: Value = serde_json::from_str(&a[a.iter().position(|x| x == "--settings").unwrap() + 1]).unwrap();
+			assert_eq!(v["autoMemoryEnabled"], Value::Bool(false));
+			let ex = v["claudeMdExcludes"].as_array().unwrap();
+			assert!(ex.iter().any(|e| e.as_str().unwrap().ends_with("/CLAUDE.md") && !e.as_str().unwrap().contains('\\')), "전역 CLAUDE.md 를 / 경로로 빼지 않았다: {ex:?}");
+			assert!(!a.iter().any(|x| x == "--setting-sources" || x == "--safe-mode"), "사용자 설정 · 저장소 지침까지 빼는 플래그를 썼다");
+		}
+		let file = doc_args(&s, &Project::default(), dir, dir, None);
+		let v: Value = serde_json::from_str(&file[file.iter().position(|x| x == "--settings").unwrap() + 1]).unwrap();
+		let deny = v["permissions"]["deny"].as_array().unwrap();
+		assert!(deny.iter().any(|d| d == "Edit(./**)"), "산출물의 저장소 편집 막기가 빠졌다");
+		assert!(deny.iter().any(|d| d == "Skill(anthropic-skills:docx)"), "산출물이 계정 문서 스킬을 막지 않았다");
+		assert!(!at_settings(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &Project::default(), &i, dir, None)).contains("Skill("), "구현에까지 스킬 막기를 걸었다");
+	}
+
+	/// 문서 스킬 플러그인은 산출물 실행에만 건다.
+	#[test]
+	fn plugin_dir_only_for_deliverables() {
+		let (s, p, dir, pd) = (Settings::default(), Project::default(), Path::new("x"), Path::new("plug"));
+		let at = |a: &[String]| a.iter().position(|x| x == "--plugin-dir").map(|i| a[i + 1].clone());
+		let file = doc_args(&s, &p, dir, dir, Some(pd));
+		assert_eq!(at(&file).as_deref(), Some("plug"));
+		let add = file.iter().position(|x| x == "--add-dir").unwrap();
+		assert!(file[add + 1..].iter().take_while(|x| !x.starts_with("--")).any(|x| x == "plug"), "플러그인 폴더를 Read 로 열지 않았다");
+		let prompt = doc_file_prompt("", dir, "b", "docx", Some(pd), Path::new("chk"), false);
+		assert!(prompt.contains("render.py") && prompt.contains("chk") && prompt.contains("writing-profile.md"), "쪽 그림 · 다듬기 안내가 빠졌다");
+		assert!(prompt.contains("\"hancom\": \"off\"") && !prompt.contains("--engine hancom"), "한컴을 껐는데 한컴을 쓰라고 했다");
+		assert!(doc_file_prompt("", dir, "b", "hwpx", Some(pd), Path::new("chk"), true).contains("--engine hancom"), "한컴을 켰는데 안내가 없다");
+		assert_eq!(at(&doc_args(&s, &p, dir, dir, None)), None);
+		assert_eq!(at(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &Issue::default(), dir, None)), None);
+	}
+
+	/// 이어 붙인 세션에는 그 세션이 받은 구획을 다시 붙이지 않는다. 다른 세션 · 옛 기록(세션 없음)은 보내지 않은 것으로 친다.
+	#[test]
+	fn unsent_hits_skip_sections_already_in_session() {
+		let hit = |p: &str, s: &str| KbHit { path: p.into(), section: s.into(), ..Default::default() };
+		let run = |sid: &str, hits: Vec<KbHit>| RunRecord { session_id: sid.into(), kb_hits: hits, ..Default::default() };
+		let runs = vec![run("s1", vec![hit("a.md", "1"), hit("b.md", "")]), run("s0", vec![hit("c.md", "")]), run("", vec![hit("d.md", "")])];
+		let now = vec![hit("a.md", "1"), hit("a.md", "2"), hit("b.md", ""), hit("c.md", ""), hit("d.md", "")];
+		let left: Vec<String> = unsent_hits(&now, &runs, "s1").iter().map(|h| format!("{}#{}", h.path, h.section)).collect();
+		assert_eq!(left, vec!["a.md#2", "c.md#", "d.md#"]);
+		assert_eq!(unsent_hits(&now, &runs, "").len(), now.len(), "세션이 없으면 모두 붙인다");
+	}
+
 	/// 모델: 메모에서 고른 것이 앞서고, 없으면 실행 종류에 맞는 설정 칸이다. 모두 비면 --model 을 넘기지 않는다.
 	#[test]
 	fn model_follows_memo_then_run_kind() {
@@ -2985,7 +3456,7 @@ mod tests {
 		assert_eq!(model(&job_args(&chat, &s, &p, &i, dir, None)).as_deref(), Some("haiku"));
 		let memo = Issue { model: " fable ".into(), ..Default::default() };
 		assert_eq!(model(&job_args(&chat, &s, &p, &memo, dir, None)).as_deref(), Some("fable"), "메모 모델이 앞서지 않았다");
-		assert_eq!(model(&doc_args(&s, &p, dir, None)).as_deref(), Some("sonnet"));
+		assert_eq!(model(&doc_args(&s, &p, dir, dir, None)).as_deref(), Some("sonnet"));
 	}
 
 	/// effort: 모델과 같은 순서로 고르되 따로 고른다. 모두 비면 --effort 를 넘기지 않는다.
@@ -2996,7 +3467,7 @@ mod tests {
 		let effort = |a: &[String]| a.iter().position(|x| x == "--effort").map(|i| a[i + 1].clone());
 		let i = Issue::default();
 		assert_eq!(effort(&job_args(&Job::Plan { feedback: None }, &Settings::default(), &p, &i, dir, None)), None);
-		assert_eq!(effort(&doc_args(&Settings::default(), &p, dir, None)), None);
+		assert_eq!(effort(&doc_args(&Settings::default(), &p, dir, dir, None)), None);
 
 		let s = Settings { plan_effort: "high".into(), impl_effort: "medium".into(), chat_effort: "low".into(), ..Default::default() };
 		let chat = Job::Chat { text: "물음".into(), edit: false, images: vec![] };
@@ -3004,7 +3475,7 @@ mod tests {
 		assert_eq!(effort(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None)).as_deref(), Some("medium"));
 		assert_eq!(effort(&job_args(&Job::Revert, &s, &p, &i, dir, None)).as_deref(), Some("medium"));
 		assert_eq!(effort(&job_args(&chat, &s, &p, &i, dir, None)).as_deref(), Some("low"));
-		assert_eq!(effort(&doc_args(&s, &p, dir, None)).as_deref(), Some("medium"), "산출물이 구현 effort 를 따르지 않았다");
+		assert_eq!(effort(&doc_args(&s, &p, dir, dir, None)).as_deref(), Some("medium"),"산출물이 구현 effort 를 따르지 않았다");
 
 		let memo = Issue { effort: " max ".into(), ..Default::default() };
 		assert_eq!(effort(&job_args(&chat, &s, &p, &memo, dir, None)).as_deref(), Some("max"), "메모 effort 가 앞서지 않았다");
@@ -3258,18 +3729,19 @@ mod doc_tests {
 		std::fs::create_dir_all(&out).unwrap();
 		std::fs::write(data.join("refs").join("양식.md"), "# 함수 목록\n\n| 함수 | 하는 일 |\n| - | - |\n").unwrap();
 		let view = DeliverableView {
-			deliverable: Deliverable { title: "함수 목록".into(), guide: "calc.py 의 함수를 양식의 표에 채운다.".into(), mode: "file".into(), ..Default::default() },
+			deliverable: Deliverable { title: "함수 목록".into(), guide: "calc.py 의 함수를 양식의 표에 채운다.".into(), ..Default::default() },
 			dir: data.to_string_lossy().into(),
 			refs: vec![RefFile { name: "양식.md".into(), size: 0, kind: "direct".into(), text_path: String::new(), template: false }],
 			output_dir: out.to_string_lossy().into(),
 			next_name: String::new(),
+			pending: Vec::new(),
 		};
 		let repo_before = snapshot(Path::new(&root));
 		let spec = Spec {
 			exe,
 			cwd: PathBuf::from(&root),
-			args: doc_args(&settings, &project, &data, Some(&out)),
-			prompt: doc_file_prompt(&doc_material(&view, "", None), &out, "함수_목록_v1", ""),
+			args: doc_args(&settings, &project, &data, &out, None),
+			prompt: doc_file_prompt(&doc_material(&view, "", None), &out, "함수_목록_v1", "", None, &base.join("check"), false),
 			log: base.join("run.jsonl"),
 			root: root.clone(),
 			run_id: "t".into(),

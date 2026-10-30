@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import { memo, useEffect, useMemo, useState } from "react";
+import ReactMarkdown, { type Components, defaultUrlTransform, type UrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "@/lib/api";
@@ -15,6 +15,14 @@ interface HNode {
 	properties?: { className?: unknown };
 	children?: HNode[];
 }
+
+const PLUGINS = [remarkGfm];
+
+/**
+ * 그림 주소는 거르지 않고 resolveImage 에 맡긴다. 기본 거름은 `D:\…` 의 `D:` 를 허용되지 않은 프로토콜로 보고 주소를 비운다.
+ * 그러면 절대 경로 그림이 「그림을 열 수 없습니다 · 저장소 루트」로 깨진다. 링크는 기본 거름을 그대로 쓴다.
+ */
+const urlTransform: UrlTransform = (url, key) => (key === "src" ? url : defaultUrlTransform(url));
 
 function textOf(n: HNode): string {
 	return n.type === "text" ? (n.value ?? "") : (n.children ?? []).map(textOf).join("");
@@ -54,6 +62,7 @@ function MdImage({ src, alt, base, root }: { src: string; alt: string; base?: st
 			live = false;
 		};
 	}, [ready, path]);
+	if (!direct && !path) return <span className="img-missing">그림 주소가 비어 있습니다{alt && ` · ${alt}`}</span>;
 	if (broken) return <span className="img-missing">그림을 열 수 없습니다 · {path ?? src}</span>;
 	if (!url) return null;
 	return <img src={url} alt={alt} loading="lazy" onError={() => setBroken(true)} />;
@@ -64,39 +73,42 @@ function MdImage({ src, alt, base, root }: { src: string; alt: string; base?: st
  * ```html · ```svg 블록은 미리 보기로 그린다. 계획 · 대화에서 화면 설계를 글로만 읽고 판단하기 어렵다.
  * 링크는 웹뷰 안에서 열리지 않게 막고 기본 브라우저로 넘긴다. 앱 창이 그 페이지로 넘어가 버리면 돌아올 길이 없다.
  */
-export function Markdown({ text, base, root, className }: { text: string; base?: string; root?: string; className?: string }) {
+export const Markdown = memo(function Markdown({ text, base, root, className }: { text: string; base?: string; root?: string; className?: string }) {
+	// react-markdown 은 이 함수들을 컴포넌트 타입으로 쓴다. 렌더마다 새로 만들면 타입이 바뀌어 목업 iframe · 그림이 통째로 새로 마운트되고,
+	// 대화 입력칸에 글자 하나를 칠 때마다 깜빡인다. 그래서 base · root 가 같으면 같은 함수를 넘긴다.
+	const components = useMemo<Components>(
+		() => ({
+			a: ({ href, children }) => (
+				<a
+					href={href}
+					onClick={(e) => {
+						e.preventDefault();
+						if (href && /^(https?:|mailto:)/i.test(href)) void openUrl(href);
+					}}
+				>
+					{children}
+				</a>
+			),
+			img: ({ src, alt }) => {
+				const s = typeof src === "string" ? src : "";
+				return <MdImage key={s} src={s} alt={alt ?? ""} base={base} root={root} />;
+			},
+			// 인라인 code 와 블록 code 는 pre 로만 가른다. react-markdown 10 에는 inline 표지가 없다.
+			pre: ({ node, children }) => {
+				const code = (node as HNode | undefined)?.children?.find((c) => c.tagName === "code");
+				const cls = code?.properties?.className;
+				const lang = Array.isArray(cls) ? cls.map(String).find((c) => c.startsWith("language-"))?.slice(9) : undefined;
+				if (code && (lang === "html" || lang === "svg")) return <Mockup kind={lang} code={textOf(code).replace(/\n$/, "")} />;
+				return <pre>{children}</pre>;
+			},
+		}),
+		[base, root],
+	);
 	return (
 		<div className={cn("prose-docket", className)}>
-			<ReactMarkdown
-				remarkPlugins={[remarkGfm]}
-				components={{
-					a: ({ href, children }) => (
-						<a
-							href={href}
-							onClick={(e) => {
-								e.preventDefault();
-								if (href && /^(https?:|mailto:)/i.test(href)) void openUrl(href);
-							}}
-						>
-							{children}
-						</a>
-					),
-					img: ({ src, alt }) => {
-						const s = typeof src === "string" ? src : "";
-						return <MdImage key={s} src={s} alt={alt ?? ""} base={base} root={root} />;
-					},
-					// 인라인 code 와 블록 code 는 pre 로만 가른다. react-markdown 10 에는 inline 표지가 없다.
-					pre: ({ node, children }) => {
-						const code = (node as HNode | undefined)?.children?.find((c) => c.tagName === "code");
-						const cls = code?.properties?.className;
-						const lang = Array.isArray(cls) ? cls.map(String).find((c) => c.startsWith("language-"))?.slice(9) : undefined;
-						if (code && (lang === "html" || lang === "svg")) return <Mockup kind={lang} code={textOf(code).replace(/\n$/, "")} />;
-						return <pre>{children}</pre>;
-					},
-				}}
-			>
+			<ReactMarkdown remarkPlugins={PLUGINS} components={components} urlTransform={urlTransform}>
 				{text}
 			</ReactMarkdown>
 		</div>
 	);
-}
+});

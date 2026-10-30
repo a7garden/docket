@@ -2,7 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
 	AppInfo,
 	Deliverable,
+	DocTools,
 	DeliverablePatch,
+	DeliverableSettings,
 	GlossaryEntry,
 	GlossaryView,
 	Issue,
@@ -32,6 +34,7 @@ import type {
 // Rust 명령 이름과 인자를 한 곳에 모은다. 화면 코드는 invoke 를 직접 부르지 않는다.
 export const api = {
 	appInfo: () => invoke<AppInfo>("app_info"),
+	docTools: () => invoke<DocTools>("doc_tools_check"),
 	usage: () => invoke<Usage | null>("usage_get"),
 	spend: (days: number) => invoke<Spend>("spend_summary", { days }),
 	settingsGet: () => invoke<Settings>("settings_get"),
@@ -39,7 +42,6 @@ export const api = {
 	open: (path: string) => invoke<void>("path_open", { path }),
 	reveal: (path: string) => invoke<void>("path_reveal", { path }),
 	plugins: () => invoke<PluginList>("plugins_list"),
-	pluginCreatePreset: (id: string) => invoke<string>("plugin_create_preset", { id }),
 	/** 매니페스트의 권한을 허락하고 켠다 */
 	pluginGrant: (id: string) => invoke<Settings>("plugin_grant", { id }),
 	pluginInspect: (path: string) => invoke<PluginInspect>("plugin_inspect", { path }),
@@ -53,6 +55,7 @@ export const api = {
 	projects: () => invoke<Project[]>("projects_list"),
 	projectAdd: (path: string) => invoke<Project>("project_add", { path }),
 	projectSave: (project: Project) => invoke<Project>("project_save", { project }),
+	deliverableSettingsSave: (projectId: string, settings: DeliverableSettings) => invoke<Project>("deliverable_settings_save", { projectId, settings }),
 	projectRemove: (id: string, deleteData: boolean) => invoke<void>("project_remove", { id, deleteData }),
 	projectAllow: (projectId: string, rules: string[]) => invoke<Project>("project_allow", { projectId, rules }),
 	permissionsView: (projectId: string) => invoke<RuleSet[]>("permissions_view", { projectId }),
@@ -89,6 +92,8 @@ export const api = {
 		invoke<Issue>("issue_rework", { projectId, issueId, feedback, allowAll }),
 	runsStopAll: () => invoke<number>("runs_stop_all"),
 	issueRevert: (projectId: string, issueId: string) => invoke<Issue>("issue_revert", { projectId, issueId }),
+	/** 워크트리에서 끝난 구현을 본 작업트리에 옮긴다. 합치지 못하면 아무것도 쓰지 않고 오류를 낸다. */
+	issueMerge: (projectId: string, issueId: string) => invoke<Issue>("issue_merge", { projectId, issueId }),
 	issueChat: (projectId: string, issueId: string, text: string, edit: boolean, images: string[] = []) =>
 		invoke<Issue>("issue_chat", { projectId, issueId, text, edit, images }),
 	/** keepFiles 는 고치려고 입력칸으로 되돌릴 때 첨부를 남긴다. */
@@ -117,7 +122,7 @@ export const api = {
 	/** 프로젝트 안 그림 파일 하나를 asset 범위에 연다. 연 실제 경로를 돌려주고, 열지 않았으면 빈 글자다. */
 	assetAllow: (path: string) => invoke<string>("asset_allow", { path }),
 
-	runEvents: (projectId: string, target: "issue" | "deliverable", targetId: string, runId: string) =>
+	runEvents: (projectId: string, target: "issue" | "deliverable" | "learn", targetId: string, runId: string) =>
 		invoke<RunEvent[]>("run_events", { projectId, target, targetId, runId }),
 
 	deliverables: (projectId: string) => invoke<Deliverable[]>("deliverables_list", { projectId }),
@@ -146,16 +151,24 @@ export const api = {
 		invoke<Deliverable>("deliverable_generate", { projectId, request, deliverableId: deliverableId ?? null }),
 	deliverableStop: (projectId: string, deliverableId: string) =>
 		invoke<void>("deliverable_stop", { projectId, deliverableId }),
+	/** 반영 대기 이슈 가운데 고른 것을 한 번에 반영한 새 판을 쓴다. 10건까지 */
+	deliverableCatchUp: (projectId: string, deliverableId: string, issueIds: string[]) =>
+		invoke<Deliverable>("deliverable_catch_up", { projectId, deliverableId, issueIds }),
+	/** keep 이면 검토 표지만 지우고, 아니면 그 판을 휴지통으로 옮긴다 */
+	deliverableVersionReview: (projectId: string, deliverableId: string, n: number, keep: boolean) =>
+		invoke<Deliverable>("deliverable_version_review", { projectId, deliverableId, n, keep }),
 	deliverableFromIssue: (projectId: string, issueId: string) =>
 		invoke<Deliverable>("deliverable_from_issue", { projectId, issueId }),
 	deliverableLearn: (projectId: string, deliverableId: string) => invoke<Deliverable>("deliverable_learn", { projectId, deliverableId }),
-	/** field: skill · vocab · format · naming · template · all */
-	deliverableDraftApply: (projectId: string, deliverableId: string, field: string, apply: boolean) =>
-		invoke<Deliverable>("deliverable_draft_apply", { projectId, deliverableId, field, apply }),
+	deliverableLearnStop: (projectId: string, deliverableId: string) => invoke<void>("deliverable_learn_stop", { projectId, deliverableId }),
+	/** field: skill · vocab · format · naming · template · all. terms 를 주면 어휘 제안 가운데 그 말만 처리한다. */
+	deliverableDraftApply: (projectId: string, deliverableId: string, field: string, apply: boolean, terms?: string[]) =>
+		invoke<Deliverable>("deliverable_draft_apply", { projectId, deliverableId, field, apply, terms: terms ?? null }),
 	deliverableSetTemplate: (projectId: string, deliverableId: string, name: string) =>
 		invoke<Deliverable>("deliverable_set_template", { projectId, deliverableId, name }),
-	deliverableVocabPromote: (projectId: string, deliverableId: string, term: string) =>
-		invoke<Deliverable>("deliverable_vocab_promote", { projectId, deliverableId, term }),
+	/** 산출물 어휘 · 어휘 제안을 사전으로 옮긴다. added 는 새로 더한 수, merged 는 이미 있어 보탠 수다. */
+	deliverableVocabPromote: (projectId: string, deliverableId: string, terms: string[]) =>
+		invoke<{ deliverable: Deliverable; added: number; merged: number }>("deliverable_vocab_promote", { projectId, deliverableId, terms }),
 
 	kbStatus: (projectId: string) => invoke<KbView>("kb_status", { projectId }),
 	kbSave: (projectId: string, kb: ProjectKb) => invoke<KbView>("kb_save", { projectId, kb }),

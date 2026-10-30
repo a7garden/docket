@@ -14,10 +14,12 @@ export interface Job {
 	phase: "running" | "queued";
 	/** 프로젝트 대화. 누르면 보드가 아니라 대화 화면으로 간다. */
 	talk?: boolean;
+	/** 산출물의 작성법 뽑기. 멈출 때 부르는 명령과 실시간 사건 칸이 작성과 다르다. */
+	learn?: boolean;
 }
 
 /**
- * 모든 프로젝트에서 실행 · 대기 중인 이슈와 산출물 작성. 사건으로 캐시가 고쳐지므로 따로 다시 묻지 않는다.
+ * 모든 프로젝트에서 실행 · 대기 중인 이슈 · 산출물 작성 · 작성법 뽑기. 사건으로 캐시가 고쳐지므로 따로 다시 묻지 않는다.
  * 창 닫기 경고와 업데이트 설치 경고가 함께 쓴다. 따로 세면 두 경고의 건수가 어긋난다.
  */
 export function useJobs(): Job[] {
@@ -42,9 +44,13 @@ export function useJobs(): Job[] {
 					what: RUN_KIND_LABEL[i.run.kind] ?? i.run.kind,
 					phase: i.run.phase,
 				});
-		for (const d of docs[n]?.data ?? [])
+		for (const d of docs[n]?.data ?? []) {
 			if (d.job)
 				out.push({ key: `d:${d.id}`, project, target: "deliverable", id: d.id, label: d.title || "제목 없는 문서", what: "문서 작성", phase: d.job.phase });
+			// 작성과 함께 돌 수 있어 따로 한 줄을 둔다.
+			if (d.learn)
+				out.push({ key: `l:${d.id}`, project, target: "deliverable", id: d.id, label: d.title || "제목 없는 문서", what: "작성법 뽑기", phase: d.learn.phase ?? "running", learn: true });
+		}
 	});
 	// 실행 중인 것을 위로. 줄 서 있는 것은 그 아래에 프로젝트별로 모인다.
 	return out.sort((a, b) => Number(a.phase === "queued") - Number(b.phase === "queued"));

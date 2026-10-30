@@ -65,7 +65,7 @@ function FileDiff({ rel, list, extra }: { rel: string; list: FileChange[]; extra
 	return (
 		<div className="surface overflow-hidden rounded-lg">
 			<ContextActions items={menu}>
-				<div className="flex h-9 items-center gap-2 pr-1.5 pl-2">
+				<div data-file-head className="flex h-9 items-center gap-2 pr-1.5 pl-2">
 					<button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" onClick={() => setOpen((v) => !v)}>
 						<ChevronRight className={cn("size-3.5 shrink-0 text-subtle transition-transform", open && "rotate-90")} />
 						<span className="mono min-w-0 truncate text-[12.5px]" title={list[0].path}>

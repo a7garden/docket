@@ -55,6 +55,11 @@ pub struct Settings {
 	/// 산출물에 파일을 넣거나 새 산출물을 등록하면 작성법 · 어휘 · 형식 · 템플릿 · 이름 규칙을 뽑는다 (recipe.rs).
 	/// 구현 모델로 돌아 비용이 들지만, 손으로 채우지 않아도 다음 판부터 같은 꼴로 쓰게 하려고 켜 둔다.
 	pub recipe_auto: bool,
+	/// 켤 때와 켜 둔 동안 정해진 간격마다 새 판을 확인한다 (src/lib/updater.ts). 알리기만 하고 설치는 사용자가 고른다.
+	pub auto_update_check: bool,
+	/// 파일 산출물에서 한컴오피스로 한글 문서를 확인한다(열기 검사 · 정확한 쪽 수 · hwp 변환). 실행마다 DOCKET_HANCOM 으로 넘긴다.
+	/// 기본은 끔이다 — 한컴 자동화 보안 모듈이 없으면 띄울 때마다 접근 확인 창이 뜬다. 끄면 rhwp 로 그리고 읽어 본다.
+	pub hancom_check: bool,
 }
 
 impl Default for Settings {
@@ -79,6 +84,8 @@ impl Default for Settings {
 			kb_card_model: String::new(),
 			send_key: "ctrlEnter".into(),
 			recipe_auto: true,
+			auto_update_check: true,
+			hancom_check: false,
 		}
 	}
 }
@@ -105,7 +112,12 @@ pub struct Project {
 	/// 계획에 적힌 파일이 겹치지 않는 구현 · 수정 요청 · 되돌리기를 함께 돌린다. 끄면 모두 한 줄로 선다.
 	/// 2026.10.29 : 기본 켜짐. 판정이 애매하면(폴더 · 와일드카드 · 빈 목록 · 「모두 허용」) 어차피 한 줄로 서므로 켜 둔다.
 	pub parallel_impl: bool,
+	/// 줄을 서야 할 구현을 기다리게 하지 않고 git 워크트리에서 돌린다(worktree.rs). parallel_impl 을 켰을 때만 먹는다.
+	/// 2026.10.29 : 기본 꺼짐. 저장소가 크면 워크트리를 만드는 것 자체가 무거워서 프로젝트마다 고른다.
+	pub worktree: bool,
 	/// 산출물 파일을 둘 폴더. 비우면 앱 데이터 폴더에 둔다. 사용자가 고른 폴더라 프로젝트 안이어도 쓴다.
+	/// 산출물 네 칸(deliverables_dir · naming · naming_underscore · archive_dir)은 산출물 화면의 설정 창이 save_deliverable_settings 로만 바꾼다.
+	/// save_project 는 덮지 않는다 — 프로젝트 설정 창이 들고 있던 옛 값으로 산출물 설정을 지우지 않게 한다.
 	pub deliverables_dir: String,
 	/// 산출물 파일 이름 기본 규칙. 비우면 naming::DEFAULT
 	pub naming: String,
@@ -117,6 +129,22 @@ pub struct Project {
 	pub kb: ProjectKb,
 	/// 어휘 사전 설정. 용어 목록은 projects/<pid>/glossary.json 에 따로 둔다. save_project 는 kb 처럼 이 칸도 덮지 않는다.
 	pub glossary: ProjectGlossary,
+}
+
+/// 산출물 설정 창이 넘기는 값. 뜻은 Project 의 같은 이름 칸과 같다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DeliverableSettings {
+	pub deliverables_dir: String,
+	pub naming: String,
+	pub naming_underscore: bool,
+	pub archive_dir: String,
+}
+
+impl Default for DeliverableSettings {
+	fn default() -> Self {
+		Self { deliverables_dir: String::new(), naming: String::new(), naming_underscore: true, archive_dir: String::new() }
+	}
 }
 
 /// 프로젝트 어휘 사전 설정. 끈 채로 시작한다. Claude 를 부르지 않아 비용은 없지만 프롬프트가 길어진다.
@@ -204,6 +232,7 @@ impl Default for Project {
 			denied_tools: DEFAULT_DENY.iter().map(|s| s.to_string()).collect(),
 			plan_vcs_read: true,
 			parallel_impl: true,
+			worktree: false,
 			deliverables_dir: String::new(),
 			naming: String::new(),
 			naming_underscore: true,
@@ -266,10 +295,12 @@ pub enum RunKind {
 	Revert,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// 기본값은 Running 이다. 단계 칸이 없던 때 저장한 작성법 뽑기는 늘 돌고 있었다.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
 	Queued,
+	#[default]
 	Running,
 }
 
@@ -450,6 +481,8 @@ pub struct RunRecord {
 	pub denials: Vec<Denial>,
 	/// 지식베이스에서 찾아 프롬프트에 붙인 구획. 무엇을 근거로 줬는지 나중에 볼 수 있게 남긴다.
 	pub kb_hits: Vec<KbHit>,
+	/// 이 실행이 돈 claude 세션. 이어 붙인 세션에 같은 지식베이스 구획을 다시 보내지 않으려고 남긴다. 이 칸이 생기기 전의 기록은 비어 있다.
+	pub session_id: String,
 	/// 어휘 사전에서 프롬프트에 붙인 용어 이름. 다른 프로젝트 것이면 `용어 · 프로젝트` 꼴이다.
 	pub glossary_terms: Vec<String>,
 }
@@ -527,6 +560,18 @@ pub struct Issue {
 	pub talk: bool,
 	/// 실행 중에 보낸 질문. 실행이 끝나면 한 차례로 묶어 이어 보낸다. 사용자가 중지했으면 보내지 않고 남겨 둔다.
 	pub queue: Vec<QueuedChat>,
+	/// 이 이슈의 구현이 도는 워크트리. 있으면 수정 요청 · 대화도 그 안에서 돌고, 결과 확인 때 「반영」해야 본 작업트리에 들어간다.
+	pub worktree: Option<Worktree>,
+}
+
+/// 본 작업트리 밖에서 도는 구현의 자리.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Worktree {
+	pub path: String,
+	/// 만들 때 찍은 작업트리 사본 커밋. 반영할 때 3-way 의 바탕이다.
+	pub base: String,
+	pub at: i64,
 }
 
 /// 실행이 끝나기를 기다리는 질문 하나. 보낼 때의 「읽기 전용」 여부와 첨부를 따로 든다.
@@ -571,6 +616,9 @@ pub struct Version {
 	pub source: String,
 	/// 파일의 절대 경로. 비어 있으면 옛 자리(앱 데이터의 v<n>/<file>)다.
 	pub path: String,
+	/// 자동 갱신 · 밀린 변경 반영으로 Claude 가 쓴 판이다. 사람이 「검토함」을 누르기 전까지 켜져 있다.
+	/// 판은 바로 최신이 된다 — 승인 전까지 앞 판을 최신으로 두면 판 번호 · 파일 이름 규칙까지 바꿔야 해서 표지만 단다.
+	pub review: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -583,6 +631,9 @@ pub struct DocJob {
 	/// 이슈를 완료해 자동 갱신으로 시작했으면 그 이슈. 끝난 결과를 그 이슈의 흐름에 남긴다.
 	#[serde(default)]
 	pub issue_id: String,
+	/// 「밀린 변경 반영」으로 시작했으면 반영하는 이슈들. 새 판이 나오면 이 이슈들을 자동 관리 기록에 catchup 으로 남긴다.
+	#[serde(default)]
+	pub catch_up: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -605,29 +656,77 @@ pub struct Deliverable {
 	pub naming: String,
 	/// 프로젝트 산출물 폴더 안의 하위 폴더
 	pub subdir: String,
-	/// md: 마크다운으로 받아 앱이 저장 · file: Claude 가 템플릿 형식대로 파일을 만든다
-	pub mode: String,
 	/// 이슈를 완료하면 그 코드 변경과 관련 있는지 가려, 있으면 새 판을 쓴다.
 	pub auto_update: bool,
 	/// 마지막 자동 갱신 결과 한 줄 (`#번호 · v판 갱신` · `#번호 · 건너뜀 · 까닭` …). 목록에 보인다.
 	pub auto_last: String,
+	/// 자동 관리 기록. 판정 · 작성 결과를 이슈마다 한 줄씩 오래된 것부터 쌓는다(최근 AUTO_LOG_MAX 건).
+	/// 이슈 흐름에도 같은 결과가 남지만, 산출물 쪽에서 「이 문서에 어떤 변경이 반영됐는지」를 되짚으려면 여기에 있어야 한다.
+	pub auto_log: Vec<AutoEntry>,
 	/// 작성법. 템플릿 · 지난 판에서 뽑은 구성 · 문체 · 표기 규칙(마크다운). 사용자가 고칠 수 있고, 쓸 때마다 함께 넘긴다.
 	/// guide 와 칸을 나눈 것은 다시 뽑아도 사용자가 적은 지침을 덮지 않게 하려는 것이다.
 	pub skill: String,
 	/// 이 산출물에서 쓸 말. 프로젝트 어휘 사전과 같은 말이면 이쪽을 따른다.
 	pub vocab: Vec<Term>,
 	/// 결과 파일 형식(확장자). 비우면 템플릿을 따르고, 템플릿도 없으면 md 다.
+	/// 2026.10.29 : 「마크다운으로 받기」(Claude 는 읽기만 하고 앱이 .md 로 저장)를 없앴다. 마크다운도 이 칸의 한 형식으로 Claude 가 파일로 만든다.
+	///   옛 meta.json 의 mode 칸은 읽을 때 버려진다.
 	pub format: String,
 	/// refs/ 안에서 템플릿으로 쓸 파일 이름. 나머지는 참고 자료다.
 	pub template: String,
-	/// 작성법을 뽑는 중이면 그 시작 시각. 앱이 닫혀 끊기면 recover_interrupted 가 비운다.
+	/// 작성법을 뽑는 중이면 그 실행. 기록은 runs/<run_id>.jsonl 에 남는다. 앱이 닫혀 끊기면 recover_interrupted 가 비운다.
 	pub learn: Option<LearnJob>,
 	pub learn_error: String,
+	/// 마지막으로 끝난 뽑기의 run_id. 끝난 뒤에도 「기록」에서 그 응답을 다시 펼친다 — 답을 못 읽었을 때 까닭을 보는 자리다.
+	pub learn_last_run: String,
 	/// 마지막으로 뽑은 때 · 뽑기에 든 비용 합(USD). 뽑기는 판을 만들지 않아 runs 에 넣지 않는다 — 알림이 「작성 끝」으로 뜨지 않게.
 	pub learned_at: i64,
 	pub learn_cost_usd: f64,
 	/// 값이 이미 있는 칸에 들어갈 뽑은 값. 사용자가 적용하거나 버리기 전까지 칸은 그대로다.
 	pub draft: RecipeDraft,
+}
+
+/// 자동 관리 기록은 산출물마다 이만큼만 둔다. 오래된 것은 이슈 흐름에 남아 있다.
+pub const AUTO_LOG_MAX: usize = 50;
+
+/// 자동 관리 기록 한 줄. 이슈 하나가 이 산출물에 어떻게 반영됐는지다.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AutoEntry {
+	pub at: i64,
+	pub issue_id: String,
+	pub number: u32,
+	/// updated · skipped · unrelated · catchup — 반영이 끝난 것.
+	/// busy · failed · stopped · discarded(만든 판을 사람이 버림) — 반영하지 못한 것. 이 이슈는 반영 대기에 남는다.
+	pub verdict: String,
+	pub reason: String,
+	/// updated · catchup 이면 만든 판 번호
+	pub version: u32,
+}
+
+impl AutoEntry {
+	/// 이 결과로 그 이슈의 반영이 끝났는가. 아니면 반영 대기에 남긴다.
+	pub fn settled(&self) -> bool {
+		matches!(self.verdict.as_str(), "updated" | "skipped" | "unrelated" | "catchup")
+	}
+}
+
+impl Deliverable {
+	pub fn push_auto(&mut self, e: AutoEntry) {
+		self.auto_log.push(e);
+		let over = self.auto_log.len().saturating_sub(AUTO_LOG_MAX);
+		self.auto_log.drain(..over);
+	}
+}
+
+/// 완료됐지만 아직 이 산출물에 반영되지 않은 이슈. 저장하지 않고 목록을 읽을 때 센다.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingIssue {
+	pub id: String,
+	pub number: u32,
+	pub title: String,
+	pub done_at: i64,
 }
 
 /// 산출물에서 쓸 말 하나. avoid 는 같은 뜻이지만 쓰지 않을 말이다.
@@ -644,6 +743,8 @@ pub struct Term {
 pub struct LearnJob {
 	pub run_id: String,
 	pub started_at: i64,
+	/// 뽑기는 동시에 둘까지만 돈다. 자리를 기다리는 동안은 queued 다.
+	pub phase: Phase,
 }
 
 /// 뽑은 값의 제안. 빈 칸 · 빈 목록이면 제안이 없다.
@@ -680,6 +781,8 @@ pub struct DeliverableView {
 	pub refs: Vec<RefFile>,
 	/// 새 판이 놓일 폴더
 	pub output_dir: String,
-	/// 마크다운으로 받을 때 다음 판의 파일 이름
+	/// 앱이 쓰는 마크다운 판(직접 쓴 글 · 이슈 정리)의 다음 파일 이름
 	pub next_name: String,
+	/// 반영 대기 이슈. 자동 갱신을 켜고 판이 있는 산출물만 센다 — 끈 산출물은 손으로 관리하는 문서라 숫자를 쌓지 않는다.
+	pub pending: Vec<PendingIssue>,
 }

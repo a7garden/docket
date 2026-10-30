@@ -1,7 +1,17 @@
+/**
+ * 산출물 상세 창.
+ *
+ * 목차
+ * 1. DeliverableSheet · Detail — 머리(제목 · 설명) · 판 · 만드는 법 · 자동 관리 탭 · 아래 단추
+ * 2. Writer — 새 판을 손으로 쓰기
+ * 3. VersionView — 판 보기 · 이 판 고치기 · 앞 판과 비교
+ * 4. ReviewBand · DiffView — 자동으로 쓴 판의 검토 띠 · 줄 단위 비교
+ * 5. useDeliverableActions · Menu — 새 판 올리기 · 저장 폴더 · 지우기
+ */
 import { type ReactNode, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ExternalLink, Eye, FolderOpen, Loader2, MoreHorizontal, PenLine, Trash2, Upload, Wand2, X } from "lucide-react";
+import { Check, ExternalLink, Eye, FolderOpen, GitCompare, Loader2, MoreHorizontal, PenLine, Trash2, Upload, Wand2, X } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, ContextActions, DropdownActions, fileActions } from "@/components/ActionMenu";
 import { Chip, SectionTitle } from "@/components/bits";
@@ -24,6 +34,7 @@ import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, errorText } from "@/lib/api";
+import { diffLines, foldDiff } from "@/lib/diff";
 import { bytes, clock, dirname, fileUrl, isImage, isText, joinPath } from "@/lib/format";
 import { lastEnded, useMarkSeen } from "@/lib/notices";
 import { useDeliverables } from "@/lib/queries";
@@ -31,6 +42,7 @@ import { useUi } from "@/lib/store";
 import type { Deliverable, Project, Version } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { FileIcon, GenerateDialog, SOURCE_LABEL } from "./Deliverables";
+import { AutoTab } from "./AutoTab";
 import { RecipeTab } from "./RecipeTab";
 
 export function DeliverableSheet({ project }: { project: Project }) {
@@ -62,7 +74,7 @@ export function versionPath(d: Deliverable, v: Version) {
 	return v.path || joinPath(d.dir, `v${v.n}`, v.file);
 }
 
-type Tab = "versions" | "recipe";
+type Tab = "versions" | "recipe" | "auto";
 
 function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onClose: () => void }) {
 	const latest = d.versions[d.versions.length - 1];
@@ -82,10 +94,17 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 	useEffect(() => {
 		if (d.job) setTab("versions");
 	}, [d.job]);
+	// 실행 목록에서 작성법 뽑기를 눌러 열었으면 만드는 법 탭을 연다. 위 효과보다 뒤에 두어 이쪽이 이긴다.
+	const tabHint = useUi((s) => s.deliverableTab);
+	useEffect(() => {
+		if (!tabHint) return;
+		setTab(tabHint);
+		useUi.setState({ deliverableTab: null });
+	}, [tabHint]);
 
 	const saveMeta = () => {
 		if (title === d.title && note === d.note) return;
-		api.deliverableUpdate(project.id, d.id, { title, note, guide: d.guide, naming: d.naming, subdir: d.subdir, mode: d.mode, autoUpdate: d.autoUpdate }).catch((e) => toast.error(errorText(e)));
+		api.deliverableUpdate(project.id, d.id, { title, note, guide: d.guide, naming: d.naming, subdir: d.subdir, autoUpdate: d.autoUpdate }).catch((e) => toast.error(errorText(e)));
 	};
 
 	return (
@@ -127,7 +146,11 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 						</TabsTrigger>
 						<TabsTrigger value="recipe" className="px-0">
 							만드는 법
-							{d.learn ? <Loader2 className="size-3.5 animate-spin text-subtle" /> : d.refs.length > 0 && <span className="tabular text-subtle">{d.refs.length}</span>}
+							{d.learn ? <Loader2 className="size-3.5 animate-spin text-run" /> : d.refs.length > 0 && <span className="tabular text-subtle">{d.refs.length}</span>}
+						</TabsTrigger>
+						<TabsTrigger value="auto" className="px-0">
+							자동 관리
+							{d.pending.length > 0 ? <span className="tabular text-brand-text">{d.pending.length}</span> : !d.autoUpdate && <span className="text-subtle">꺼짐</span>}
 						</TabsTrigger>
 					</TabsList>
 				</div>
@@ -153,7 +176,7 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 						{writing ? (
 							<Writer project={project} d={d} onDone={() => setWriting(false)} />
 						) : v ? (
-							<VersionView project={project} d={d} v={v} isLatest={v.n === latest?.n} />
+							<VersionView project={project} d={d} v={v} prev={d.versions.filter((x) => x.n < v.n).pop()} isLatest={v.n === latest?.n} />
 						) : (
 							!d.job && (
 								<p className="text-[13px] leading-relaxed break-keep text-subtle">
@@ -177,6 +200,7 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 													<span className="tabular w-8 font-medium">v{x.n}</span>
 													<FileIcon name={x.file} className="text-subtle" />
 													<span className="min-w-0 flex-1 truncate">{x.file}</span>
+													{x.review && <Chip tone="brand">검토 필요</Chip>}
 													<Chip>{SOURCE_LABEL[x.source] ?? x.source}</Chip>
 													<span className="tabular w-24 text-right text-[12px] text-subtle">{clock(x.addedAt)}</span>
 												</button>
@@ -188,7 +212,10 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 						)}
 					</TabsContent>
 					<TabsContent value="recipe">
-						<RecipeTab project={project} d={d} />
+						<RecipeTab project={project} d={d} onAuto={() => setTab("auto")} />
+					</TabsContent>
+					<TabsContent value="auto">
+						<AutoTab project={project} d={d} />
 					</TabsContent>
 				</div>
 			</Tabs>
@@ -279,12 +306,20 @@ function Writer({ project, d, onDone }: { project: Project; d: Deliverable; onDo
 	);
 }
 
-function VersionView({ project, d, v, isLatest }: { project: Project; d: Deliverable; v: Version; isLatest: boolean }) {
+function VersionView({ project, d, v, prev, isLatest }: { project: Project; d: Deliverable; v: Version; prev?: Version; isLatest: boolean }) {
 	const text = isText(v.file);
 	const { data: content, refetch } = useQuery({
 		queryKey: ["deliverable-text", d.id, v.n, v.size],
 		queryFn: () => api.deliverableReadText(project.id, d.id, v.n),
 		enabled: text,
+	});
+	// 앞 판과 비교는 둘 다 글 판일 때만 연다. docx · hwpx 는 글자를 뽑아야 해서 여기서 다루지 않는다.
+	const canCompare = text && !!prev && isText(prev.file);
+	const [compare, setCompare] = useState(false);
+	const { data: before } = useQuery({
+		queryKey: ["deliverable-text", d.id, prev?.n, prev?.size],
+		queryFn: () => api.deliverableReadText(project.id, d.id, prev!.n),
+		enabled: canCompare && compare,
 	});
 	const [editing, setEditing] = useState(false);
 	const [draft, setDraft] = useState("");
@@ -311,6 +346,12 @@ function VersionView({ project, d, v, isLatest }: { project: Project; d: Deliver
 				<span>{bytes(v.size)}</span>
 				<Chip>{SOURCE_LABEL[v.source] ?? v.source}</Chip>
 				<div className="flex-1" />
+				{canCompare && !editing && (
+					<Button size="sm" variant={compare ? "secondary" : "ghost"} aria-pressed={compare} onClick={() => setCompare((c) => !c)}>
+						<GitCompare />
+						v{prev!.n} 과 비교
+					</Button>
+				)}
 				{text && isLatest && !editing && (
 					<Button
 						size="sm"
@@ -325,8 +366,11 @@ function VersionView({ project, d, v, isLatest }: { project: Project; d: Deliver
 				)}
 			</div>
 			{v.note && <p className="text-[13px] break-keep text-muted-foreground">{v.note}</p>}
+			{v.review && <ReviewBand project={project} d={d} v={v} canCompare={canCompare && !compare} onCompare={() => setCompare(true)} />}
 			{text ? (
-				editing ? (
+				compare && canCompare && !editing ? (
+					<DiffView before={before} after={content} from={prev!.n} to={v.n} />
+				) : editing ? (
 					<div className="flex flex-col gap-3">
 						<div className="surface rounded-md px-4 py-3">
 							<MarkdownEditor value={draft} onChange={setDraft} minHeight="360px" onSave={() => void save()} autoFocus />
@@ -350,6 +394,84 @@ function VersionView({ project, d, v, isLatest }: { project: Project; d: Deliver
 	);
 }
 
+/**
+ * 자동으로 쓴 판의 검토 띠. 판은 이미 최신이고 표지만 달려 있다.
+ * 버리면 판 파일을 휴지통으로 옮기고, 그 판이 반영했던 이슈는 다시 반영 대기로 돌아간다.
+ */
+function ReviewBand({ project, d, v, canCompare, onCompare }: { project: Project; d: Deliverable; v: Version; canCompare: boolean; onCompare: () => void }) {
+	const [confirm, setConfirm] = useState(false);
+	const review = (keep: boolean) => void api.deliverableVersionReview(project.id, d.id, v.n, keep).catch((e) => toast.error(errorText(e)));
+	return (
+		<div className="flex flex-wrap items-center gap-2 rounded-md border border-dashed border-brand/45 bg-brand/6 px-3 py-2 text-[12.5px]">
+			<span className="min-w-0 flex-1 break-keep text-muted-foreground">Claude 가 코드 변경을 반영해 자동으로 쓴 판입니다. 바뀐 곳을 확인한 뒤 검토함을 누르세요.</span>
+			{canCompare && (
+				<Button size="xs" variant="ghost" onClick={onCompare}>
+					<GitCompare />
+					바뀐 곳 보기
+				</Button>
+			)}
+			<Button size="xs" variant="ghost" disabled={!!d.job} onClick={() => setConfirm(true)}>
+				이 판 버리기
+			</Button>
+			<Button size="xs" variant="outline" onClick={() => review(true)}>
+				<Check />
+				검토함
+			</Button>
+			<AlertDialog open={confirm} onOpenChange={setConfirm}>
+				<AlertDialogContent className="pop">
+					<AlertDialogHeader>
+						<AlertDialogTitle>v{v.n} 을 버릴까요?</AlertDialogTitle>
+						<AlertDialogDescription className="leading-relaxed break-keep">
+							판 파일을 앱 데이터의 휴지통 폴더로 옮기고 판 목록에서 뺍니다. 이 판이 반영했던 이슈는 다시 반영 대기로 보입니다.
+						</AlertDialogDescription>
+					</AlertDialogHeader>
+					<AlertDialogFooter>
+						<AlertDialogCancel>취소</AlertDialogCancel>
+						<AlertDialogAction variant="destructive" onClick={() => review(false)}>
+							버리기
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialogContent>
+			</AlertDialog>
+		</div>
+	);
+}
+
+/** 앞 판과 줄 단위 비교. 바뀐 곳 둘레만 보이고 나머지는 접는다. */
+function DiffView({ before, after, from, to }: { before?: string; after?: string; from: number; to: number }) {
+	if (before === undefined || after === undefined) return <p className="text-[13px] text-subtle">두 판을 읽는 중…</p>;
+	const lines = diffLines(before, after);
+	const added = lines.filter((l) => l.kind === "add").length;
+	const removed = lines.filter((l) => l.kind === "del").length;
+	if (!added && !removed) return <p className="text-[13px] text-subtle">v{from} 과 글이 같습니다.</p>;
+	return (
+		<section className="flex flex-col gap-2">
+			<p className="text-[12.5px] text-subtle">
+				v{from} → v{to} · <span className="text-foreground">+{added}</span> 줄 · <span className="text-danger">−{removed}</span> 줄
+			</p>
+			<div className="surface overflow-x-auto rounded-md py-1 font-mono text-[12.5px] leading-relaxed selectable">
+				{foldDiff(lines).map((c, i) =>
+					c.kind === "gap" ? (
+						<div key={i} className="px-3 py-0.5 text-[12px] text-subtle">
+							… {c.count}줄 같음
+						</div>
+					) : (
+						c.lines.map((l, j) => (
+							<div
+								key={`${i}-${j}`}
+								className={cn("flex gap-2 px-3 whitespace-pre-wrap", l.kind === "add" && "bg-brand/10", l.kind === "del" && "bg-danger/10 text-muted-foreground line-through decoration-danger/40")}
+							>
+								<span className="w-3 shrink-0 select-none text-subtle">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : ""}</span>
+								<span className="min-w-0 flex-1 break-all">{l.text || " "}</span>
+							</div>
+						))
+					),
+				)}
+			</div>
+		</section>
+	);
+}
+
 /** 새 판 올리기 · 저장 폴더 · 지우기와 그 확인 창. 상세 창의 「더 보기」와 목록 줄의 우클릭이 같이 쓴다. */
 export function useDeliverableActions(project: Project, d: Deliverable): { items: ActionList; dialogs: ReactNode } {
 	const [confirm, setConfirm] = useState(false);
@@ -364,7 +486,7 @@ export function useDeliverableActions(project: Project, d: Deliverable): { items
 		},
 		{ label: "저장 폴더 열기", icon: <FolderOpen />, onSelect: () => void api.open(d.outputDir).catch((e) => toast.error(errorText(e))) },
 		"sep",
-		{ label: "지우기", icon: <Trash2 />, destructive: true, disabled: !!d.job, onSelect: () => setConfirm(true) },
+		{ label: "지우기", icon: <Trash2 />, destructive: true, disabled: !!d.job || !!d.learn, onSelect: () => setConfirm(true) },
 	];
 	const dialogs = (
 		<AlertDialog open={confirm} onOpenChange={setConfirm}>

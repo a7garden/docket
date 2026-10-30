@@ -60,7 +60,7 @@ export function UsageMeter() {
 				<button
 					type="button"
 					title={`Claude 사용량 · ${relTime(data.seenAt, now)} 기준`}
-					className="mr-1 flex h-7 items-center gap-3 rounded-md px-2.5 text-[12px] text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:bg-hover data-[state=open]:text-foreground"
+					className="flex h-7 items-center gap-3 rounded-md px-2.5 text-[12px] text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring data-[state=open]:bg-hover data-[state=open]:text-foreground"
 				>
 					{shown.map((w) => (
 						<span key={w.key} className="flex items-center gap-1.5">

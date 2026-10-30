@@ -11,8 +11,9 @@
  *   brand   호박색. 사용자가 결정할 것(승인 대기 · 결과 확인 · 확인할 질문 · 결정 수)
  *   danger  실패 · 지우기 · 뺀 줄
  *   ok      더한 줄
+ *   run     파랑. Claude 가 돌고 있음(실행 점 · 실행 칩 · Claude 실행 스피너)에만 쓴다. 줄 서 있는 대기는 회색으로 둬 실행과 가른다.
+ *           2026.10.29 : 무채색 → 파랑. 깜빡이는 회색 점이 눈에 띄지 않아 실행 중을 놓쳤다.
  * 주요 단추(primary)는 색이 아니라 흑백 반전으로 띄운다. 색을 쓰면 단추와 「결정할 것」 표시가 같은 말을 하게 된다.
- * 실행 중(run)도 무채색이다. 움직이는 점과 문구로 알린다.
  */
 
 @theme inline {
@@ -43,6 +44,7 @@
 	--color-brand-ink: var(--brand-ink);
 	--color-brand-text: var(--brand-text);
 	--color-run: var(--run);
+	--color-run-text: var(--run-text);
 	--color-ok: var(--ok);
 	--color-danger: var(--danger);
 	--color-subtle: var(--subtle);
@@ -84,7 +86,8 @@
 	--brand: oklch(0.8 0.15 78);
 	--brand-ink: oklch(0.24 0.04 70);
 	--brand-text: oklch(0.5 0.12 62);
-	--run: oklch(0.42 0 0);
+	--run: oklch(0.55 0.17 250);
+	--run-text: oklch(0.45 0.15 250);
 	--ok: oklch(0.5 0.13 150);
 	--danger: oklch(0.54 0.2 27);
 	--ring: oklch(0.42 0 0 / 0.55);
@@ -113,7 +116,8 @@
 	--brand: oklch(0.82 0.14 80);
 	--brand-ink: oklch(0.22 0.03 75);
 	--brand-text: oklch(0.84 0.13 82);
-	--run: oklch(0.77 0 0);
+	--run: oklch(0.72 0.14 250);
+	--run-text: oklch(0.8 0.11 250);
 	--ok: oklch(0.77 0.14 152);
 	--danger: oklch(0.71 0.17 25);
 	--ring: oklch(0.75 0 0 / 0.5);
@@ -159,11 +163,16 @@
 		width: 10px;
 		height: 10px;
 	}
+	/* 막대는 그 영역에 마우스를 올렸을 때만 칠한다. 폭은 그대로 둔다 — 스크롤 바를 없앴다 살리면 내용 폭이 출렁인다. */
 	::-webkit-scrollbar-thumb {
-		background: var(--border-strong);
+		background-color: transparent;
 		border-radius: 999px;
 		border: 3px solid transparent;
 		background-clip: padding-box;
+	}
+	:hover::-webkit-scrollbar-thumb,
+	::-webkit-scrollbar-thumb:active {
+		background-color: var(--border-strong);
 	}
 	::-webkit-scrollbar-track {
 		background: transparent;

@@ -22,6 +22,8 @@ export function useDocketEvents() {
 				const key = payload.talk ? qk.talks(payload.projectId) : qk.issues(payload.projectId);
 				const prev = qc.getQueryData<Issue[]>(key)?.find((x) => x.id === payload.id);
 				qc.setQueryData<Issue[]>(key, (old) => upsert(old, payload));
+				// 완료되거나 다시 열린 이슈는 산출물의 반영 대기 수를 바꾼다. 반영 대기는 목록을 읽을 때 세므로 다시 불러온다.
+				if (prev && (prev.status === "done") !== (payload.status === "done")) void qc.invalidateQueries({ queryKey: qk.deliverables(payload.projectId) });
 
 				// 사용자가 중지한 실행은 알리지 않는다. 알림함에서도 빠진다.
 				const last = payload.runs[payload.runs.length - 1];

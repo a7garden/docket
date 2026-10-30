@@ -1,5 +1,5 @@
 // 미리보기 전용 가짜 데이터. 배포 빌드에는 들어가지 않는다 (preview.html 은 vite build 입력이 아니다).
-import type { AppInfo, Deliverable, GlossaryView, Issue, KbHit, KbSection, KbView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Spend, Tokens, Turn, Usage } from "@/lib/types";
+import type { AppInfo, Deliverable, DocTools, GlossaryView, Issue, KbHit, KbSection, KbView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Spend, Tokens, Turn, Usage } from "@/lib/types";
 
 const now = Date.now();
 const min = 60_000;
@@ -13,6 +13,28 @@ export const info: AppInfo = {
 	claudePath: "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe",
 	claudeVersion: "2.1.311 (Claude Code)",
 	version: "0.1.0",
+};
+
+/** 문서 도구 점검: 엑셀 패키지와 LibreOffice · Node 가 빠진 PC. */
+export const docTools: DocTools = {
+	python: "C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+	items: [
+		{ key: "python", label: "Python", ok: true, detail: "3.13.1", need: "required", usedFor: "워드 · 엑셀 · 파워포인트 · 한글" },
+		{ key: "python-docx", label: "python-docx", ok: true, detail: "1.2.0", need: "required", usedFor: "워드" },
+		{ key: "openpyxl", label: "openpyxl", ok: false, detail: "없음", need: "required", usedFor: "엑셀" },
+		{ key: "lxml", label: "lxml", ok: true, detail: "6.1.3", need: "required", usedFor: "엑셀 · 한글" },
+		{ key: "python-pptx", label: "python-pptx", ok: true, detail: "1.0.2", need: "required", usedFor: "파워포인트" },
+		{ key: "Pillow", label: "Pillow", ok: true, detail: "12.3.0", need: "required", usedFor: "파워포인트 · 한글" },
+		{ key: "jsonschema", label: "jsonschema", ok: true, detail: "4.26.0", need: "required", usedFor: "한글" },
+		{ key: "PyMuPDF", label: "PyMuPDF", ok: true, detail: "1.28.2", need: "optional", usedFor: "쪽 그림 확인" },
+		{ key: "pywin32", label: "pywin32", ok: true, detail: "312", need: "optional", usedFor: "Office · 한컴으로 쪽 그림 확인" },
+		{ key: "libreoffice", label: "LibreOffice", ok: false, detail: "없음", need: "optional", usedFor: "쪽 그림 확인 · 엑셀 수식 계산값" },
+		{ key: "office", label: "Microsoft Office", ok: true, detail: "Word · Excel · PowerPoint", need: "optional", usedFor: "LibreOffice 가 없을 때 쪽 그림 확인" },
+		{ key: "node", label: "Node.js", ok: false, detail: "없음", need: "optional", usedFor: "한글 쪽 그림 확인(한컴 없이) · hwp 변환" },
+		{ key: "hancom", label: "한컴오피스", ok: true, detail: "있음", need: "optional", usedFor: "「한컴으로 확인」 — 정확한 쪽 수 · hwp 변환" },
+		{ key: "hancom-module", label: "한컴 보안 모듈", ok: false, detail: "등록 안 됨 — 한컴으로 확인할 때마다 접근 확인 창이 뜬다", need: "optional", usedFor: "「한컴으로 확인」 때 확인 창 없애기" },
+	],
+	install: '"C:\\Users\\me\\AppData\\Local\\Programs\\Python\\Python313\\python.exe" -m pip install openpyxl',
 };
 
 export const usage: Usage = {
@@ -39,14 +61,14 @@ export const spend: Spend = {
 	total: { group: "total", calls: 266, tokens: { input: 844, output: 262_800, cacheCreate: 1_573_000, cacheRead: 7_050_000 }, costUsd: 12.23 },
 };
 
-export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr", "change-summary", "slack-notify"], pluginGrants: { "change-summary": ["issue:read"], "slack-notify": ["issue:read", "http:hooks.slack.com"] }, kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true };
+export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr", "change-summary", "slack-notify"], pluginGrants: { "change-summary": ["issue:read"], "slack-notify": ["issue:read", "http:hooks.slack.com"] }, kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true, autoUpdateCheck: true, hancomCheck: false };
 
 const KB_OFF = { enabled: false, folders: [], includeDeliverables: true, topK: 8, rerank: false, exclude: [], keep: [] };
 const GL_OFF = { enabled: false, include: [] };
 
 const PLUGINS = "C:\\Users\\me\\AppData\\Roaming\\docket\\plugins";
 const at = (...p: string[]) => [PLUGINS, ...p].join("\\");
-const pluginBase = { version: "1.0.0", apiVersion: 1, description: "", main: "plugin.wasm", legacy: false, enabled: true, exePath: "", missing: [], problem: "", warning: "", failures: 0 };
+const pluginBase = { version: "1.0.0", apiVersion: 1, description: "", main: "plugin.wasm", legacy: false, core: false, enabled: true, exePath: "", missing: [], problem: "", warning: "", failures: 0 };
 const noContrib = { menus: [], events: [], settings: [], terminal: null };
 
 export const plugins: PluginList = {
@@ -54,22 +76,10 @@ export const plugins: PluginList = {
 	plugins: [
 		{
 			...pluginBase,
-			id: "change-summary",
-			name: "변경 요약",
-			description: "바뀐 파일마다 고친 곳과 크기를 표로 보입니다.",
-			permissions: ["issue:read"],
-			contributes: { ...noContrib, menus: [{ where: "issue", command: "summary", label: "변경 요약 보기", when: "changes" }] },
-			file: at("change-summary", "plugin.json"),
-			dir: at("change-summary"),
-			log: "",
-		},
-		{
-			...pluginBase,
 			id: "herdr",
 			name: "herdr",
-			version: "",
 			main: "",
-			legacy: true,
+			core: true,
 			description: "켜 둔 herdr 에 이슈마다 새 탭 「#번호 제목」을 만들어 claude --resume 으로 세션을 잇습니다.",
 			permissions: ["process:herdr"],
 			contributes: {
@@ -87,9 +97,20 @@ export const plugins: PluginList = {
 					attachAfterLaunch: true,
 				},
 			},
-			file: at("herdr.json"),
+			file: "",
 			dir: "",
 			exePath: "C:\\Users\\me\\.herdr\\bin\\herdr.exe",
+			log: "",
+		},
+		{
+			...pluginBase,
+			id: "change-summary",
+			name: "변경 요약",
+			description: "바뀐 파일마다 고친 곳과 크기를 표로 보입니다.",
+			permissions: ["issue:read"],
+			contributes: { ...noContrib, menus: [{ where: "issue", command: "summary", label: "변경 요약 보기", when: "changes" }] },
+			file: at("change-summary", "plugin.json"),
+			dir: at("change-summary"),
 			log: "",
 		},
 		{
@@ -131,9 +152,9 @@ export const pluginReply = {
 };
 
 export const projects: Project[] = [
-	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"], exclude: ["이전판"] }, glossary: { enabled: true, include: ["pdoc00000001"] } },
-	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: KB_OFF, glossary: GL_OFF },
-	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, kb: KB_OFF, glossary: GL_OFF },
+	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"], exclude: ["이전판"] }, glossary: { enabled: true, include: ["pdoc00000001"] } },
+	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, kb: KB_OFF, glossary: GL_OFF },
+	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, kb: KB_OFF, glossary: GL_OFF },
 ];
 
 const base = (id: string, number: number, extra: Partial<Issue>): Issue => {
@@ -191,7 +212,13 @@ export const issues: Issue[] = [
 		updatedAt: now - 20_000,
 		noteUpdatedAt: now - 20_000,
 	}),
-	base("i0000000010", 10, { note: "모듈 머리에 함수 목록 주석 달기", updatedAt: now - 4 * min }),
+	// 막 줄에 들어와 아직 시작하지 않은 계획. 제목 줄 실행 단추의 「대기 N」을 보이려고 둔다.
+	base("i0000000010", 10, {
+		status: "planning",
+		note: "모듈 머리에 함수 목록 주석 달기",
+		run: { kind: "plan", phase: "queued", runId: "r-wait-plan", queuedAt: now - min },
+		updatedAt: now - 4 * min,
+	}),
 	base("i0000000009", 9, {
 		note: "README 의 설치 방법이 옛 명령이다\n\npip install -e . 로 바꾸고 파이썬 3.12 이상이라고 적기",
 		attachments: ["붙여넣기-20261027-101500.png"],
@@ -386,11 +413,11 @@ const talkRun = (id: string, at: number, prompt: string) => ({
 	denials: [],
 });
 
-/** 프로젝트 대화. 둘째 차례에서 보드에 메모 #11 을 등록했다. */
+/** 프로젝트 대화. 둘째 차례에서 보드에 메모 #11 을 등록했다. 앞 대화는 제목을 지었고, 뒤 대화는 짓는 중이다. */
 export const talks: Issue[] = [
 	base("t0000000002", 0, {
 		talk: true,
-		title: "로그는 어디서 찍나요?",
+		title: "로그를 찍는 곳과 레벨 바꾸기",
 		sessionId: "5c1f7e2a-talk-0002",
 		runs: [talkRun("r-talk-1", now - 22 * min, "로그는 어디서 찍나요?"), talkRun("r-talk-2", now - 20 * min, "레벨을 환경 변수로 바꾸는 것을 작업 메모로 등록해 줘")],
 		history: [
@@ -402,7 +429,7 @@ export const talks: Issue[] = [
 		updatedAt: now - 20 * min,
 		dir: `${DATA}\\projects\\${P}\\issues\\t0000000002`,
 	}),
-	base("t0000000001", 0, { talk: true, title: "시험은 어떻게 돌리나요?", sessionId: "5c1f7e2a-talk-0001", runs: [talkRun("r-talk-0", now - 26 * 3600_000, "시험은 어떻게 돌리나요?")], updatedAt: now - 26 * 3600_000 }),
+	base("t0000000001", 0, { talk: true, title: "시험은 어떻게 돌리나요?", titledAt: 0, sessionId: "5c1f7e2a-talk-0001", runs: [talkRun("r-talk-0", now - 26 * 3600_000, "시험은 어떻게 돌리나요?")], updatedAt: now - 26 * 3600_000 }),
 ];
 
 export const liveEvents: Record<string, RunEvent[]> = {
@@ -441,7 +468,9 @@ export const savedEvents: RunEvent[] = [
 ];
 
 /** 작성법을 아직 뽑지 않은 산출물의 칸 */
-const NO_RECIPE = { skill: "", vocab: [], format: "", template: "", learn: null, learnError: "", learnedAt: 0, learnCostUsd: 0, draft: { skill: "", vocab: [], format: "", naming: "", template: "" } };
+const NO_RECIPE = { skill: "", vocab: [], format: "", template: "", learn: null, learnError: "", learnLastRun: "", learnedAt: 0, learnCostUsd: 0, draft: { skill: "", vocab: [], format: "", naming: "", template: "" } };
+/** 자동 관리 기록 · 반영 대기가 없는 산출물 */
+const NO_AUTO = { autoLog: [], pending: [] };
 
 const SKILL_SAMPLE = `## 구성
 1. 개요 — 한 문단
@@ -471,13 +500,13 @@ export const deliverables: Deliverable[] = [
 		guide: "다른 팀에 넘기는 API 명세서다. 템플릿 엑셀의 열(함수명 · 인자 · 반환값 · 설명)을 그대로 쓰고, 코드에 없는 함수는 넣지 않는다.",
 		naming: "CALC_{제목}_v{판}_{날짜}",
 		subdir: "API_명세서",
-		mode: "file",
 		autoUpdate: false,
 		autoLast: "",
+		...NO_AUTO,
 		...NO_RECIPE,
 		format: "xlsx",
 		template: "API_명세서_양식.xlsx",
-		learn: { runId: "r-learn", startedAt: now - 20_000 },
+		learn: { runId: "r-learn", startedAt: now - 20_000, phase: "running" },
 		refs: [
 			{ name: "API_명세서_양식.xlsx", size: 48_200, kind: "extract", textPath: "x", template: true },
 			{ name: "참고_다른_프로젝트_명세서.xlsx", size: 61_900, kind: "extract", textPath: "x", template: false },
@@ -502,9 +531,9 @@ export const deliverables: Deliverable[] = [
 		guide: "",
 		naming: "",
 		subdir: "",
-		mode: "md",
 		autoUpdate: false,
 		autoLast: "",
+		...NO_AUTO,
 		...NO_RECIPE,
 		refs: [],
 		outputDir: "D:\\work\\calc\\산출물",
@@ -519,8 +548,9 @@ export const deliverables: Deliverable[] = [
 		createdAt: now - 3600_000,
 		updatedAt: now - 3600_000,
 		versions: [
-			{ n: 1, file: "함수_설명서_v1_20261027.md", addedAt: now - 2 * 3600_000, note: "", size: 812, source: "claude", path: "D:\\work\\calc\\산출물\\이전판\\함수_설명서_v1_20261027.md" },
-			{ n: 2, file: "함수_설명서_v2_20261028.md", addedAt: now - 3600_000, note: "div 줄 고침", size: 905, source: "editor", path: "D:\\work\\calc\\산출물\\함수_설명서_v2_20261028.md" },
+			{ n: 1, file: "함수_설명서_v1_20261027.md", addedAt: now - 2 * 3600_000, note: "", size: 812, source: "claude", path: "D:\\work\\calc\\산출물\\이전판\\함수_설명서_v1_20261027.md", review: false },
+			{ n: 2, file: "함수_설명서_v2_20261028.md", addedAt: now - 3600_000, note: "div 줄 고침", size: 905, source: "editor", path: "D:\\work\\calc\\산출물\\이전판\\함수_설명서_v2_20261028.md", review: false },
+			{ n: 3, file: "함수_설명서_v3_20261028.md", addedAt: now - 20 * min, note: "이슈 #9 의 코드 변경 반영", size: 1012, source: "claude", path: "D:\\work\\calc\\산출물\\함수_설명서_v3_20261028.md", review: true },
 		],
 		job: null,
 		error: "",
@@ -529,20 +559,38 @@ export const deliverables: Deliverable[] = [
 		guide: "README 에 붙일 표. 함수마다 하는 일과 0 을 넣었을 때의 결과를 적는다. 확인하지 못한 것은 확인하지 못했다고 적는다.",
 		naming: "{제목}_{날짜}",
 		subdir: "",
-		mode: "file",
 		autoUpdate: true,
-		autoLast: "#9 · v2 갱신",
+		autoLast: "#9 · v3 갱신",
+		autoLog: [
+			{ at: now - 5 * 3600_000, issueId: "i0000000005", number: 5, verdict: "unrelated", reason: "", version: 0 },
+			{ at: now - 3 * 3600_000, issueId: "i0000000007", number: 7, verdict: "skipped", reason: "화면 문구만 바뀌어 함수 표와 상관없음", version: 0 },
+			{ at: now - 20 * min, issueId: "i0000000009", number: 9, verdict: "updated", reason: "", version: 3 },
+		],
+		pending: [],
 		...NO_RECIPE,
 		skill: SKILL_SAMPLE,
 		vocab: [
 			{ term: "나눗셈", avoid: ["나누기"], note: "div 함수" },
 			{ term: "반환값", avoid: ["리턴값", "돌려주는 값"], note: "" },
+			{ term: "인자", avoid: ["파라미터"], note: "함수에 넘기는 값" },
+			{ term: "0 나누기", avoid: [], note: "div 의 두 번째 인자가 0" },
+			{ term: "정수", avoid: [], note: "" },
 		],
 		format: "hwpx",
 		template: "함수설명서_양식.hwpx",
 		learnedAt: now - 3000_000,
 		learnCostUsd: 0.083,
-		draft: { skill: "", vocab: [{ term: "사칙연산", avoid: [], note: "add · sub · mul · div" }], format: "", naming: "{제목}_v{판}_{날짜}", template: "" },
+		draft: {
+			skill: "",
+			vocab: [
+				{ term: "사칙연산", avoid: [], note: "add · sub · mul · div" },
+				{ term: "곱셈", avoid: ["곱하기"], note: "mul 함수" },
+				{ term: "예외", avoid: ["에러"], note: "" },
+			],
+			format: "",
+			naming: "{제목}_v{판}_{날짜}",
+			template: "",
+		},
 		refs: [
 			{ name: "함수설명서_양식.hwpx", size: 24_800, kind: "extract", textPath: "x", template: true },
 			{ name: "지난판_회의록.pdf", size: 1_204_000, kind: "direct", textPath: "", template: false },
@@ -559,7 +607,7 @@ export const deliverables: Deliverable[] = [
 		issueId: "",
 		createdAt: now - 86400_000,
 		updatedAt: now - 86400_000,
-		versions: [{ n: 1, file: "캡처.png", addedAt: now - 86400_000, note: "", size: 245_000, source: "import", path: "D:\\work\\calc\\산출물\\캡처.png" }],
+		versions: [{ n: 1, file: "캡처.png", addedAt: now - 86400_000, note: "", size: 245_000, source: "import", path: "D:\\work\\calc\\산출물\\캡처.png", review: false }],
 		job: null,
 		error: "",
 		runs: [],
@@ -567,13 +615,45 @@ export const deliverables: Deliverable[] = [
 		guide: "",
 		naming: "",
 		subdir: "",
-		mode: "md",
 		autoUpdate: false,
 		autoLast: "",
+		...NO_AUTO,
 		...NO_RECIPE,
 		refs: [],
 		outputDir: "D:\\work\\calc\\산출물",
 		nextName: "화면_캡처_모음_v2_20261028.md",
+	},
+	{
+		id: "d0000000005",
+		projectId: P,
+		title: "테이블 정의서",
+		note: "발주처 제출본",
+		issueId: "",
+		createdAt: now - 3 * 86400_000,
+		updatedAt: now - 2 * 86400_000,
+		versions: [{ n: 1, file: "테이블_정의서_v1.md", addedAt: now - 2 * 86400_000, note: "", size: 6_400, source: "import", path: "D:\\work\\calc\\산출물\\테이블_정의서_v1.md", review: false }],
+		job: null,
+		error: "",
+		runs: [],
+		dir: `${DATA}\\projects\\${P}\\deliverables\\d0000000005`,
+		guide: "",
+		naming: "",
+		subdir: "",
+		autoUpdate: true,
+		autoLast: "#8 · 실패 · 판정 호출이 실패했습니다",
+		autoLog: [
+			{ at: now - 26 * 3600_000, issueId: "i0000000006", number: 6, verdict: "unrelated", reason: "", version: 0 },
+			{ at: now - 8 * 3600_000, issueId: "i0000000008", number: 8, verdict: "failed", reason: "판정 실패 · 판정 호출이 실패했습니다", version: 0 },
+		],
+		pending: [
+			{ id: "i0000000008", number: 8, title: "결과 표에 단위 열 추가", doneAt: now - 8 * 3600_000 },
+			{ id: "i0000000010", number: 10, title: "나눗셈 결과를 소수 둘째 자리로", doneAt: now - 5 * 3600_000 },
+			{ id: "i0000000011", number: 11, title: "기록 테이블에 만든 때 열", doneAt: now - 2 * 3600_000 },
+		],
+		...NO_RECIPE,
+		refs: [],
+		outputDir: "D:\\work\\calc\\산출물",
+		nextName: "테이블_정의서_v2_20261028.md",
 	},
 ];
 
@@ -632,6 +712,8 @@ export const kbCards: KbSection[] = [
 ];
 
 export const docText = "# 함수 설명서\n\n| 함수 | 하는 일 | 0 을 넣으면 |\n| - | - | - |\n| `add` | 두 수를 더한다 | 그대로 |\n| `mul` | 두 수를 곱한다 | 0 |\n| `div` | 두 수를 나눈다 | `None` |\n\n## 쓰는 법\n\n```python\nfrom calc import add\nadd(2, 3)  # 5\n```\n";
+/** 자동 갱신이 쓴 다음 판. 앞 판과 비교 화면을 보이려고 몇 줄만 다르다. */
+export const docTextNext = docText.replace("| `div` | 두 수를 나눈다 | `None` |", "| `div` | 두 수를 나눈다 · 소수 둘째 자리에서 반올림 | `ZeroDivision` 안내 |").replace("add(2, 3)  # 5", "add(2, 3)  # 5\ndiv(1, 3)  # 0.33");
 
 const H = info.claudeHome;
 export const resources: Resource[] = [
@@ -656,6 +738,18 @@ export const terminalTurns: Turn[] = [
 			{ t: "tool", id: "t1", name: "Glob", summary: "tests/**/*.py" },
 			{ t: "toolDone", id: "t1", ok: true },
 			{ t: "text", text: "없습니다. `tests/test_calc.py` 에는 `test_add` 하나만 있습니다." },
+			// 대화 답 속 목업. 입력칸에 글자를 칠 때 다시 그려지지 않는지 여기서 본다.
+			{
+				t: "text",
+				text: [
+					"더하면 시험 목록이 이렇게 됩니다.",
+					"",
+					"```html",
+					"<!doctype html><html><head><style>body{font:13px sans-serif;margin:12px}li{padding:2px 0}.new{color:#4a9}</style></head>",
+					"<body><ul><li>test_add</li><li class='new'>test_mul (새로)</li></ul></body></html>",
+					"```",
+				].join("\n"),
+			},
 		],
 	},
 ];

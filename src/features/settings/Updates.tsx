@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ChevronRight, Download, RefreshCw } from "lucide-react";
 import { Markdown } from "@/components/Markdown";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { bytes, relTime } from "@/lib/format";
 import { useUpdate } from "@/lib/updater";
 import { cn } from "@/lib/utils";
@@ -66,8 +67,8 @@ function ReleaseCard({ release, tag, defaultOpen }: { release: Release; tag?: st
 	);
 }
 
-/** 설정 › 업데이트. 지금 판 · 새 판 확인과 설치 · 판마다 바뀐 내용. */
-export function Updates({ version }: { version?: string }) {
+/** 설정 › 업데이트. 지금 판 · 새 판 확인과 설치 · 자동 확인 · 판마다 바뀐 내용. */
+export function Updates({ version, auto, onAutoChange }: { version?: string; auto: boolean; onAutoChange: (on: boolean) => void }) {
 	const { phase, update, progress, error, checkedAt, check, requestInstall } = useUpdate();
 	const busy = phase === "checking" || phase === "downloading";
 
@@ -93,6 +94,9 @@ export function Updates({ version }: { version?: string }) {
 					<RefreshCw className={phase === "checking" ? "animate-spin" : undefined} />
 					업데이트 확인
 				</Button>
+			</Row>
+			<Row label="자동으로 확인" hint="켤 때와 켜 둔 동안 1시간마다 새 판을 확인하고, 새 판이 나오면 한 번 알립니다. 설치는 직접 고릅니다." inline>
+				<Switch checked={auto} onCheckedChange={onAutoChange} />
 			</Row>
 			{update && (phase === "available" || phase === "downloading" || phase === "error") && (
 				<Row label="새 판" hint="설치하면 앱이 꺼졌다 다시 켜집니다.">

@@ -16,8 +16,8 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { cost, duration } from "@/lib/format";
-import { toolLabel, useLive } from "@/lib/store";
-import type { RunEvent } from "@/lib/types";
+import { liveKey, toolLabel, useLive } from "@/lib/store";
+import type { RunEnvelope, RunEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Diffstat } from "./bits";
 import { Markdown } from "./Markdown";
@@ -54,7 +54,11 @@ function ToolIcon({ name }: { name: string }) {
 	}
 }
 
-/** projectId 를 주면 막힌 명령 줄에 「허용」 단추가 생긴다. base · root 는 답에 건 그림을 풀 폴더다(Markdown 과 같다). */
+/**
+ * projectId 를 주면 막힌 명령 줄에 「허용」 단추가 생긴다. base · root 는 답에 건 그림을 풀 폴더다(Markdown 과 같다).
+ * follow 를 끄면 스스로 스크롤하지 않는다. 대화처럼 여러 기록이 한 칸에 쌓이면 칸이 따라갈지를 정한다 —
+ * 기록마다 따로 정하면 새 차례가 「바닥에 붙어 있다」고 믿고 위를 읽던 사람을 끌어내린다.
+ */
 export function RunLog({
 	events,
 	live,
@@ -62,6 +66,7 @@ export function RunLog({
 	projectId,
 	base,
 	root,
+	follow = true,
 }: {
 	events: RunEvent[];
 	live?: boolean;
@@ -69,6 +74,7 @@ export function RunLog({
 	projectId?: string;
 	base?: string;
 	root?: string;
+	follow?: boolean;
 }) {
 	const box = useRef<HTMLOListElement>(null);
 	const stick = useRef(true);
@@ -78,15 +84,15 @@ export function RunLog({
 	// 실행 중에는 새 줄을 따라 내려간다. 사용자가 위로 올려 읽고 있으면 붙잡지 않는다.
 	useLayoutEffect(() => {
 		const el = box.current?.closest("[data-scroll]") as HTMLElement | null;
-		if (live && el && stick.current) el.scrollTop = el.scrollHeight;
-	}, [events.length, live]);
+		if (follow && live && el && stick.current) el.scrollTop = el.scrollHeight;
+	}, [events.length, live, follow]);
 	useEffect(() => {
 		const el = box.current?.closest("[data-scroll]") as HTMLElement | null;
-		if (!el) return;
+		if (!follow || !el) return;
 		const on = () => (stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60);
 		el.addEventListener("scroll", on);
 		return () => el.removeEventListener("scroll", on);
-	}, []);
+	}, [follow]);
 
 	if (events.length === 0) {
 		return <div className={cn("py-3 text-[12.5px] text-subtle", className)}>{live ? "Claude 를 띄우는 중입니다" : "남은 기록이 없습니다"}</div>;
@@ -122,7 +128,7 @@ export function RunLog({
 								</span>
 								{pending ? (
 									live ? (
-										<Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+										<Loader2 className="size-3.5 animate-spin text-run" />
 									) : null
 								) : r ? (
 									<Check className="size-3.5 text-subtle" />
@@ -171,16 +177,18 @@ export function RunEvents({
 	live,
 	base,
 	root,
+	follow,
 }: {
 	projectId: string;
-	target: "issue" | "deliverable";
+	target: RunEnvelope["target"];
 	targetId: string;
 	runId: string;
 	live: boolean;
 	base?: string;
 	root?: string;
+	follow?: boolean;
 }) {
-	const liveRun = useLive((s) => s.byTarget[targetId]);
+	const liveRun = useLive((s) => s.byTarget[liveKey(target, targetId)]);
 	const [saved, setSaved] = useState(!live);
 	useEffect(() => setSaved(!live), [live]);
 	const { data } = useQuery({
@@ -189,5 +197,5 @@ export function RunEvents({
 		enabled: saved,
 	});
 	const events = live && liveRun?.runId === runId ? liveRun.events : (data ?? (liveRun?.runId === runId ? liveRun.events : []));
-	return <RunLog events={events} live={live} projectId={projectId} base={base} root={root} />;
+	return <RunLog events={events} live={live} projectId={projectId} base={base} root={root} follow={follow} />;
 }

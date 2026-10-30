@@ -81,9 +81,13 @@ export function useMarkSeen(id: string | undefined, at: number, active = true) {
 
 export type NoticeTone = "brand" | "ok" | "danger";
 
+/** 알림이 걸리는 프로젝트 탭. 이슈 안 대화 탭의 답은 그 이슈의 알림이라 보드로 센다. */
+export type NoticeView = "board" | "talks" | "deliverables";
+
 export interface Notice extends Target {
 	key: string;
 	project: Project;
+	view: NoticeView;
 	title: string;
 	/** 「답이 왔습니다」 · 「계획이 나왔습니다」 · 실패 까닭 */
 	what: string;
@@ -123,7 +127,7 @@ export function useNotices(): Notice[] {
 	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id) })) });
 	const talks = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id) })) });
 	const docs = useQueries({ queries: projects.map((p) => ({ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id) })) });
-	const { seen, since, prune } = useSeen();
+	const { seen, since } = useSeen();
 
 	const all = projects.map((project, n) => ({
 		project,
@@ -132,31 +136,66 @@ export function useNotices(): Notice[] {
 		docs: docs[n]?.data ?? [],
 	}));
 
-	// 모두 읽어 온 뒤에만 걷는다. 덜 읽은 때 걷으면 아직 안 온 프로젝트의 표시가 지워진다.
-	const loaded = projects.length > 0 && [...issues, ...talks, ...docs].every((q) => q.isSuccess);
-	const ids = loaded ? all.flatMap((p) => [...p.issues, ...p.talks, ...p.docs].map((x) => x.id)).join(" ") : "";
-	useEffect(() => {
-		if (ids) prune(new Set(ids.split(" ")));
-	}, [ids, prune]);
-
 	const out: Notice[] = [];
 	const unread = (id: string, at: number) => at > 0 && at > Math.max(seen[id] ?? 0, since);
 	for (const { project, issues, talks, docs } of all) {
 		for (const t of talks) {
 			const at = lastEnded(t.runs);
 			const n = unread(t.id, at) && issueNotice(t);
-			if (n) out.push({ key: `t:${t.id}`, project, projectId: project.id, target: "issue", id: t.id, talk: true, title: `대화 · ${t.title || "새 대화"}`, at, ...n });
+			if (n) out.push({ key: `t:${t.id}`, project, view: "talks", projectId: project.id, target: "issue", id: t.id, talk: true, title: `대화 · ${t.title || "새 대화"}`, at, ...n });
 		}
 		for (const i of issues) {
 			const at = lastEnded(i.runs);
 			const n = unread(i.id, at) && issueNotice(i);
-			if (n) out.push({ key: `i:${i.id}`, project, projectId: project.id, target: "issue", id: i.id, title: `#${i.number} ${i.title || "제목 없는 메모"}`, at, ...n });
+			if (n) out.push({ key: `i:${i.id}`, project, view: "board", projectId: project.id, target: "issue", id: i.id, title: `#${i.number} ${i.title || "제목 없는 메모"}`, at, ...n });
 		}
 		for (const d of docs) {
 			const at = lastEnded(d.runs);
 			const n = unread(d.id, at) && deliverableNotice(d);
-			if (n) out.push({ key: `d:${d.id}`, project, projectId: project.id, target: "deliverable", id: d.id, title: `「${d.title || "제목 없는 문서"}」`, at, ...n });
+			if (n) out.push({ key: `d:${d.id}`, project, view: "deliverables", projectId: project.id, target: "deliverable", id: d.id, title: `「${d.title || "제목 없는 문서"}」`, at, ...n });
 		}
 	}
 	return out.sort((a, b) => b.at - a.at);
+}
+
+export type NoticeCount = Record<NoticeView | "total", number>;
+
+const NO_NOTICE: NoticeCount = { total: 0, board: 0, talks: 0, deliverables: 0 };
+
+/**
+ * 프로젝트 · 탭별 알림 수. 알림함과 같은 `useNotices()` 를 묶기만 한다 — 셈을 따로 두면 알림함 · 프로젝트 줄 · 탭 숫자가 어긋난다.
+ * 돌려준 함수는 알림이 없는 프로젝트에 0 을 준다.
+ */
+export function useNoticeCounts(): (projectId: string) => NoticeCount {
+	const notices = useNotices();
+	const by = new Map<string, NoticeCount>();
+	for (const n of notices) {
+		const c = by.get(n.projectId) ?? { ...NO_NOTICE };
+		c.total++;
+		c[n.view]++;
+		by.set(n.projectId, c);
+	}
+	return (projectId) => by.get(projectId) ?? NO_NOTICE;
+}
+
+/**
+ * 목록에서 사라진 대상의 본 시각을 걷는다. 늘 떠 있는 알림함 한 곳에서만 부른다 —
+ * `useNotices()` 는 사이드바 · 프로젝트 머리도 부르므로, 거기 두면 같은 정리가 부르는 곳마다 돈다.
+ */
+export function usePruneSeen() {
+	const { data: projects = [] } = useProjects();
+	const qs = useQueries({
+		queries: projects.flatMap((p) => [
+			{ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id) },
+			{ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id) },
+			{ queryKey: qk.deliverables(p.id), queryFn: () => api.deliverables(p.id) },
+		]),
+	});
+	const prune = useSeen((s) => s.prune);
+	// 모두 읽어 온 뒤에만 걷는다. 덜 읽은 때 걷으면 아직 안 온 프로젝트의 표시가 지워진다.
+	const loaded = projects.length > 0 && qs.every((q) => q.isSuccess);
+	const ids = loaded ? qs.flatMap((q) => (q.data as { id: string }[]).map((x) => x.id)).join(" ") : "";
+	useEffect(() => {
+		if (ids) prune(new Set(ids.split(" ")));
+	}, [ids, prune]);
 }

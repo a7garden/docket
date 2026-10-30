@@ -1,5 +1,8 @@
 //! 플러그인: 앱 데이터의 plugins/ 에 둔 플러그인을 읽고, 켜진 것을 메뉴 · 사건 · 터미널 자리에서 부른다.
 //!
+//! - 코어: 앱에 들어 있는 플러그인(core.rs). 파일 없이 늘 목록 맨 앞에 있고 켜고 끄기만 한다.
+//! - 커뮤니티: 아래 plugins/ 폴더에서 읽는 것. 사용자가 설치한 것 · 옛 정의.
+//!
 //! ```text
 //! plugins/<id>/plugin.json    매니페스트 (manifest.rs)
 //! plugins/<id>/<main>.wasm    코드. Extism 샌드박스에서 돈다 (wasm.rs · 호스트 함수 api.rs)
@@ -13,9 +16,10 @@
 //! - 사건은 기다리지 않고 쏜다. 플러그인이 느리거나 실패해도 이슈 흐름은 멈추지 않고, 실패는 그 플러그인의 log.jsonl 에만 남는다.
 //!   이슈 이력에 쓰면 updated_at 이 올라 보드 순서가 바뀌고, 알림으로 띄우면 사건마다 실패할 때 알림이 쏟아진다.
 //!
-//! 구획: 정의 · 읽기 · 고르기 · 틀 · 설정 칸 · 기록 · 부르기 · 시험
+//! 구획: 정의 · 읽기 · 고르기 · 설정 칸 · 기록 · 부르기 · 시험
 
 pub mod api;
+pub mod core;
 pub mod install;
 pub mod manifest;
 pub mod terminal;
@@ -55,11 +59,13 @@ pub fn data_dir(root: &Path, id: &str) -> PathBuf {
 pub struct PluginView {
 	#[serde(flatten)]
 	pub manifest: Manifest,
-	/// plugin.json 또는 옛 정의 파일
+	/// plugin.json 또는 옛 정의 파일. 코어는 비어 있다.
 	pub file: String,
-	/// 플러그인 폴더. 옛 정의는 비어 있다.
+	/// 플러그인 폴더. 옛 정의 · 코어는 비어 있다.
 	pub dir: String,
 	pub legacy: bool,
+	/// 앱에 들어 있는 플러그인 (core.rs)
+	pub core: bool,
 	pub enabled: bool,
 	/// 찾은 터미널 실행 파일. 못 찾았거나 터미널이 없으면 비어 있다.
 	pub exe_path: String,
@@ -94,9 +100,12 @@ pub struct PluginList {
 
 /* ---------- 읽기 ---------- */
 
-/// 폴더 · 파일 이름 순으로 읽는다. 켜진 터미널 플러그인이 둘이면 앞의 것을 쓰므로 순서가 정해져 있어야 한다.
+/// 코어를 먼저, 이어 폴더 · 파일 이름 순으로 읽는다. 켜진 터미널 플러그인이 둘이면 앞의 것을 쓰므로 순서가 정해져 있어야 한다.
+/// 코어와 id 가 같은 디스크 플러그인은 「같은 id 의 플러그인이 앞에 있습니다」로 쉰다(시작할 때 옮기지 못하고 남은 것).
 pub fn load(root: &Path, s: &Settings) -> Vec<PluginView> {
-	let Ok(rd) = fs::read_dir(dir(root)) else { return Vec::new() };
+	let mut seen = HashSet::new();
+	let mut out: Vec<PluginView> = core::manifests().into_iter().map(|m| core_view(root, m, s, &mut seen)).collect();
+	let Ok(rd) = fs::read_dir(dir(root)) else { return out };
 	let mut entries: Vec<PathBuf> = rd
 		.flatten()
 		.map(|e| e.path())
@@ -104,8 +113,32 @@ pub fn load(root: &Path, s: &Settings) -> Vec<PluginView> {
 		.filter(|p| (p.is_dir() && p.join(MANIFEST).is_file()) || (p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))))
 		.collect();
 	entries.sort();
-	let mut seen = HashSet::new();
-	entries.iter().map(|p| view(root, p, s, &mut seen)).collect()
+	out.extend(entries.iter().map(|p| view(root, p, s, &mut seen)));
+	out
+}
+
+fn core_view(root: &Path, m: Manifest, s: &Settings, seen: &mut HashSet<String>) -> PluginView {
+	let exe_path = m.contributes.terminal.as_ref().and_then(|t| terminal::resolve_exe(&t.exe));
+	let problem = manifest::check(&m, false, exe_path.is_some(), seen);
+	let warning = match &m.contributes.terminal {
+		Some(t) if problem.is_empty() => terminal::warning(t),
+		_ => String::new(),
+	};
+	let data = data_dir(root, &m.id);
+	PluginView {
+		enabled: s.enabled_plugins.contains(&m.id),
+		file: String::new(),
+		dir: String::new(),
+		legacy: false,
+		core: true,
+		exe_path: exe_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+		missing: Vec::new(),
+		problem,
+		warning,
+		failures: failures(&data),
+		log: data.join("log.jsonl").to_string_lossy().to_string(),
+		manifest: m,
+	}
 }
 
 fn view(root: &Path, path: &Path, s: &Settings, seen: &mut HashSet<String>) -> PluginView {
@@ -146,6 +179,7 @@ fn view(root: &Path, path: &Path, s: &Settings, seen: &mut HashSet<String>) -> P
 		file: file.to_string_lossy().to_string(),
 		dir: if legacy { String::new() } else { path.to_string_lossy().to_string() },
 		legacy,
+		core: false,
 		exe_path: exe_path.map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
 		missing,
 		problem,
@@ -177,44 +211,6 @@ pub fn terminal(root: &Path, s: &Settings) -> Result<Option<(String, Terminal, P
 	}
 	let t = v.manifest.contributes.terminal.unwrap_or_default();
 	Ok(Some((name, t, PathBuf::from(v.exe_path))))
-}
-
-/* ---------- 틀 ---------- */
-
-const HERDR_NOTE: &str = "켜 둔 herdr 에 이슈마다 새 탭 「#번호 제목」을 만들어 claude --resume 으로 세션을 잇습니다. 그 세션이 이미 떠 있으면 그 탭으로 옮깁니다. herdr 가 꺼져 있으면 Windows 터미널에 띄운 뒤 붙입니다. claude 는 herdr 가 PATH 에서 찾습니다.";
-
-/// 틀을 plugins/<id>/plugin.json 으로 쓴다. 이미 있으면 덮지 않는다. 사용자가 고쳐 둔 인자를 지우지 않으려는 것이다.
-/// 다만 인자를 하나도 채우지 않은 옛 정의(plugins/<id>.json)는 인자를 채우기 전에 만든 빈 틀이라 휴지통으로 옮기고 새 틀을 쓴다.
-pub fn create_preset(store: &Store, id: &str) -> Result<PathBuf> {
-	let m = match id {
-		"herdr" => Manifest {
-			id: "herdr".into(),
-			name: "herdr".into(),
-			version: "1.0.0".into(),
-			api_version: manifest::API_VERSION,
-			description: HERDR_NOTE.into(),
-			permissions: vec!["process:herdr".into()],
-			contributes: manifest::Contributes { terminal: Some(terminal::herdr()), ..Default::default() },
-			..Default::default()
-		},
-		_ => return msg(format!("모르는 틀입니다: {id}")),
-	};
-	let d = dir(&store.root).join(id);
-	if d.exists() {
-		return msg(format!("이미 있습니다: {}", d.display()));
-	}
-	let old = dir(&store.root).join(format!("{id}.json"));
-	if old.exists() {
-		let blank = fs::read(&old).ok().and_then(|b| manifest::from_legacy(&b).ok()).and_then(|(m, _)| m.contributes.terminal).is_some_and(|t| terminal::is_blank(&t));
-		if !blank {
-			return msg(format!("이미 있습니다: {}", old.display()));
-		}
-		store.trash(&old, &format!("{id}.json"))?;
-	}
-	fs::create_dir_all(&d)?;
-	let path = d.join(MANIFEST);
-	fs::write(&path, serde_json::to_vec_pretty(&m)?)?;
-	Ok(path)
 }
 
 /* ---------- 설정 칸 ---------- */
@@ -323,11 +319,13 @@ pub fn invoke(app: &AppHandle, id: &str, command: &str, place: &str, target: Tar
 	}
 }
 
-/// 권한을 허락하고 켠다. 매니페스트의 권한 그대로를 허락한 것으로 남긴다.
+/// 권한을 허락하고 켠다. 매니페스트의 권한 그대로를 허락한 것으로 남긴다. 코어는 허락을 남기지 않고 켜기만 한다.
 pub fn grant(store: &Store, id: &str) -> Result<Settings> {
 	let mut s = store.settings()?;
 	let v = find(&store.root, &s, id)?;
-	s.plugin_grants.insert(id.to_string(), v.manifest.permissions.clone());
+	if !v.core {
+		s.plugin_grants.insert(id.to_string(), v.manifest.permissions.clone());
+	}
 	if !s.enabled_plugins.iter().any(|x| x == id) {
 		s.enabled_plugins.push(id.to_string());
 	}
@@ -350,7 +348,7 @@ mod tests {
 		let r = root();
 		let d = dir(&r);
 		fs::write(d.join("a-broken.json"), "{ not json").unwrap();
-		fs::write(d.join("b-herdr.json"), r#"{ "id": "herdr", "kind": "terminal", "exe": "herdr", "launch": ["--x"] }"#).unwrap();
+		fs::write(d.join("b-term.json"), r#"{ "id": "b-term", "kind": "terminal", "exe": "herdr", "launch": ["--x"] }"#).unwrap();
 		fs::create_dir_all(d.join("c-menu")).unwrap();
 		fs::write(
 			d.join("c-menu").join(MANIFEST),
@@ -359,27 +357,53 @@ mod tests {
 		.unwrap();
 		fs::write(d.join("c-menu").join("plugin.wasm"), b"\0asm").unwrap();
 
-		let s = Settings { enabled_plugins: vec!["a-broken".into(), "herdr".into(), "c-menu".into()], ..Default::default() };
+		let s = Settings { enabled_plugins: vec!["a-broken".into(), "b-term".into(), "c-menu".into()], ..Default::default() };
 		let list = load(&r, &s);
-		assert_eq!(list.len(), 3);
-		assert!(list[0].problem.starts_with("정의를 읽지 못했습니다"));
-		assert!(list[1].legacy && list[1].missing.is_empty(), "옛 정의는 허락한 것으로 본다");
-		assert_eq!(list[2].problem, "");
-		assert_eq!(list[2].missing, vec!["notify"], "허락하기 전에는 부르지 않는다");
-		assert!(!list[2].usable());
+		assert_eq!(list.len(), 4, "코어 herdr 가 맨 앞에 붙는다");
+		assert!(list[0].core);
+		assert!(list[1].problem.starts_with("정의를 읽지 못했습니다"));
+		assert!(list[2].legacy && list[2].missing.is_empty(), "옛 정의는 허락한 것으로 본다");
+		assert_eq!(list[3].problem, "");
+		assert_eq!(list[3].missing, vec!["notify"], "허락하기 전에는 부르지 않는다");
+		assert!(!list[3].usable());
 
 		// 읽지 못한 옛 정의를 켜 두었으면 터미널 자리에서 문제를 알린다.
 		assert!(terminal(&r, &s).unwrap_err().to_string().contains("정의를 읽지 못했습니다"));
 
 		// 허락한 뒤 권한을 늘리면 다시 빠진다.
 		let s = Settings { plugin_grants: [("c-menu".to_string(), vec!["notify".to_string()])].into(), ..s };
-		assert!(load(&r, &s)[2].usable());
+		assert!(load(&r, &s)[3].usable());
 		fs::write(
 			d.join("c-menu").join(MANIFEST),
 			r#"{ "id": "c-menu", "apiVersion": 1, "main": "plugin.wasm", "permissions": ["notify", "process:cmd"], "contributes": { "menus": [{ "where": "issue", "command": "x", "label": "엑스" }] } }"#,
 		)
 		.unwrap();
-		assert_eq!(load(&r, &s)[2].missing, vec!["process:cmd"]);
+		assert_eq!(load(&r, &s)[3].missing, vec!["process:cmd"]);
+		fs::remove_dir_all(&r).unwrap();
+	}
+
+	#[test]
+	fn core_plugin_is_listed_first_without_files_and_wins_its_id() {
+		let r = root();
+		let list = load(&r, &Settings::default());
+		assert_eq!(list.len(), 1, "디스크가 비어도 코어는 있다");
+		let h = &list[0];
+		assert!(h.core && !h.legacy && h.file.is_empty() && h.missing.is_empty(), "코어는 파일 · 허락이 없다");
+		assert!(!h.enabled);
+
+		// 켜면 「터미널에서 잇기」가 코어를 고른다. herdr 가 PATH 에 없으면 그 문제를 알린다.
+		let s = Settings { enabled_plugins: vec!["herdr".into()], ..Default::default() };
+		match terminal(&r, &s) {
+			Ok(Some((name, t, _))) => assert_eq!((name.as_str(), t), ("herdr", terminal::herdr())),
+			Ok(None) => panic!("켠 코어를 고르지 않았다"),
+			Err(e) => assert!(e.to_string().contains("「herdr」"), "{e}"),
+		}
+
+		// 옮기지 못하고 남은 같은 id 의 디스크 플러그인은 쉰다.
+		fs::write(dir(&r).join("herdr.json"), r#"{ "exe": "herdr", "launch": ["--x"] }"#).unwrap();
+		let list = load(&r, &s);
+		assert!(list[0].core);
+		assert!(list[1].problem.contains("같은 id(herdr)"), "{}", list[1].problem);
 		fs::remove_dir_all(&r).unwrap();
 	}
 

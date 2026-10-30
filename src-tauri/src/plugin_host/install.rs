@@ -4,6 +4,7 @@
 //! - zip 의 항목은 `enclosed_name` 으로만 읽는다. `..` · 절대 경로 항목으로 폴더 밖에 쓰는 것(zip slip)을 막는다.
 //! - 같은 id 가 이미 있으면 휴지통으로 옮긴 뒤 넣는다. 잘못 덮어도 꺼낼 수 있다.
 //! - 설치는 사용자가 권한 목록을 보고 고른 것이라, 매니페스트의 권한을 허락한 것으로 남기고 켠다.
+//! - 코어 플러그인(core.rs)과 id 가 같은 것은 설치하지 않고, 코어는 지우지 않는다.
 
 use std::collections::HashSet;
 use std::fs;
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use super::manifest::{self, Manifest};
-use super::{MANIFEST, data_dir, dir, find, load, terminal, wasm};
+use super::{MANIFEST, core, data_dir, dir, find, load, terminal, wasm};
 use crate::error::{Error, Result, msg};
 use crate::model::Settings;
 use crate::store::Store;
@@ -120,7 +121,12 @@ pub fn inspect(store: &Store, s: &Settings, path: &Path) -> Result<Inspect> {
 	}
 	let has_main = !m.main.is_empty() && manifest::plain_file_name(&m.main) && read(&src, &m.main)?.is_some();
 	let exe_found = m.contributes.terminal.as_ref().is_some_and(|t| terminal::resolve_exe(&t.exe).is_some());
-	let problem = manifest::check(&m, has_main, exe_found, &mut HashSet::new());
+	// 코어는 파일이 없어 휴지통으로 옮겨 바꿀 수 없다. 같은 id 로 넣으면 목록에서 쉬기만 한다.
+	let problem = if core::is_core(&m.id) {
+		format!("앱에 들어 있는 코어 플러그인과 id({}) 가 같습니다", m.id)
+	} else {
+		manifest::check(&m, has_main, exe_found, &mut HashSet::new())
+	};
 	let installed = load(&store.root, s).into_iter().find(|v| v.manifest.id == m.id).map(|v| if v.legacy { "옛 정의".to_string() } else { v.manifest.version }).unwrap_or_default();
 	Ok(Inspect { manifest: m, problem, installed, source: path.to_string_lossy().to_string() })
 }
@@ -162,6 +168,9 @@ pub fn install(store: &Store, path: &Path) -> Result<Settings> {
 
 /// 플러그인과 그 데이터(설정 칸 값 · 저장소 · 기록)를 휴지통으로 옮기고, 켜기 · 허락을 지운다.
 pub fn uninstall(store: &Store, id: &str) -> Result<Settings> {
+	if core::is_core(id) {
+		return msg("코어 플러그인은 지울 수 없습니다 · 끄기만 합니다");
+	}
 	let mut s = store.settings()?;
 	let v = find(&store.root, &s, id)?;
 	let target = if v.legacy { PathBuf::from(&v.file) } else { PathBuf::from(&v.dir) };

@@ -31,6 +31,10 @@ export interface Settings {
 	sendKey: "ctrlEnter" | "enter";
 	/** 산출물에 파일을 넣거나 새로 등록하면 작성법 · 어휘 · 형식 · 템플릿 · 이름 규칙을 뽑는다 (구현 모델) */
 	recipeAuto: boolean;
+	/** 켤 때와 켜 둔 동안 정해진 간격마다 새 판을 확인해 알린다. 설치는 사용자가 고른다. */
+	autoUpdateCheck: boolean;
+	/** 파일 산출물에서 한컴오피스로 한글 문서를 확인한다(열기 검사 · 정확한 쪽 수 · hwp 변환). 끄면 rhwp 로 본다. */
+	hancomCheck: boolean;
 }
 
 /** 터미널 기여. 자리표시: {cwd} {claude} {session} {session_short} {title} · attach 둘째 단계부터 {out.경로} */
@@ -81,6 +85,8 @@ export interface PluginView extends PluginManifest {
 	file: string;
 	dir: string;
 	legacy: boolean;
+	/** 앱에 들어 있는 플러그인. 파일이 없고 켜고 끄기만 한다. */
+	core: boolean;
 	enabled: boolean;
 	exePath: string;
 	/** 아직 허락하지 않은 권한. 비어야 부른다. */
@@ -121,6 +127,24 @@ export interface AppInfo {
 	claudePath: string;
 	claudeVersion: string;
 	version: string;
+}
+
+/** 산출물 파일 도구 점검 한 줄. required 가 없으면 그 형식을 못 만들고, optional 이 없으면 쪽 그림 확인 같은 확인이 빠진다. */
+export interface DocTool {
+	key: string;
+	label: string;
+	ok: boolean;
+	detail: string;
+	need: "required" | "optional";
+	usedFor: string;
+}
+
+/** 플러그인의 scripts/doctor.py 가 낸 결과. install 은 빠진 Python 패키지를 까는 명령(없으면 빈 글). */
+export interface DocTools {
+	python: string;
+	items: DocTool[];
+	install: string;
+	error?: string;
 }
 
 /** 구독 사용률의 창 하나. key 는 claude 가 붙인 이름 그대로다 (five_hour · seven_day …). */
@@ -177,6 +201,9 @@ export interface Project {
 	planVcsRead: boolean;
 	/** 계획에 적힌 파일이 겹치지 않는 구현을 함께 돌린다 */
 	parallelImpl: boolean;
+	/** 줄을 서야 할 구현을 기다리지 않고 git 워크트리에서 돌린다. parallelImpl 을 켰을 때만 먹는다. 예전 프로젝트에는 없을 수 있다. */
+	worktree?: boolean;
+	/** 산출물 네 칸. 프로젝트 저장(projectSave)은 덮지 않는다 — 산출물 화면의 deliverableSettingsSave 로만 바꾼다. */
 	deliverablesDir: string;
 	naming: string;
 	namingUnderscore: boolean;
@@ -186,6 +213,8 @@ export interface Project {
 	/** 어휘 사전 설정. 프로젝트 저장(projectSave)은 이 칸을 덮지 않는다 — glossarySaveSettings 로만 바꾼다. */
 	glossary: ProjectGlossary;
 }
+
+export type DeliverableSettings = Pick<Project, "deliverablesDir" | "naming" | "namingUnderscore" | "archiveDir">;
 
 export interface ProjectGlossary {
 	enabled: boolean;
@@ -389,6 +418,8 @@ export interface RunRecord {
 	denials: Denial[];
 	/** 지식베이스에서 찾아 프롬프트에 붙인 구획. 옛 기록에는 없다. */
 	kbHits?: KbHit[];
+	/** 이 실행이 돈 claude 세션. 옛 기록에는 없다. */
+	sessionId?: string;
 	/** 어휘 사전에서 프롬프트에 붙인 용어. 다른 프로젝트 것은 「용어 · 프로젝트」 꼴이다. 옛 기록에는 없다. */
 	glossaryTerms?: string[];
 }
@@ -457,9 +488,18 @@ export interface Issue {
 	talk?: boolean;
 	/** 실행 중에 보낸 질문. 실행이 끝나면 한 차례로 묶여 나간다. 중지했으면 남는다. 예전 이슈에는 없을 수 있다. */
 	queue?: QueuedChat[];
+	/** 구현이 도는 워크트리. 있으면 결과 확인 때 「반영」해야 본 작업트리에 들어간다. 예전 이슈에는 없을 수 있다. */
+	worktree?: Worktree | null;
 	note: string;
 	attachments: string[];
 	dir: string;
+}
+
+export interface Worktree {
+	path: string;
+	/** 만들 때 찍은 작업트리 사본 커밋 */
+	base: string;
+	at: number;
 }
 
 export interface Version {
@@ -470,6 +510,8 @@ export interface Version {
 	size: number;
 	source: "import" | "editor" | "claude" | "issue";
 	path: string;
+	/** 자동 갱신 · 밀린 변경 반영으로 쓴 판. 「검토함」을 누르기 전까지 켜져 있다 */
+	review: boolean;
 }
 
 export interface RefFile {
@@ -497,6 +539,28 @@ export interface RecipeDraft {
 	template: string;
 }
 
+/**
+ * 자동 관리 기록 한 줄. 이슈 하나가 이 산출물에 어떻게 반영됐는지다.
+ * updated · skipped · unrelated · catchup 은 반영이 끝난 것, busy · failed · stopped · discarded 는 반영 대기에 남는다.
+ */
+export interface AutoEntry {
+	at: number;
+	issueId: string;
+	number: number;
+	verdict: "updated" | "skipped" | "unrelated" | "catchup" | "busy" | "failed" | "stopped" | "discarded";
+	reason: string;
+	/** updated · catchup 이면 만든 판 번호 */
+	version: number;
+}
+
+/** 완료됐지만 아직 이 산출물에 반영되지 않은 이슈 */
+export interface PendingIssue {
+	id: string;
+	number: number;
+	title: string;
+	doneAt: number;
+}
+
 export interface Deliverable {
 	id: string;
 	projectId: string;
@@ -507,17 +571,20 @@ export interface Deliverable {
 	updatedAt: number;
 	versions: Version[];
 	/** issueId: 이슈를 완료해 자동 갱신으로 시작했으면 그 이슈 */
-	job: { runId: string; phase: Phase; request: string; queuedAt: number; issueId?: string } | null;
+	job: { runId: string; phase: Phase; request: string; queuedAt: number; issueId?: string; catchUp?: string[] } | null;
 	error: string;
 	runs: RunRecord[];
 	guide: string;
 	naming: string;
 	subdir: string;
-	mode: "md" | "file";
 	/** 이슈를 완료하면 그 변경과 관련 있는지 가려 새 판을 쓴다 */
 	autoUpdate: boolean;
 	/** 마지막 자동 갱신 결과 한 줄 */
 	autoLast: string;
+	/** 자동 관리 기록. 오래된 것부터 최근 50건 */
+	autoLog: AutoEntry[];
+	/** 반영 대기 이슈. 자동 갱신을 켜고 판이 있는 산출물만 센다 */
+	pending: PendingIssue[];
 	/** 작성법 — 템플릿 · 지난 판에서 뽑은 구성 · 문체 · 표기 규칙 (마크다운) */
 	skill: string;
 	vocab: Term[];
@@ -525,8 +592,11 @@ export interface Deliverable {
 	format: string;
 	/** refs 안에서 템플릿으로 쓸 파일 이름 */
 	template: string;
-	learn: { runId: string; startedAt: number } | null;
+	/** 작성법 뽑기. 동시에 둘까지만 돌아 그 밖은 queued 로 기다린다 */
+	learn: { runId: string; startedAt: number; phase: "running" | "queued" } | null;
 	learnError: string;
+	/** 마지막으로 끝난 뽑기의 runId. 끝난 뒤에도 그 기록을 다시 펼친다 */
+	learnLastRun: string;
 	learnedAt: number;
 	learnCostUsd: number;
 	draft: RecipeDraft;
@@ -536,7 +606,7 @@ export interface Deliverable {
 	nextName: string;
 }
 
-export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir" | "mode" | "autoUpdate"> & Partial<Pick<Deliverable, "skill" | "vocab" | "format">>;
+export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir" | "autoUpdate"> & Partial<Pick<Deliverable, "skill" | "vocab" | "format">>;
 
 export type ResourceKind = "instructions" | "skill" | "agent" | "command" | "rule";
 
@@ -586,7 +656,8 @@ export interface SessionInfo {
 
 export interface RunEnvelope {
 	projectId: string;
-	target: "issue" | "deliverable";
+	/** learn 은 산출물의 작성법 뽑기다. targetId 는 산출물 id 다 */
+	target: "issue" | "deliverable" | "learn";
 	targetId: string;
 	runId: string;
 	event: RunEvent;

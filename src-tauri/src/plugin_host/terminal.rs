@@ -152,11 +152,6 @@ pub fn warning(t: &Terminal) -> String {
 	}
 }
 
-/// 인자를 하나도 채우지 않은 정의인지. 인자를 채우기 전에 만든 빈 틀이다.
-pub fn is_blank(t: &Terminal) -> bool {
-	t.probe.is_empty() && t.focus.is_empty() && t.attach.is_empty() && t.launch.is_empty()
-}
-
 /// 이름만 적었으면 PATH 에서, 경로를 적었으면 그 자리에서 찾는다.
 /// 확장자를 빼먹었으면 .exe · .cmd · .bat 를 붙여 본다. VS Code 의 `code` 처럼 PATH 에 .cmd 만 두는 프로그램이 있다.
 pub fn resolve_exe(exe: &str) -> Option<PathBuf> {

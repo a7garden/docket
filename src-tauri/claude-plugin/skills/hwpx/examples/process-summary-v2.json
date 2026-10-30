@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "kind": "brief-report",
+  "output": "LLM_제작과정_요약보고서_astra.hwpx",
+  "title": "LLM 제작과정 한눈에 보기",
+  "profile": "neutral",
+  "style": {"font": "맑은 고딕", "body_size": 11, "accent": "245A81"},
+  "metadata": {"줄간격": "145"},
+  "facts": {
+    "new_model": "처음부터 사전학습",
+    "reuse": "기존 모델 활용",
+    "split": "학습·검증·최종 평가 데이터를 분리",
+    "privacy": "권리·개인정보",
+    "optional": "RLHF는 필수가 아니다",
+    "rag": "RAG는 검색한 자료를 입력에 보태는 방식"
+  },
+  "blocks": [
+    {"type": "paragraph", "text": "LLM(대규모 언어모델)은 많은 글에서 언어 패턴을 학습한 모델이다. 제작은 목표 설정부터 운영 중 개선까지 이어지며, 가중치(학습으로 조정되는 내부 값)를 새로 만들지 재사용할지 먼저 결정한다."},
+    {"type": "diagram", "pattern": "process", "direction": "horizontal", "nodes": [
+      {"id": "goal", "title": "목표·설계"},
+      {"id": "data", "title": "데이터"},
+      {"id": "train", "title": "학습·조정"},
+      {"id": "eval", "title": "평가"},
+      {"id": "deploy", "title": "배포·개선"}
+    ], "edges": [
+      {"from": "goal", "to": "data"},
+      {"from": "data", "to": "train"},
+      {"from": "train", "to": "eval"},
+      {"from": "eval", "to": "deploy"}
+    ]},
+    {"type": "heading", "text": "1. 준비 — 무엇을 잘해야 하는가"},
+    {"type": "list", "items": [
+      "목표·설계: 사용 업무·언어와 정확도·응답시간 등 합격 기준을 정한다. 글을 토큰(처리 단위)으로 나누는 방식, 모델 크기·입력 길이와 학습 자원을 함께 설계한다.",
+      "데이터: 권리·개인정보를 점검하고 오류·중복·유해 내용을 정제한다. 학습·검증·최종 평가 데이터를 분리하고, 같은 내용이 섞여 평가 점수가 부풀지 않도록 관리한다."
+    ]},
+    {"type": "heading", "text": "2. 학습 — 두 경로 중 조건에 맞게 선택"},
+    {"type": "list", "items": [
+      "처음부터 사전학습: 가중치를 새로 초기화하고 대규모 말뭉치로 기본 언어 능력을 학습한다. 토크나이저와 모델을 맞추며, 기존 모델 미세조정보다 많은 데이터·계산 자원이 필요하다.",
+      "기존 모델 활용: 성능·이용 조건을 확인한 사전학습 모델에서 출발한다. 필요하면 업무·도메인 데이터로 추가 학습(미세조정)하고, 기본 성능 대비 개선 여부를 확인한다.",
+      "후학습(필요시): 지시·답변 예시로 응답 방식을 익히고, 선호·안전 기준에 맞춰 정렬한다. 방법은 목적에 따라 선택하며 RLHF는 필수가 아니다."
+    ]},
+    {"type": "heading", "text": "3. 검증·운영 — 배포 이후에도 확인"},
+    {"type": "list", "items": [
+      "평가: 분리한 데이터와 실제 업무 사례로 성능·사실 오류·편향·유해 응답·정보 유출을 점검한다. 목표를 충족하지 못하면 원인을 찾아 데이터·학습 단계로 돌아간다.",
+      "배포·개선: 응답속도·비용과 접근 권한을 확인해 배포한다. 오류·사용자 피드백을 관찰하고, 모델·데이터 버전과 되돌리기 절차를 관리하며 재평가한다."
+    ]},
+    {"type": "paragraph", "text": "※ RAG는 검색한 자료를 입력에 보태는 방식으로, 그 자체가 모델 가중치 학습은 아니다."},
+    {"type": "paragraph", "text": "출처: Hugging Face, LLM Course 7.6·Transformers Fine-tuning; Meta, The Llama 3 Herd of Models (2024), arXiv:2407.21783."}
+  ],
+  "quality": {"hancom": "off", "writing": "advisory", "repair_layout": false, "reject_placeholders": true}
+}

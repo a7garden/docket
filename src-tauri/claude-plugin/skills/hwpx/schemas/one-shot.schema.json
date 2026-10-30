@@ -1,0 +1,767 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.local/hwpx/one-shot.schema.json",
+  "title": "HWPX one-shot build specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "kind",
+    "output"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "kind": {
+      "enum": [
+        "official-letter",
+        "brief-report",
+        "plan-report",
+        "markdown"
+      ]
+    },
+    "output": {
+      "type": "string",
+      "pattern": "\\.[hH][wW][pP][xX]$"
+    },
+    "document": {
+      "$ref": "#/$defs/official"
+    },
+    "markdown": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "template": {
+      "enum": [
+        "base",
+        "gonmun",
+        "report",
+        "minutes",
+        "proposal"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "creator": {
+      "type": "string"
+    },
+    "metadata_date": {
+      "type": "string",
+      "format": "date"
+    },
+    "draft": {
+      "type": "boolean",
+      "default": false
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hancom": {
+          "enum": [
+            "auto",
+            "required",
+            "off"
+          ],
+          "default": "auto"
+        },
+        "reject_placeholders": {
+          "type": "boolean",
+          "default": true
+        },
+        "fail_on_warnings": {
+          "type": "boolean",
+          "default": false
+        },
+        "required_text": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "writing": {
+          "enum": [
+            "required",
+            "advisory",
+            "off"
+          ]
+        },
+        "repair_layout": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "blocks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/block"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "facts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "purpose": {
+      "enum": [
+        "document",
+        "cover"
+      ],
+      "default": "document"
+    },
+    "profile": {
+      "enum": [
+        "default",
+        "neutral",
+        "public"
+      ]
+    },
+    "style": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layout": {
+          "enum": ["technical-report"]
+        },
+        "code_font": {
+          "type": "string",
+          "minLength": 1
+        },
+        "font": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_size": {
+          "type": "number",
+          "minimum": 9,
+          "maximum": 18
+        },
+        "accent": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{6}$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "official": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "기관명",
+        "수신",
+        "제목",
+        "발신명의",
+        "body"
+      ],
+      "properties": {
+        "기관명": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "수신": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "제목": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "발신명의": {
+          "type": "string",
+          "pattern": "\\S"
+        },
+        "body": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "contains": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        },
+        "붙임": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        },
+        "끝": {
+          "type": "boolean"
+        },
+        "항목간_빈줄": {
+          "type": "boolean"
+        },
+        "줄간격": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 300
+        },
+        "결문선": {
+          "enum": [
+            "검정",
+            "회색"
+          ]
+        },
+        "결재": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "직위": {
+                "type": "string"
+              },
+              "성명": {
+                "type": "string"
+              },
+              "일자": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "원훈": {
+          "type": "string"
+        },
+        "경유": {
+          "type": "string"
+        },
+        "협조자": {
+          "type": "string"
+        },
+        "시행": {
+          "type": "string"
+        },
+        "접수": {
+          "type": "string"
+        },
+        "우편번호": {
+          "type": "string"
+        },
+        "주소": {
+          "type": "string"
+        },
+        "홈페이지": {
+          "type": "string"
+        },
+        "전화번호": {
+          "type": "string"
+        },
+        "팩스번호": {
+          "type": "string"
+        },
+        "이메일": {
+          "type": "string"
+        },
+        "공개구분": {
+          "type": "string"
+        },
+        "전화": {
+          "type": "string"
+        },
+        "전송": {
+          "type": "string"
+        },
+        "기안자": {
+          "type": "string"
+        },
+        "검토자": {
+          "type": "string"
+        },
+        "결재권자": {
+          "type": "string"
+        }
+      }
+    },
+    "block": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "text"
+          ],
+          "properties": {
+            "type": {
+              "const": "paragraph"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "text"
+          ],
+          "properties": {
+            "type": {
+              "const": "heading"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1
+            },
+            "level": {
+              "enum": [
+                2,
+                3,
+                4
+              ],
+              "default": 2
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "text"
+          ],
+          "properties": {
+            "type": {
+              "const": "quote"
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "items"
+          ],
+          "properties": {
+            "type": {
+              "const": "list"
+            },
+            "items": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "pagebreak"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "path"
+          ],
+          "properties": {
+            "type": {
+              "const": "image"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "alt": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "headers",
+            "rows"
+          ],
+          "properties": {
+            "type": {
+              "const": "table"
+            },
+            "headers": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "pattern",
+            "nodes",
+            "edges"
+          ],
+          "properties": {
+            "type": {
+              "const": "diagram"
+            },
+            "pattern": {
+              "enum": [
+                "process",
+                "hierarchy",
+                "swimlane"
+              ]
+            },
+            "direction": {
+              "enum": [
+                "horizontal",
+                "vertical"
+              ],
+              "default": "horizontal"
+            },
+            "nodes": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 6,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "title"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            },
+            "edges": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "properties": {
+                  "from": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "to": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "official-letter"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "document"
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "markdown"
+              ]
+            },
+            {
+              "required": [
+                "source"
+              ]
+            },
+            {
+              "required": [
+                "template"
+              ]
+            },
+            {
+              "required": [
+                "title"
+              ]
+            },
+            {
+              "required": [
+                "creator"
+              ]
+            },
+            {
+              "required": [
+                "blocks"
+              ]
+            },
+            {
+              "required": [
+                "metadata"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "brief-report",
+              "plan-report"
+            ]
+          }
+        }
+      },
+      "then": {
+        "oneOf": [
+          {
+            "required": [
+              "markdown"
+            ]
+          },
+          {
+            "required": [
+              "source"
+            ]
+          },
+          {
+            "required": [
+              "blocks",
+              "title"
+            ]
+          }
+        ],
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "document"
+              ]
+            },
+            {
+              "required": [
+                "template"
+              ]
+            },
+            {
+              "required": [
+                "creator"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "markdown"
+          }
+        }
+      },
+      "then": {
+        "oneOf": [
+          {
+            "required": [
+              "markdown"
+            ]
+          },
+          {
+            "required": [
+              "source"
+            ]
+          },
+          {
+            "required": [
+              "blocks",
+              "title"
+            ]
+          }
+        ],
+        "not": {
+          "required": [
+            "document"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "const": 1
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "blocks"
+              ]
+            },
+            {
+              "required": [
+                "metadata"
+              ]
+            },
+            {
+              "required": [
+                "facts"
+              ]
+            },
+            {
+              "required": [
+                "unknowns"
+              ]
+            },
+            {
+              "required": [
+                "purpose"
+              ]
+            },
+            {
+              "required": [
+                "profile"
+              ]
+            },
+            {
+              "required": [
+                "style"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "brief-report",
+              "plan-report"
+            ]
+          }
+        },
+        "not": {
+          "required": [
+            "blocks"
+          ]
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "title"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "metadata"
+        ]
+      },
+      "then": {
+        "required": [
+          "blocks"
+        ]
+      }
+    }
+  ]
+}

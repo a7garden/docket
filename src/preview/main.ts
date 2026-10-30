@@ -10,12 +10,12 @@ const settings = { ...fx.settings, theme: (q.get("theme") as "dark" | "light") ?
 type Args = Record<string, unknown> | undefined;
 const handlers: Record<string, (a: Args) => unknown> = {
 	app_info: () => fx.info,
+	doc_tools_check: () => fx.docTools,
 	usage_get: () => (empty ? null : fx.usage),
 	spend_summary: () => (empty ? { days: 7, rows: [], total: { ...fx.spend.total, calls: 0 } } : fx.spend),
 	settings_get: () => settings,
 	settings_save: (a) => a?.settings,
 	plugins_list: () => fx.plugins,
-	plugin_create_preset: () => fx.plugins.plugins[0].file,
 	plugin_invoke: () => fx.pluginReply,
 	plugin_grant: () => settings,
 	plugin_settings_get: () => ({ webhook: "https://hooks.slack.com/services/T000/B000/xxxx", mention: true }),
@@ -27,7 +27,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
 	talks_list: (a) => (a?.projectId === fx.projects[0].id ? fx.talks : []),
 	talk_create: (a) => ({ ...fx.talks[1], id: a?.talkId, title: "", runs: [], history: [], sessionId: "" }),
 	deliverables_list: (a) => (a?.projectId === fx.projects[0].id ? fx.deliverables : []),
-	deliverable_read_text: () => fx.docText,
+	deliverable_read_text: (a) => (a?.n === 3 ? fx.docTextNext : fx.docText),
 	kb_status: (a) => (a?.projectId === fx.projects[0].id ? fx.kb : { ...fx.kb, kb: { ...fx.kb.kb, enabled: false, folders: [] }, files: [], sections: 0, cards: 0, pending: 0, indexedAt: 0, cardCostUsd: 0, progress: { running: false, stage: "", done: 0, total: 0, message: "" } }),
 	kb_save: (a) => ({ ...fx.kb, kb: a?.kb }),
 	kb_import: () => fx.kb,
@@ -38,6 +38,8 @@ const handlers: Record<string, (a: Args) => unknown> = {
 	glossary_get: () => fx.glossary,
 	glossary_save_entries: (a) => ({ ...fx.glossary, entries: a?.entries, updatedAt: Date.now() }),
 	glossary_save_settings: (a) => ({ ...fx.glossary, glossary: a?.glossary }),
+	deliverable_vocab_promote: (a) => ({ deliverable: fx.deliverables[0], added: (a?.terms as string[])?.length ?? 0, merged: 0 }),
+	deliverable_draft_apply: () => fx.deliverables[0],
 	run_events: () => fx.savedEvents,
 	issue_transcript: (a) => (a?.issueId === "i0000000004" ? fx.terminalTurns : []),
 	issue_sessions: () => fx.sessions,
@@ -56,6 +58,7 @@ const handlers: Record<string, (a: Args) => unknown> = {
 	text_read: (a) => ({ path: a?.path, content: String(a?.path).endsWith("CLAUDE.md") ? fx.claudeMd : "---\nname: changelog\ndescription: 바뀐 것을 CHANGELOG 형식으로 정리한다.\n---\n\n# changelog\n\n1. 지난 판 뒤의 변경을 모은다.\n", modified: Date.now() - 3600_000, crlf: true, bom: false, exists: true }),
 	"plugin:window|is_maximized": () => false,
 	asset_allow: (a) => a?.path,
+	deliverable_settings_save: (a) => ({ ...fx.projects.find((p) => p.id === a?.projectId), ...(a?.settings as object) }),
 	naming_preview: (a) => `${String(a?.title ?? "산출물").trim().split(/\s+/).join("_")}_v${a?.n ?? 1}_20261028.md`,
 };
 
@@ -80,3 +83,19 @@ setTimeout(() => {
 		for (const event of events) void emit("docket://run", { projectId: issue?.projectId, target: "issue", targetId: id, runId: issue?.run?.runId, event });
 	}
 }, 300);
+
+// ?palette= 로 Ctrl+K 팔레트를 연 채 띄운다. 값이 있으면 검색어로 넣는다 — 브라우저 밖에서 화면을 찍을 때 키를 누를 길이 없다.
+if (q.has("palette")) {
+	setTimeout(() => {
+		window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+		const text = q.get("palette");
+		if (!text) return;
+		setTimeout(() => {
+			const input = document.querySelector<HTMLInputElement>("[role=combobox]");
+			if (!input) return;
+			// React 가 쥔 값이라 value 를 바로 바꾸면 onChange 가 오지 않는다. 원래 setter 로 넣고 input 사건을 보낸다.
+			Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, text);
+			input.dispatchEvent(new Event("input", { bubbles: true }));
+		}, 100);
+	}, 600);
+}

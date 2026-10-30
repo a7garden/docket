@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { FolderOpen, MessageSquare, MessageSquarePlus, MoreHorizontal, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, attempt, ContextActions, DropdownActions } from "@/components/ActionMenu";
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { ChatComposer, ChatTab, type Draft, NO_TALK_DRAFT, SessionBar, useTranscript } from "@/features/issue/ChatTab";
 import { api, errorText } from "@/lib/api";
 import { newId, relTime } from "@/lib/format";
@@ -101,7 +102,7 @@ function TalkPane({ talk, projectPath }: { talk: Issue; projectPath: string }) {
 	return (
 		<>
 			<header className="flex items-center gap-2 border-b border-border px-6 py-2.5">
-				<h2 className="min-w-0 flex-1 truncate text-[14px] font-semibold">{talk.title || "새 대화"}</h2>
+				<TalkTitle talk={talk} />
 				{talk.changes.length > 0 && <span className="text-[12px] text-subtle">바뀐 파일 {new Set(talk.changes.map((c) => c.rel)).size}</span>}
 				<TalkMenu talk={talk} />
 			</header>
@@ -111,6 +112,65 @@ function TalkPane({ talk, projectPath }: { talk: Issue; projectPath: string }) {
 			</div>
 			<ChatComposer issue={talk} draft={draft} onDraft={setDraft} />
 		</>
+	);
+}
+
+/** 제목 모델이 첫 답 뒤에 지을 차례인지. 짓기 전에는 첫 질문이 임시 제목이다. */
+const naming = (t: Issue) => t.titleMode === "auto" && t.titledAt === 0 && t.runs.some((r) => r.status === "ok");
+
+/** 누르면 입력칸이 된다. 고친 제목은 그대로 남고, 비우면 첫 문답으로 다시 짓는다. 메모 상세 창의 제목과 같은 동작이다. */
+function TalkTitle({ talk }: { talk: Issue }) {
+	const [edit, setEdit] = useState<string | null>(null);
+	const cancelled = useRef(false);
+
+	const save = async () => {
+		if (edit === null) return;
+		const next = edit.trim();
+		setEdit(null);
+		if (cancelled.current || next === talk.title) return;
+		try {
+			await api.issueSetTitle(talk.projectId, talk.id, next);
+		} catch (e) {
+			toast.error(errorText(e));
+		}
+	};
+
+	if (edit !== null) {
+		return (
+			<Input
+				autoFocus
+				value={edit}
+				onChange={(e) => setEdit(e.target.value)}
+				onBlur={() => void save()}
+				onKeyDown={(e) => {
+					if (e.key === "Enter") e.currentTarget.blur();
+					if (e.key === "Escape") {
+						cancelled.current = true;
+						setEdit(null);
+					}
+				}}
+				placeholder="비우면 Claude 가 다시 짓습니다"
+				aria-label="대화 제목"
+				className="h-7 min-w-0 flex-1 px-2 text-[14px] font-semibold md:text-[14px]"
+			/>
+		);
+	}
+	return (
+		<h2 className="flex min-w-0 flex-1 items-baseline gap-2 text-[14px] font-semibold">
+			<button
+				type="button"
+				title="눌러서 제목 고치기"
+				disabled={talk.runs.length === 0}
+				onClick={() => {
+					cancelled.current = false;
+					setEdit(talk.title);
+				}}
+				className="min-w-0 truncate rounded-sm text-left hover:text-muted-foreground disabled:hover:text-foreground"
+			>
+				{talk.title || "새 대화"}
+			</button>
+			{naming(talk) && <span className="shrink-0 text-[12px] font-normal text-subtle">제목 짓는 중</span>}
+		</h2>
 	);
 }
 
@@ -188,7 +248,10 @@ function TalkRow({ talk, active, onOpen }: { talk: Issue; active: boolean; onOpe
 						<span className="min-w-0 flex-1 truncate text-[13px] font-medium">{talk.title || "새 대화"}</span>
 						{unread && <span aria-label="읽지 않은 답" title="읽지 않은 답" className={cn("size-1.5 shrink-0 rounded-full", talk.error ? "bg-danger" : "bg-brand")} />}
 					</span>
-					<span className="text-[11.5px] text-subtle">{relTime(talk.updatedAt)}</span>
+					<span className="text-[11.5px] text-subtle">
+						{relTime(talk.updatedAt)}
+						{naming(talk) && " · 제목 짓는 중"}
+					</span>
 				</button>
 			</ContextActions>
 			{dialogs}
