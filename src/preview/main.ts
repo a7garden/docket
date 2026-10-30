@@ -11,6 +11,7 @@ const settings = { ...fx.settings, theme: (q.get("theme") as "dark" | "light") ?
 type Args = Record<string, unknown> | undefined;
 const handlers: Record<string, (a: Args) => unknown> = {
 	app_info: () => fx.info,
+	update_installable: () => true,
 	doc_tools_check: () => fx.docTools,
 	usage_get: () => (empty ? null : fx.usage),
 	spend_summary: () => (empty ? { days: 7, rows: [], total: { ...fx.spend.total, calls: 0 } } : fx.spend),

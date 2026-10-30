@@ -1,7 +1,7 @@
 {
 	"$schema": "https://schema.tauri.app/config/2",
 	"productName": "docket",
-	"version": "0.2.7",
+	"version": "0.2.8",
 	"identifier": "com.seesun.docket",
 	"build": {
 		"beforeDevCommand": "npm run dev",
@@ -54,7 +54,7 @@
 		"updater": {
 			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJDNkQzRDg5MDdDMEU0RjcKUldUMzVNQUhpVDF0dlBqTTQ1MlB3V0VZbUtBOXJvRk0yUnpqY3crNmo0UWJqNHV5UFpCOXRGeVgK",
 			"endpoints": ["https://github.com/a7garden/docket/releases/latest/download/latest.json"],
-			"windows": { "installMode": "passive" }
+			"windows": { "installMode": "quiet" }
 		}
 	}
 }

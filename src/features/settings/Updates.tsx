@@ -4,7 +4,7 @@ import { Markdown } from "@/components/Markdown";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { bytes, relTime } from "@/lib/format";
-import { useUpdate } from "@/lib/updater";
+import { openUpdate, useUpdate } from "@/lib/updater";
 import { cn } from "@/lib/utils";
 import { Group, Row } from "./Settings";
 // 깔린 판의 바뀐 내용은 앱에 묶어 둔다. 오프라인이어도 보이고, 릴리즈 노트와 같은 원본(CHANGELOG.md)이다.
@@ -69,11 +69,14 @@ function ReleaseCard({ release, tag, defaultOpen }: { release: Release; tag?: st
 
 /** 설정 › 업데이트. 지금 판 · 새 판 확인과 설치 · 자동 확인 · 판마다 바뀐 내용. */
 export function Updates({ version, auto, onAutoChange }: { version?: string; auto: boolean; onAutoChange: (on: boolean) => void }) {
-	const { phase, update, progress, error, checkedAt, check, requestInstall } = useUpdate();
+	const { phase, update, progress, error, checkedAt, check, installable, autoError, nextAt } = useUpdate();
 	const busy = phase === "checking" || phase === "downloading";
 
-	const status =
-		phase === "checking"
+	// 새 판을 이미 찾았으면 자동 확인 실패는 보이지 않는다. 그 판을 받는 데는 지장이 없다.
+	const autoFailed = autoError && (phase === "idle" || phase === "latest");
+	const status = autoFailed
+		? `확인하지 못했습니다 · ${autoError}${auto && nextAt ? ` · ${new Date(nextAt).toLocaleTimeString()} 에 다시 확인` : ""}`
+		: phase === "checking"
 			? "확인하는 중…"
 			: phase === "latest"
 				? "최신 판입니다."
@@ -99,14 +102,17 @@ export function Updates({ version, auto, onAutoChange }: { version?: string; aut
 				<Switch checked={auto} onCheckedChange={onAutoChange} />
 			</Row>
 			{update && (phase === "available" || phase === "downloading" || phase === "error") && (
-				<Row label="새 판" hint="설치하면 앱이 꺼졌다 다시 켜집니다.">
-					<ReleaseCard release={{ version: update.version, date: update.date?.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? "", body: update.body ?? "" }} tag="새 판" defaultOpen />
-					<div>
-						<Button size="sm" disabled={phase === "downloading"} onClick={requestInstall}>
+				<Row
+					label="새 판"
+					hint={installable ? "설치하면 앱이 꺼졌다 다시 켜집니다." : "소스에서 띄운 앱이라 여기서 깔지 않습니다. 릴리즈 페이지에서 받습니다."}
+					action={
+						<Button size="sm" disabled={phase === "downloading"} onClick={openUpdate}>
 							<Download />
-							설치하고 다시 켜기
+							{installable ? "설치하고 다시 켜기" : "받으러 가기"}
 						</Button>
-					</div>
+					}
+				>
+					<ReleaseCard release={{ version: update.version, date: update.date?.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? "", body: update.body ?? "" }} tag="새 판" defaultOpen />
 				</Row>
 			)}
 			<Row label="바뀐 내용" hint="깔린 판까지의 기록입니다. 판을 누르면 펼칩니다.">

@@ -294,8 +294,9 @@ cd src-tauri && cargo check
 ### 릴리즈 · 자동 업데이트
 
 - `package.json` · `src-tauri/Cargo.toml` · `src-tauri/tauri.conf.json` 의 버전을 함께 올리고 커밋한 뒤 `git tag v<버전> && git push origin v<버전>`.
-  `.github/workflows/release.yml` 이 Windows 설치 파일 · 서명 · `latest.json` 을 릴리즈에 올린다.
-- 설치된 앱은 켤 때와 켜 둔 동안 1시간마다(창으로 돌아왔을 때 1시간이 지났으면 그때도) `releases/latest/download/latest.json` 을 보고, 새 판이면 알림의 「설치」로 받아 깔고 다시 켠다.
+  `.github/workflows/release.yml` 이 시험을 돌린 뒤 Windows 설치 파일 · 서명 · `latest.json` 을 릴리즈에 올린다. main · PR 에는 시험만 돈다.
+- 설치된 앱은 켤 때와 켜 둔 동안 1시간마다(창으로 돌아왔을 때 10분이 지났으면 그때도) `releases/latest/download/latest.json` 을 보고, 새 판이면 알림의 「설치」로 받아 창 없이 깔고 다시 켠다.
+  자동 확인이 실패하면 5분 뒤 다시 보고 10 · 20 · 40분으로 늘려 1시간까지 가며, 오류와 다음 확인 시각은 「설정 › 업데이트」에 보인다. 소스에서 띄운 앱(옆에 `uninstall.exe` 가 없다)은 설치 대신 릴리즈 페이지를 연다.
   간격은 `src/lib/updater.ts` 의 `CHECK_EVERY_MS` 이고, 「설정 › 업데이트 › 자동으로 확인」으로 끈다. 개발 판(`tauri dev`)에서는 자동 확인을 하지 않는다.
 - 설치 위치는 사용자 전용 `%LOCALAPPDATA%\Programs\docket` 이다(UAC 없음). Tauri 기본값(`%LOCALAPPDATA%\docket`)을 바꾸려고 NSIS 템플릿을 `src-tauri/windows/installer.nsi` 로 복사해 그 한 줄만 고쳤다.
   Tauri CLI 를 올리면 그 판의 원본을 다시 받아 같은 줄만 고친다(파일 머리말).

@@ -71,6 +71,12 @@ pub async fn app_info(app: AppHandle) -> Result<AppInfo> {
 }
 
 /// 화면 쪽 계측을 켤지. app_info 는 claude 버전을 묻느라 늦게 오므로 따로 둔다 — 첫 명령부터 재야 한다.
+/// 설치본인지. 설치기가 실행 파일 옆에 남기는 uninstall.exe 로 가린다. 소스에서 띄운 앱을 업데이트하면 다른 폴더에 깔리고 켜던 것은 그대로 남는다.
+#[tauri::command]
+pub fn update_installable() -> bool {
+	std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("uninstall.exe").is_file())).unwrap_or(false)
+}
+
 #[tauri::command]
 pub fn perf_enabled() -> bool {
 	perf::on()

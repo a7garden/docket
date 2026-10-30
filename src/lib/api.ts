@@ -80,6 +80,7 @@ function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Pro
 // Rust 명령 이름과 인자를 한 곳에 모은다. 화면 코드는 invoke 를 직접 부르지 않는다.
 export const api = {
 	appInfo: () => invoke<AppInfo>("app_info"),
+	updateInstallable: () => invoke<boolean>("update_installable"),
 	docTools: () => invoke<DocTools>("doc_tools_check"),
 	usage: () => invoke<Usage | null>("usage_get"),
 	spend: (days: number) => invoke<Spend>("spend_summary", { days }),

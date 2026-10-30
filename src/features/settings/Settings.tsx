@@ -399,13 +399,24 @@ export function Group({ id, children }: { id: SectionId; children: ReactNode }) 
 	);
 }
 
-export function Row({ label, hint, inline, children }: { label: string; hint?: string; inline?: boolean; children: ReactNode }) {
+/** action 은 머리 오른쪽에 둔다. 아래 내용이 길어도 스크롤 없이 누르게 하려는 단추 자리다. */
+export function Row({ label, hint, inline, action, children }: { label: string; hint?: string; inline?: boolean; action?: ReactNode; children: ReactNode }) {
+	const head = (
+		<div className={cn("flex flex-col gap-0.5", inline && "flex-1", action && "min-w-0 flex-1")}>
+			<Label className="text-[13px] text-foreground">{label}</Label>
+			{hint && <p className="text-[12.5px] leading-relaxed break-keep text-subtle">{hint}</p>}
+		</div>
+	);
 	return (
 		<div className={cn("flex gap-4 px-4 py-3.5", inline ? "items-center" : "flex-col gap-2")}>
-			<div className={cn("flex flex-col gap-0.5", inline && "flex-1")}>
-				<Label className="text-[13px] text-foreground">{label}</Label>
-				{hint && <p className="text-[12.5px] leading-relaxed break-keep text-subtle">{hint}</p>}
-			</div>
+			{action ? (
+				<div className="flex items-center gap-4">
+					{head}
+					<div className="shrink-0">{action}</div>
+				</div>
+			) : (
+				head
+			)}
 			{children}
 		</div>
 	);
