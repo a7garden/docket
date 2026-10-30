@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useQueries } from "@tanstack/react-query";
 import { Search } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { goProject, PROJECT_TABS } from "@/features/project/ProjectHeader";
+import { Kbd } from "@/components/ui/kbd";
+import { goProject, goTalks, PROJECT_TABS } from "@/features/project/ProjectHeader";
 import { SECTION_IDS, SECTIONS, SETTING_ROWS } from "@/features/settings/Settings";
 import { api } from "@/lib/api";
-import { useKey } from "@/lib/keys";
+import { activeCommands, comboLabel, CONFIRM_MS, useKey } from "@/lib/keys";
 import { focusOnly, qk, useProjects, useTalks } from "@/lib/queries";
 import { recentItems } from "@/lib/recent";
 import { matchScore, normalize, numberScore } from "@/lib/search";
@@ -14,12 +15,14 @@ import { useUi } from "@/lib/store";
 import { type Deliverable, GLOBAL_PID, type Issue, type Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-/** 묶음 순서 그대로다. 빈 입력일 때는 「최근」 · 「결정할 차례」만 쓴다. */
-const GROUPS = ["최근", "결정할 차례", "이슈", "대화", "산출물", "프로젝트", "화면", "설정"] as const;
+/** 묶음 순서 그대로다. 빈 입력일 때는 「지금 여기서」 · 「최근」 · 「결정할 차례」만 쓴다. */
+const GROUPS = ["지금 여기서", "최근", "결정할 차례", "이슈", "대화", "산출물", "프로젝트", "화면", "설정"] as const;
 type Group = (typeof GROUPS)[number];
 
 /** 묶음마다 보일 줄 수. 넘치면 점수가 높은 것만 남긴다 — 다 보이면 아래 묶음(화면 · 설정)이 스크롤 밖으로 밀린다. */
 const PER_GROUP = 6;
+/** 빈 입력에서 보일 동작 수. 메뉴 항목까지 다 보이면 「최근」이 밀린다. 나머지는 이름으로 찾는다. */
+const IDLE_COMMANDS = 8;
 
 interface Item {
 	key: string;
@@ -35,6 +38,13 @@ interface Item {
 	/** 같은 점수면 최근 고친 것이 위다. */
 	at: number;
 	go: () => void;
+	/** 지금 화면의 동작이다. 창이 닫힌 뒤에 부른다 — 동작이 연 입력칸의 초점을 닫히는 창이 도로 가져가지 않게. */
+	act?: boolean;
+	/** 오른쪽에 보일 키 */
+	combo?: string;
+	/** 두 번 눌러야 실행한다. 키와 같은 규칙이다 — Ctrl+K 를 열고 Enter 한 번에 구현이 돌면 안 된다. */
+	twice?: boolean;
+	disabled?: boolean;
 }
 
 interface Source {
@@ -80,9 +90,20 @@ const docItem = (group: Group, d: Deliverable, p: Project, score = 0): Item => (
 	go: () => openDoc(d),
 });
 
-/** 빈 입력: 최근 연 것과 결정할 차례 이슈. 목록에서 빠진(지운 · 아직 만들지 않은) 것은 건너뛴다. */
+/** 지금 등록된 동작. 키 있는 것이 먼저다. run 의 인자는 키 이벤트라 빈 것을 넘긴다 — Ctrl+K 에서 부르는 동작은 인자를 보지 않는다. */
+function commandItems(): Item[] {
+	const { keys, others } = activeCommands();
+	const base = { group: "지금 여기서" as Group, score: 0, at: 0, act: true };
+	return [
+		...keys.map((d): Item => ({ ...base, key: `k:${d.id}`, label: d.label, combo: d.combo, twice: !!d.confirm, go: () => void d.run(new KeyboardEvent("keydown")) })),
+		...others.map((c, n): Item => ({ ...base, key: `c:${n}:${c.label}`, label: c.label, sub: c.sub, text: c.sub ? `${c.label} ${c.sub}` : c.label, disabled: c.disabled, go: c.onSelect })),
+	];
+}
+
+/** 빈 입력: 지금 화면의 동작, 최근 연 것, 결정할 차례 이슈. 목록에서 빠진(지운 · 아직 만들지 않은) 것은 건너뛴다. */
 function idleItems(all: Source[], app: Source): Item[] {
-	const out: Item[] = [];
+	const out: Item[] = commandItems().slice(0, IDLE_COMMANDS);
+	const before = out.length;
 	for (const r of recentItems()) {
 		const src = [...all, app].find((s) => s.project.id === r.projectId);
 		if (!src) continue;
@@ -96,7 +117,7 @@ function idleItems(all: Source[], app: Source): Item[] {
 			const d = src.docs.find((x) => x.id === r.id);
 			if (d) out.push(docItem("최근", d, src.project));
 		}
-		if (out.length >= 5) break;
+		if (out.length - before >= 5) break;
 	}
 	const decide = all
 		.flatMap((s) => s.issues.filter(needsDecision).map((i) => issueItem("결정할 차례", i, s.project)))
@@ -111,6 +132,7 @@ function searchItems(all: Source[], app: Source, q: string): Item[] {
 		const score = Math.max(it.score, matchScore(q, it.text ?? it.label));
 		if (score > 0) out.push({ ...it, score });
 	};
+	for (const c of commandItems()) add(c);
 	for (const { project: p, issues, talks, docs } of all) {
 		for (const i of issues) add(issueItem("이슈", i, p, numberScore(q, i.number)));
 		for (const t of talks) add(talkItem("대화", t, p));
@@ -119,10 +141,11 @@ function searchItems(all: Source[], app: Source, q: string): Item[] {
 		for (const [v, tab] of PROJECT_TABS) {
 			add({ key: `v:${p.id}:${v}`, group: "화면", label: `${p.name} › ${tab}`, text: `${p.name} ${tab}`, score: 0, at: 0, go: () => goProject(p.id, v) });
 		}
+		add({ key: `v:${p.id}:talks`, group: "화면", label: `${p.name} › 대화`, text: `${p.name} 대화`, score: 0, at: 0, go: () => goTalks(p.id) });
 	}
 	// 앱 대화는 프로젝트가 아니다. 프로젝트 · 탭 항목 없이 대화만 넣는다.
 	for (const t of app.talks) add(talkItem("대화", t, app.project));
-	add({ key: "v:allTalks", group: "화면", label: "대화", text: "대화 앱 대화 모든 대화", score: 0, at: 0, go: () => useUi.getState().setView("allTalks") });
+	add({ key: "v:talks", group: "화면", label: "대화", text: "대화 앱 대화 모든 대화", score: 0, at: 0, go: () => useUi.getState().setView("talks") });
 	add({ key: "v:claude", group: "화면", label: "Claude 설정", score: 0, at: 0, go: () => useUi.getState().setView("claude") });
 	add({ key: "v:settings", group: "화면", label: "설정", score: 0, at: 0, go: () => useUi.getState().setView("settings") });
 	for (const id of SECTION_IDS) {
@@ -139,25 +162,37 @@ function searchItems(all: Source[], app: Source, q: string): Item[] {
 }
 
 /**
- * Ctrl+K 로 여닫는 이동 창. 모든 프로젝트의 이슈 · 대화 · 산출물과 화면 · 설정 구획으로 바로 간다.
- * 이동만 한다 — 계획 · 승인 같은 이슈 동작은 카드 단추 · 우클릭 · 단축키에 있다.
+ * Ctrl+K 나 제목 줄 단추로 여닫는 명령어 팔레트. 모든 프로젝트의 이슈 · 대화 · 산출물과 화면 · 설정 구획으로 바로 가고, 지금 화면의 동작을 실행한다.
+ * 동작은 등록부에서 읽는다 — 지금 등록된 키와 「더 보기」 메뉴 항목이 곧 「지금 여기서」다.
  * 목록은 알림함 · 사이드바가 이미 읽는 프로젝트별 캐시를 같은 열쇠로 모은 것이라 따로 묻지 않는다. 본문은 보지 않고 번호 · 제목만 본다 — 본문 검색은 보드 검색이 한다.
  */
 export function CommandPalette() {
-	const [open, setOpen] = useState(false);
+	const open = useUi((s) => s.paletteOpen);
+	const setOpen = useUi((s) => s.setPaletteOpen);
 	const [query, setQuery] = useState("");
 	const [active, setActive] = useState(0);
+	/** 한 번 더 누르면 실행될 줄 */
+	const [armed, setArmed] = useState<string | null>(null);
 	const list = useRef<HTMLDivElement>(null);
+	/** 창을 연 자리. Esc 로 닫으면 돌려준다. */
+	const opener = useRef<HTMLElement | null>(null);
+	/** 줄을 골랐는지, 그 줄이 닫힌 뒤에 부를 동작 */
+	const picked = useRef<{ later?: () => void } | null>(null);
 
-	const toggle = (on: boolean) => {
+	// 어느 길로 열어도 여기를 지난다. 렌더 중에 맞춰야 창이 지난 검색어를 비추지 않고, 초점이 입력칸으로 가기 전에 연 자리를 잡는다.
+	const [wasOpen, setWasOpen] = useState(open);
+	if (open !== wasOpen) {
+		setWasOpen(open);
 		// 열 때마다 빈 입력에서 시작한다. 지난 검색어가 남아 있으면 「최근」을 보려고 지워야 한다.
-		if (on) {
+		if (open) {
+			opener.current = document.activeElement as HTMLElement | null;
+			picked.current = null;
 			setQuery("");
 			setActive(0);
 		}
-		setOpen(on);
-	};
-	useKey({ id: "palette", combo: "Mod+K", label: "어디로든 가기", group: "어디서나", run: () => toggle(!open) });
+		setArmed(null);
+	}
+	useKey({ id: "palette", combo: "Mod+K", label: "명령어 팔레트", group: "어디서나", overModal: true, run: () => setOpen(!open) });
 
 	const { data: projects = [] } = useProjects();
 	const issues = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id), ...focusOnly(p.id) })) });
@@ -178,11 +213,21 @@ export function CommandPalette() {
 	useEffect(() => {
 		list.current?.querySelector(`[data-index="${cur}"]`)?.scrollIntoView({ block: "nearest" });
 	}, [cur]);
+	// 다른 줄로 옮기거나 검색어를 바꾸면, 시간이 지나면 처음부터다.
+	useEffect(() => setArmed(null), [cur, query]);
+	useEffect(() => {
+		if (!armed) return;
+		const t = setTimeout(() => setArmed(null), CONFIRM_MS);
+		return () => clearTimeout(t);
+	}, [armed]);
 
 	const pick = (it: Item | undefined) => {
-		if (!it) return;
+		if (!it || it.disabled) return;
+		if (it.twice && armed !== it.key) return setArmed(it.key);
+		picked.current = it.act ? { later: it.go } : {};
+		setArmed(null);
 		setOpen(false);
-		it.go();
+		if (!it.act) it.go();
 	};
 
 	const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -200,10 +245,20 @@ export function CommandPalette() {
 	};
 
 	return (
-		<Dialog open={open} onOpenChange={toggle}>
-			<DialogContent showCloseButton={false} className="pop top-[14vh] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-xl">
-				<DialogTitle className="sr-only">어디로든 가기</DialogTitle>
-				<DialogDescription className="sr-only">모든 프로젝트의 이슈 · 대화 · 산출물 · 화면 · 설정을 번호나 제목으로 찾아 엽니다.</DialogDescription>
+		<Dialog open={open} onOpenChange={setOpen}>
+			<DialogContent
+				showCloseButton={false}
+				onCloseAutoFocus={(e) => {
+					e.preventDefault();
+					const p = picked.current;
+					picked.current = null;
+					if (p) p.later?.();
+					else if (opener.current?.isConnected) opener.current.focus();
+				}}
+				className="pop top-[14vh] translate-y-0 gap-0 overflow-hidden p-0 sm:max-w-xl"
+			>
+				<DialogTitle className="sr-only">명령어 팔레트</DialogTitle>
+				<DialogDescription className="sr-only">모든 프로젝트의 이슈 · 대화 · 산출물 · 화면 · 설정을 번호나 제목으로 찾아 열고, 지금 화면의 동작을 실행합니다.</DialogDescription>
 				<label className="flex h-12 items-center gap-2.5 border-b border-border px-4">
 					<Search className="size-4 shrink-0 text-subtle" />
 					<input
@@ -214,7 +269,7 @@ export function CommandPalette() {
 							setActive(0);
 						}}
 						onKeyDown={onKey}
-						placeholder="#번호 · 제목 · 화면 · 설정"
+						placeholder="#번호 · 제목 · 화면 · 설정 · 동작"
 						role="combobox"
 						aria-expanded
 						aria-controls="palette-list"
@@ -232,19 +287,21 @@ export function CommandPalette() {
 								data-index={n}
 								role="option"
 								aria-selected={n === cur}
+								aria-disabled={it.disabled || undefined}
 								// 마우스가 움직일 때만 고른다. 키로 내려가며 목록이 스크롤될 때 멈춰 있는 포인터 밑의 줄이 골라지면 안 된다.
 								onMouseMove={() => n !== cur && setActive(n)}
 								onClick={() => pick(it)}
-								className={cn("flex h-8 cursor-default items-center gap-2.5 rounded-md px-2.5 text-[13px]", n === cur && "bg-hover")}
+								className={cn("flex h-8 cursor-default items-center gap-2.5 rounded-md px-2.5 text-[13px]", n === cur && "bg-hover", it.disabled && "opacity-50")}
 							>
 								{it.num !== undefined && <span className="mono tabular w-10 shrink-0 text-[12px] text-subtle">#{it.num}</span>}
 								<span className="min-w-0 flex-1 truncate">{it.label}</span>
 								{it.sub && <span className="max-w-[40%] shrink-0 truncate text-[12px] text-subtle">{it.sub}</span>}
+								{armed === it.key ? <span className="shrink-0 text-[12px] font-medium text-danger">한 번 더 Enter</span> : it.combo && <Kbd className="shrink-0">{comboLabel(it.combo)}</Kbd>}
 							</div>
 						</div>
 					))}
 				</div>
-				<div className="border-t border-border px-4 py-2 text-[11.5px] text-subtle">↑↓ 고르기 · Enter 열기 · Esc 닫기</div>
+				<div className="border-t border-border px-4 py-2 text-[11.5px] text-subtle">↑↓ 고르기 · Enter 열기 · 실행 · Esc 닫기</div>
 			</DialogContent>
 		</Dialog>
 	);

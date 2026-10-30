@@ -1,4 +1,5 @@
 import { useEffect, useRef, type RefObject } from "react";
+import { toast } from "sonner";
 import { create } from "zustand";
 
 /**
@@ -8,7 +9,7 @@ import { create } from "zustand";
  */
 
 /** ? 표에서 묶는 순서 그대로다. */
-export const KEY_GROUPS = ["어디서나", "보드", "상세 창"] as const;
+export const KEY_GROUPS = ["어디서나", "보드", "대화", "상세 창"] as const;
 export type KeyGroup = (typeof KEY_GROUPS)[number];
 
 export interface KeyDef {
@@ -33,6 +34,14 @@ export interface KeyDef {
 	inInput?: "allow" | "skip";
 	/** 표에서 한 줄로 묶을 이름. 같은 이름의 키는 「보드 · 대화 · … Ctrl 1–5」처럼 한 줄이 된다. */
 	series?: string;
+	/** Ctrl+K 의 「지금 여기서」에도 싣는다. 동작만 싣는다 — 자리를 옮기는 키는 그 자리에서 눌러야 뜻이 있다. */
+	command?: boolean;
+	/** 등록은 두되 지금은 누를 수 없다. 키는 다음 등록으로 넘어가고 Ctrl+K 에서는 흐리게 보인다. */
+	disabled?: boolean;
+	/** 있으면 CONFIRM_MS 안에 두 번 눌러야 run 을 부른다. 실행을 시작하거나 끝내는 키에 쓴다. key 는 대상(이슈 id)이고, text 는 「한 번 더 누르면 …」의 뒷말이다. */
+	confirm?: { key: string; text: string };
+	/** 창 · 메뉴가 떠 있어도 받는다. 기본은 받지 않는다 — 뒤 화면을 키로 바꾸면 안 된다. 여닫는 키에만 쓴다. */
+	overModal?: boolean;
 	/** false 를 돌려주면 처리하지 않은 것으로 보고 기본 동작을 막지 않는다 — 다음 등록이 받는다. */
 	run: (e: KeyboardEvent) => boolean | void;
 }
@@ -60,6 +69,8 @@ function matches(c: Combo, e: KeyboardEvent, code?: string) {
 	if (c.mod !== (e.ctrlKey || e.metaKey) || c.alt !== e.altKey) return false;
 	if (!shiftFree(c.key) && c.shift !== e.shiftKey) return false;
 	if (code) return e.code === code;
+	// 한글 입력 상태에서는 K 가 「ㅏ」로 온다. 글자가 영문이 아닐 때만 자판 자리로 본다 — 영문 자판 배열이 다른 사람은 글자대로 맞아야 한다.
+	if (/^[a-z]$/i.test(c.key) && !/^[a-z]$/i.test(e.key)) return e.code === `Key${c.key.toUpperCase()}`;
 	return c.key.length === 1 ? e.key.toLowerCase() === c.key.toLowerCase() : e.key === c.key;
 }
 
@@ -84,9 +95,11 @@ interface Entry {
 interface Keys {
 	/** 등록한 순서. 같은 조합이면 나중 것(상세 창 > 보드)이 먼저 받는다. */
 	entries: Entry[];
+	/** 키 없이 Ctrl+K 에만 싣는 동작 목록 */
+	sources: { token: number; list: RefObject<Command[]> }[];
 }
 
-const useKeys = create<Keys>()(() => ({ entries: [] }));
+const useKeys = create<Keys>()(() => ({ entries: [], sources: [] }));
 let nextToken = 0;
 
 function register(def: RefObject<KeyDef>) {
@@ -94,6 +107,26 @@ function register(def: RefObject<KeyDef>) {
 	useKeys.setState((s) => ({ entries: [...s.entries, { token, def }] }));
 	return () => useKeys.setState((s) => ({ entries: s.entries.filter((e) => e.token !== token) }));
 }
+
+/** 두 번 눌러야 하는 키 · 카드 단추가 기다리는 시간. */
+export const CONFIRM_MS = 1500;
+
+let pending: { key: string; at: number } | null = null;
+
+/** 첫 번째면 안내를 띄우고 false, 같은 대상을 시간 안에 다시 눌렀으면 true. 기다리는 것은 하나뿐이라 다른 이슈 · 다른 키를 누르면 처음부터다. */
+export function pressTwice(key: string, text: string) {
+	if (pending?.key === key && Date.now() - pending.at < CONFIRM_MS) {
+		pending = null;
+		toast.dismiss("press-twice");
+		return true;
+	}
+	pending = { key, at: Date.now() };
+	toast(`한 번 더 누르면 ${text}`, { id: "press-twice", duration: CONFIRM_MS });
+	return false;
+}
+
+/** 상세 창은 겹침으로 치지 않는다. 그 위에서 쓰라고 만든 키가 많고, 뒤 화면을 막는 것은 창 자체다. */
+const blocked = () => !!document.querySelector('[role="alertdialog"], [role="menu"], [role="dialog"]:not([data-slot="sheet-content"])');
 
 // 리스너는 하나만 둔다. 컴포넌트마다 window 에 따로 걸면 같은 키를 누가 먼저 받는지 마운트 순서에 맡기게 된다.
 window.addEventListener("keydown", (e) => {
@@ -103,7 +136,15 @@ window.addEventListener("keydown", (e) => {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const d = entries[i].def.current;
 		if (!matches(parse(d.combo), e, d.code)) continue;
+		if (d.disabled) continue;
 		if (d.inInput === "skip" && inTyping(e.target)) continue;
+		if (!d.overModal && blocked()) continue;
+		if (d.confirm) {
+			e.preventDefault();
+			// 누르고 있어 반복되는 입력은 두 번째 누름이 아니다.
+			if (!e.repeat && pressTwice(`${d.id}:${d.confirm.key}`, d.confirm.text)) d.run(e);
+			return;
+		}
 		if (d.run(e) === false) continue;
 		e.preventDefault();
 		return;
@@ -116,6 +157,38 @@ export function useKey(def: KeyDef) {
 	ref.current = def;
 	const on = def.enabled ?? true;
 	useEffect(() => (on ? register(ref) : undefined), [on, def.id, def.combo]);
+}
+
+/** 키 없는 동작 하나. 「더 보기」 메뉴의 항목을 그대로 싣는다(useActionCommands). */
+export interface Command {
+	label: string;
+	/** 오른쪽 흐린 글자. 어디의 동작인지 가른다 — 「지우기」는 이슈에도 대화에도 있다. */
+	sub?: string;
+	disabled?: boolean;
+	onSelect: () => void;
+}
+
+/** 컴포넌트가 마운트되어 있는 동안 그 목록을 Ctrl+K 에 싣는다. 목록은 렌더마다 최신 것을 쓴다. */
+export function useCommands(list: Command[]) {
+	const ref = useRef(list);
+	ref.current = list;
+	useEffect(() => {
+		const token = nextToken++;
+		useKeys.setState((s) => ({ sources: [...s.sources, { token, list: ref }] }));
+		return () => useKeys.setState((s) => ({ sources: s.sources.filter((x) => x.token !== token) }));
+	}, []);
+}
+
+/** Ctrl+K 의 「지금 여기서」. 나중에 등록한 것(상세 창 > 화면)이 위다. 키 있는 동작이 먼저고, 같은 이름의 메뉴 항목은 뺀다. */
+export function activeCommands(): { keys: KeyDef[]; others: Command[] } {
+	const { entries, sources } = useKeys.getState();
+	const keys = entries
+		.map((e) => e.def.current)
+		.filter((d) => d.command && !d.disabled)
+		.reverse();
+	const names = new Set(keys.map((d) => d.label));
+	const others = sources.flatMap((s) => s.list.current).reverse();
+	return { keys, others: others.filter((c) => !names.has(c.label)) };
 }
 
 /** 지금 등록된 키. 표 · 배지 · 툴팁이 읽는다. */

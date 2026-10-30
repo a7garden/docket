@@ -416,6 +416,8 @@ export interface RunRecord {
 	images?: string[];
 	/** 이 실행이 돈 권한. 옛 기록에는 비어 있다. */
 	mode: string;
+	/** 대화 차례가 돈 모드. 이 칸이 생기기 전의 기록에는 없다. */
+	chatMode?: ChatMode;
 	allowed: string[];
 	deniedRules: string[];
 	commands: string[];
@@ -456,10 +458,13 @@ export interface Suggestion {
 export type TitleMode = "firstLine" | "auto" | "manual";
 
 /** 실행이 끝나기를 기다리는 질문 하나. 넣을 때의 읽기 전용 여부와 첨부를 따로 든다. */
+/** 대화 한 차례의 권한. 읽기 전용 · 수동 승인 · 자동 승인 · 권한 무시. */
+export type ChatMode = "read" | "ask" | "auto" | "bypass";
+
 export interface QueuedChat {
 	id: string;
 	text: string;
-	edit: boolean;
+	mode: ChatMode;
 	images: string[];
 	at: number;
 }

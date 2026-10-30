@@ -73,7 +73,7 @@ const ARROWS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
 
 /**
  * ? 표에 적을 보드 키. 키는 초점 간 카드(`IssueCard`) · 보드 그리드 · 검색칸이 직접 받는다 — 어느 카드에 초점이 있는지가 곧 대상이고,
- * C 는 한글 입력 상태에서도 되도록 `e.code` 로 봐야 하는데 등록부는 `e.key` 로 맞춘다. 그래서 여기서는 처리하지 않고(false) 표에만 올린다.
+ * 그래서 여기서는 처리하지 않고(false) 표에만 올린다.
  */
 const BOARD_KEYS: Omit<KeyDef, "group" | "run">[] = [
 	{ id: "board.col.prev", combo: "ArrowLeft", label: "왼쪽 열", series: "board.col" },

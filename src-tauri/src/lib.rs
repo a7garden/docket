@@ -36,6 +36,9 @@ pub fn run() {
 			if let Err(e) = store.recover_interrupted() {
 				eprintln!("끊긴 실행을 정리하지 못함: {e}");
 			}
+			if let Err(e) = store.sweep_blank_talks() {
+				eprintln!("빈 대화를 정리하지 못함: {e}");
+			}
 			runner::note_settings(&store.settings().unwrap_or_default());
 			// 첨부 이미지를 화면에 띄우려면 데이터 폴더를 asset 프로토콜에 연다. DOCKET_HOME 으로 옮겨도 따라가도록 실행 때 연다.
 			app.asset_protocol_scope().allow_directory(&store.root, true)?;

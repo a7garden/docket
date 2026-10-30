@@ -13,7 +13,7 @@ if (import.meta.env.DEV) {
 	const ui = useUi.getState();
 	const view = q.get("view");
 	if (q.get("project")) ui.setProject(q.get("project"));
-	if (view === "board" || view === "deliverables" || view === "talks" || view === "allTalks" || view === "knowledge" || view === "glossary" || view === "claude" || view === "settings") ui.setView(view);
+	if (view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary" || view === "claude" || view === "settings") ui.setView(view);
 	if (q.get("issue")) ui.openIssue(q.get("issue"));
 	if (q.get("talk")) ui.openTalk({ projectId: useUi.getState().projectId ?? "", id: q.get("talk")! });
 	if (q.get("deliverable")) ui.openDeliverable(q.get("deliverable"));

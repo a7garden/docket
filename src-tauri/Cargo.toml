@@ -1,6 +1,6 @@
 [package]
 name = "docket"
-version = "0.2.6"
+version = "0.2.7"
 description = "포스트잇처럼 적은 개발 이슈를 Claude 가 계획하고 구현하는 작업대"
 authors = ["a7garden"]
 license = "MIT"

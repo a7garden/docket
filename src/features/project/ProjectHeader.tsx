@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { BookA, BookMarked, Check, ChevronRight, Copy, FileStack, FolderOpen, FolderPlus, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink, X } from "lucide-react";
 import { toast } from "sonner";
-import { type ActionList, attempt, copy, DropdownActions } from "@/components/ActionMenu";
+import { type ActionList, attempt, copy, DropdownActions, useActionCommands } from "@/components/ActionMenu";
 import { Label } from "@/components/bits";
 import { KeyTip } from "@/components/KeyTip";
 import { Button } from "@/components/ui/button";
@@ -21,12 +21,11 @@ import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
- * 프로젝트 머리의 화면 탭. Ctrl+1~5 가 이 순서를 그대로 따른다 — 숫자가 곧 탭 자리다.
- * 탭 순서를 바꾸면 키 숫자도 함께 바뀐다.
+ * 프로젝트 머리의 화면 탭. Ctrl+1~4 가 이 순서를 그대로 따른다 — 숫자가 곧 탭 자리다.
+ * 탭 순서를 바꾸면 키 숫자도 함께 바뀐다. 대화는 프로젝트 탭이 아니라 사이드바 「대화」(Ctrl+5)다.
  */
 export const PROJECT_TABS: [View, string][] = [
 	["board", "보드"],
-	["talks", "대화"],
 	["deliverables", "산출물"],
 	["knowledge", "지식베이스"],
 	["glossary", "어휘 사전"],
@@ -36,20 +35,29 @@ export const PROJECT_TABS: [View, string][] = [
 export function goProject(id: string, view?: View) {
 	const ui = useUi.getState();
 	if (ui.projectId !== id) ui.setProject(id);
-	// 프로젝트 머리는 보드 · 대화 · 산출물 · 지식베이스 · 어휘 사전에만 있다. Claude 설정 · 설정 화면에서 불렀으면 보드로 간다.
-	const next = view ?? (ui.view === "talks" || ui.view === "deliverables" || ui.view === "knowledge" || ui.view === "glossary" ? ui.view : "board");
+	// 프로젝트 머리는 보드 · 산출물 · 지식베이스 · 어휘 사전에만 있다. 대화 · Claude 설정 · 설정 화면에서 불렀으면 보드로 간다.
+	const next = view ?? (ui.view === "deliverables" || ui.view === "knowledge" || ui.view === "glossary" ? ui.view : "board");
 	if (ui.view !== next) ui.setView(next);
+}
+
+/** 그 프로젝트를 고른 채 「대화」 화면으로 간다. 묶음을 펴고, 다른 자리의 대화가 열려 있으면 비워 그 프로젝트의 최근 대화가 열리게 한다. */
+export function goTalks(id: string) {
+	const ui = useUi.getState();
+	if (ui.projectId !== id) ui.setProject(id);
+	if (useUi.getState().talk?.projectId !== id) ui.openTalk(null);
+	ui.setFold(id, false);
+	ui.setView("talks");
 }
 
 /**
  * 프로젝트 메뉴. 머리의 「프로젝트 메뉴」와 사이드바 우클릭이 같이 쓴다.
- * `nav` 는 사이드바에서만 켠다 — 머리에는 보드 · 대화 · 산출물 · 지식베이스 · 어휘 사전 칸이 이미 있다.
+ * `nav` 는 사이드바에서만 켠다 — 머리에는 보드 · 산출물 · 지식베이스 · 어휘 사전 칸이 이미 있다.
  */
 export function projectActions(project: Project, nav = false): ActionList {
 	const ui = () => useUi.getState();
 	return [
 		nav && { label: "보드", icon: <LayoutGrid />, onSelect: () => goProject(project.id, "board") },
-		nav && { label: "대화", icon: <MessagesSquare />, onSelect: () => goProject(project.id, "talks") },
+		nav && { label: "대화", icon: <MessagesSquare />, onSelect: () => goTalks(project.id) },
 		nav && { label: "산출물", icon: <FileStack />, onSelect: () => goProject(project.id, "deliverables") },
 		nav && { label: "지식베이스", icon: <Library />, onSelect: () => goProject(project.id, "knowledge") },
 		nav && { label: "어휘 사전", icon: <BookA />, onSelect: () => goProject(project.id, "glossary") },
@@ -75,6 +83,7 @@ export function ProjectHeader({ project }: { project: Project }) {
 	const editing = useUi((s) => s.editingProjectId === project.id);
 	const editProject = useUi((s) => s.editProject);
 	const notices = useNoticeCounts()(project.id);
+	useActionCommands(projectActions(project), project.name);
 	return (
 		<header className="flex items-center gap-4">
 			<div className="min-w-0">

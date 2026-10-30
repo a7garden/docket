@@ -394,8 +394,8 @@ pub async fn issue_merge(app: AppHandle, project_id: String, issue_id: String) -
 }
 
 #[tauri::command]
-pub fn issue_chat(app: AppHandle, project_id: String, issue_id: String, text: String, edit: bool, images: Option<Vec<String>>) -> Result<IssueView> {
-	runner::chat(&app, &project_id, &issue_id, text, edit, images.unwrap_or_default())
+pub fn issue_chat(app: AppHandle, project_id: String, issue_id: String, text: String, mode: ChatMode, images: Option<Vec<String>>) -> Result<IssueView> {
+	runner::chat(&app, &project_id, &issue_id, text, mode, images.unwrap_or_default())
 }
 
 /// 대기열에서 질문 하나를 뺀다. 고치려고 입력칸으로 되돌릴 때는 첨부를 남기고(keep_files), 그냥 뺄 때는 첨부 폴더에서도 치운다.

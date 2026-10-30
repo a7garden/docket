@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Copy, ExternalLink, FolderOpen } from "lucide-react";
 import { toast } from "sonner";
 import { api, errorText } from "@/lib/api";
+import { useCommands } from "@/lib/keys";
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from "./ui/context-menu";
 import { DropdownMenuItem, DropdownMenuSeparator } from "./ui/dropdown-menu";
 
@@ -30,6 +31,11 @@ function tidy(list: ActionList): (Action | "sep")[] {
 	}
 	if (out[out.length - 1] === "sep") out.pop();
 	return out;
+}
+
+/** 메뉴의 항목을 Ctrl+K 에도 싣는다. 목록을 하나만 두어 메뉴와 Ctrl+K 가 어긋나지 않게 한다. `sub` 는 어디의 동작인지 보이는 글자다. */
+export function useActionCommands(items: ActionList, sub: string) {
+	useCommands(tidy(items).flatMap((a) => (a === "sep" ? [] : [{ label: a.label, sub, disabled: a.disabled, onSelect: a.onSelect }])));
 }
 
 /** 드롭다운 안에 넣는다. 단추 · 메뉴 틀은 부르는 곳이 정한다. */

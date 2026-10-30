@@ -36,7 +36,7 @@ function rowsOf(defs: KeyDef[]): Row[] {
 		}
 	}
 	return order.map((o) => {
-		if (typeof o !== "string") return { label: o.label, keys: comboLabel(o.combo) };
+		if (typeof o !== "string") return { label: o.label, keys: o.confirm ? `${comboLabel(o.combo)} 두 번` : comboLabel(o.combo) };
 		const ds = series.get(o)!;
 		return { label: ds.map((d) => d.label).join(" · "), keys: joinKeys(ds.map((d) => comboLabel(d.combo))) };
 	});
@@ -46,7 +46,7 @@ function rowsOf(defs: KeyDef[]): Row[] {
 export function KeyHelp() {
 	const [open, setOpen] = useState(false);
 	const defs = useActiveKeys();
-	useKey({ id: "help", combo: "?", label: "이 표 열기 · 닫기", group: "어디서나", inInput: "skip", run: () => setOpen((o) => !o) });
+	useKey({ id: "help", combo: "?", label: "단축키 표 열기 · 닫기", group: "어디서나", inInput: "skip", overModal: true, command: true, run: () => setOpen((o) => !o) });
 
 	return (
 		<Dialog open={open} onOpenChange={setOpen}>

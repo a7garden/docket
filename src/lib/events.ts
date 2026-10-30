@@ -35,7 +35,7 @@ export function useDocketEvents() {
 				// 옆 칸에 띄워 둔 대화는 어느 화면에서든 보고 있는 것이다.
 				const open = payload.talk
 					? (ui.dock.open && ui.dock.talk?.id === payload.id) ||
-						((ui.view === "talks" || ui.view === "allTalks") && ui.talk?.id === payload.id)
+						(ui.view === "talks" && ui.talk?.id === payload.id)
 					: ui.issueId === payload.id;
 				if (!finished) return;
 				const name = payload.talk ? `${payload.projectId === GLOBAL_PID ? "앱 대화" : "대화"} · ${payload.title || "새 대화"}` : `#${payload.number} ${payload.title}`;

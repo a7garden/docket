@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { primaryAction, primaryItem, useIssueActions } from "@/features/issue/issueActions";
 import { errorText } from "@/lib/api";
 import { relTime } from "@/lib/format";
+import { CONFIRM_MS, pressTwice } from "@/lib/keys";
 import { needsDecision, stateOf } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
 import type { Issue } from "@/lib/types";
@@ -76,9 +77,6 @@ function Marked({ text, words }: { text: string; words: string[] }) {
 		</>
 	);
 }
-
-/** 실행 중 카드의 Ctrl+Enter 는 이 안에 한 번 더 눌러야 멈춘다. 키 한 번에 돌던 구현이 멈추면 안 된다. */
-const STOP_CONFIRM_MS = 1500;
 
 export function IssueCard({
 	issue,
@@ -155,21 +153,21 @@ export function IssueCard({
 		issue.run || (!issue.error && ((issue.status === "planned" && questions === 0) || issue.status === "review" || (issue.status === "inbox" && !waitingAuto)))
 			? primary
 			: null;
+	// 첫 번째 누름 뒤 기다리는 동안 단추를 붉게 켠다.
 	const [armed, setArmed] = useState(0);
 	useEffect(() => {
 		if (!armed) return;
-		const t = setTimeout(() => setArmed(0), STOP_CONFIRM_MS);
+		const t = setTimeout(() => setArmed(0), CONFIRM_MS);
 		return () => clearTimeout(t);
 	}, [armed]);
 	const pressKey = () => {
 		if (!button || busy || button.disabled) return;
-		if (issue.run && !armed) {
+		// 키 한 번에 돌던 구현이 멈추면 안 된다.
+		if (issue.run && !pressTwice(`stop:${issue.id}`, issue.run.phase === "queued" ? "줄에서 뺍니다" : "중지합니다")) {
 			setArmed(Date.now());
-			toast(`한 번 더 누르면 ${issue.run.phase === "queued" ? "줄에서 뺍니다" : "중지합니다"}`, { id: `stop:${issue.id}`, duration: STOP_CONFIRM_MS });
 			return;
 		}
 		setArmed(0);
-		toast.dismiss(`stop:${issue.id}`);
 		void act(button.call);
 	};
 	// 키보드로 초점이 간 카드에서만 주 단추에 테두리를 켠다. 「Ctrl+Enter 가 이 단추를 누른다」는 표시다.

@@ -1,8 +1,7 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
-import { type QueryClient, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FolderPlus } from "lucide-react";
-import { toast } from "sonner";
 import { CommandPalette } from "@/components/CommandPalette";
 import { KeyBadges } from "@/components/KeyBadges";
 import { KeyHelp } from "@/components/KeyHelp";
@@ -17,14 +16,15 @@ import { goProject, PROJECT_TABS, ProjectHeader } from "@/features/project/Proje
 import { Settings } from "@/features/settings/Settings";
 import { UpdateConfirm } from "@/features/settings/UpdateConfirm";
 import { DockPane } from "@/features/talk/DockPane";
-import { Talks } from "@/features/talk/Talks";
+import { AllTalks } from "@/features/talk/AllTalks";
+import { toggleDock } from "@/lib/dock";
 import { useDocketEvents } from "@/lib/events";
 import { useKey } from "@/lib/keys";
 import { useDockLayout } from "@/lib/layout";
+import { focusInput, stepRegion } from "@/lib/regions";
 import { useUpdater } from "@/lib/updater";
-import { qk, useAppInfo, useProjects, useSettings } from "@/lib/queries";
+import { useAppInfo, useProjects, useSettings } from "@/lib/queries";
 import { useUi, type View } from "@/lib/store";
-import { GLOBAL_PID, type Issue } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // 첫 화면(보드 · 대화) 밖의 화면은 따로 묶어 늦게 불러온다. 첫 화면이 그려진 뒤 한가할 때 미리 받아 두므로 처음 열 때도 거의 기다리지 않는다.
@@ -34,13 +34,11 @@ const screens = {
 	Deliverables: () => import("@/features/deliverables/Deliverables").then((m) => ({ default: m.Deliverables })),
 	Glossary: () => import("@/features/glossary/Glossary").then((m) => ({ default: m.Glossary })),
 	Knowledge: () => import("@/features/knowledge/Knowledge").then((m) => ({ default: m.Knowledge })),
-	AllTalks: () => import("@/features/talk/AllTalks").then((m) => ({ default: m.AllTalks })),
 };
 const ClaudeConfig = lazy(screens.ClaudeConfig);
 const Deliverables = lazy(screens.Deliverables);
 const Glossary = lazy(screens.Glossary);
 const Knowledge = lazy(screens.Knowledge);
-const AllTalks = lazy(screens.AllTalks);
 
 function preloadScreens() {
 	const go = () => Object.values(screens).forEach((load) => void load().catch(() => {}));
@@ -100,30 +98,18 @@ function GlobalKeys() {
 	useKey({ id: "project.prev", combo: "Mod+Alt+ArrowUp", label: "이전 프로젝트", group: "어디서나", series: "project", run: () => step(-1) });
 	useKey({ id: "project.next", combo: "Mod+Alt+ArrowDown", label: "다음 프로젝트", group: "어디서나", series: "project", run: () => step(1) });
 	useKey({ id: "view.settings", combo: "Mod+,", label: "설정", group: "어디서나", run: () => setView("settings") });
-	useKey({ id: "dock.toggle", combo: "Mod+J", label: "옆 칸 대화 열고 닫기", group: "어디서나", run: () => toggleDock(qc) });
+	useKey({ id: "dock.toggle", combo: "Mod+J", label: "옆 칸 대화 열고 닫기", group: "어디서나", command: true, run: () => toggleDock(qc) });
+	useKey({ id: "region.next", combo: "F6", label: "다음 구역", group: "어디서나", series: "region", run: () => stepRegion(1) });
+	useKey({ id: "region.prev", combo: "Shift+F6", label: "이전 구역", group: "어디서나", series: "region", run: () => stepRegion(-1) });
+	useKey({ id: "region.input", combo: "Mod+L", label: "이 구역의 입력칸으로", group: "어디서나", run: () => focusInput() });
 	return (
 		<>
 			{PROJECT_TABS.map(([v, label], i) => (
 				<ViewKey key={v} view={v} label={label} n={i + 1} />
 			))}
+			<ViewKey view="talks" label="대화" n={PROJECT_TABS.length + 1} />
 		</>
 	);
-}
-
-/**
- * 옆 칸을 열고 닫는다. 닫았다 열면 마지막 대화가 다시 뜬다. 띄운 적이 없으면 지금 프로젝트의 가장 최근 대화를,
- * 그것도 없으면 가장 최근 앱 대화를 띄운다. 둘 다 없으면 대화 탭으로 가 고르게 한다.
- */
-function toggleDock(qc: QueryClient) {
-	const { dock, setDock, dockTalk, setView, projectId } = useUi.getState();
-	if (dock.open && dock.talk) return setDock({ open: false });
-	if (dock.talk) return setDock({ open: true });
-	for (const pid of [projectId, GLOBAL_PID]) {
-		const recent = pid ? qc.getQueryData<Issue[]>(qk.talks(pid))?.[0] : undefined;
-		if (recent && pid) return dockTalk({ projectId: pid, id: recent.id });
-	}
-	setView("talks");
-	toast("띄울 대화를 고르세요", { description: "대화 머리의 「옆에 띄우기」로 띄웁니다" });
 }
 
 function ViewKey({ view, label, n }: { view: View; label: string; n: number }) {
@@ -147,7 +133,7 @@ export default function App() {
 		if (projects && !project && projects.length) setProject(projects[0].id);
 	}, [projects, project, setProject]);
 
-	const projectView = view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary";
+	const projectView = view === "board" || view === "deliverables" || view === "knowledge" || view === "glossary";
 	const dock = useUi((s) => s.dock.side);
 	const { rail } = useDockLayout();
 	return (
@@ -161,11 +147,9 @@ export default function App() {
 				<Sidebar rail={rail} />
 				{/* 사이드바는 늘 맨 왼쪽이다. 옆 칸 대화는 본문의 오른쪽 또는 왼쪽 칸이고, 좌우를 바꾸면 이 줄의 순서만 뒤집는다. */}
 				<div className={cn("flex min-w-0 flex-1", dock === "left" && "flex-row-reverse")}>
-					<main className="flex min-w-0 flex-1 flex-col gap-5 px-6 pt-5 pb-4">
-						{view === "allTalks" ? (
-							<Later>
-								<AllTalks />
-							</Later>
+					<main data-region="main" className="flex min-w-0 flex-1 flex-col gap-5 px-6 pt-5 pb-4">
+						{view === "talks" ? (
+							<AllTalks />
 						) : view === "claude" ? (
 							<>
 								<h1 className="text-[18px] font-semibold tracking-[-0.02em]">Claude 설정</h1>
@@ -183,8 +167,6 @@ export default function App() {
 								<ProjectHeader project={project} />
 								{view === "board" ? (
 									<Board project={project} />
-								) : view === "talks" ? (
-									<Talks pid={project.id} path={project.path} />
 								) : (
 									<Later>
 										{view === "knowledge" ? (

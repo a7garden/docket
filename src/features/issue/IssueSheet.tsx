@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, CornerDownRight, MoreHorizontal, RotateCcw, Undo2, X } from "lucide-react";
 import { toast } from "sonner";
-import { DropdownActions } from "@/components/ActionMenu";
+import { DropdownActions, useActionCommands } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
 import { KeyTip } from "@/components/KeyTip";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
 import { useBoardNeighbor } from "../board/boardFocus";
 import { totals } from "../board/IssueCard";
 import { ChangesTab } from "./ChangesTab";
+import { runChatMode } from "@/lib/chatMode";
 import { ChatComposer, ChatTab, type Draft, NO_DRAFT, SessionBar, useSendKey, useTranscript } from "./ChatTab";
 import { HistoryTab } from "./HistoryTab";
 import { RevertConfirm, useIssueActions } from "./issueActions";
@@ -42,9 +43,6 @@ const TABS: [Tab, string][] = [
 	["changes", "변경"],
 	["history", "기록"],
 ];
-
-/** 확인 창이 떠 있으면 창 뒤의 이슈 · 탭을 바꾸지 않는다. */
-const confirming = () => !!document.querySelector('[role="alertdialog"]');
 
 function tabFor(i: Issue): Tab {
 	if (i.run?.kind === "chat") return "chat";
@@ -67,6 +65,7 @@ export function IssueSheet({ project }: { project: Project }) {
 		<Sheet open={!!issue} onOpenChange={(o) => !o && openIssue(null)} modal={beside.modal}>
 			<SheetContent
 				side="right"
+				data-region="sheet"
 				showCloseButton={false}
 				onInteractOutside={beside.onInteractOutside}
 				// 열리자마자 첫 단추(더 보기)에 초점 테두리가 생기면 부차적인 메뉴가 가장 먼저 눈에 띈다. 창 자체에 초점을 둔다.
@@ -174,9 +173,10 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 	useEffect(() => setAnswers(NO_ANSWERS), [issue.plan?.runId]);
 	for (const [i, [v, label]] of TABS.entries()) {
 		// 목록이 고정이라 훅 순서가 바뀌지 않는다. 숫자 패드의 Alt 조합은 Windows 의 Alt 코드 입력이라 숫자 줄만 받는다.
-		useKey({ id: `issue.tab.${v}`, combo: `Alt+${i + 1}`, code: `Digit${i + 1}`, label, group: "상세 창", series: "issue.tab", run: () => !confirming() && (setTab(v), true) });
+		useKey({ id: `issue.tab.${v}`, combo: `Alt+${i + 1}`, code: `Digit${i + 1}`, label, group: "상세 창", series: "issue.tab", run: () => setTab(v) });
 	}
 	const count: Partial<Record<Tab, number>> = { chat: chats, changes: t.files };
+	const flow = useIssueFlow(issue, answers, tab, setTab);
 
 	return (
 		<div className="flex h-full min-h-0 flex-col">
@@ -234,7 +234,7 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 			</Tabs>
 
 			<ErrorBar issue={issue} />
-			{tab === "chat" ? <ChatComposer issue={issue} draft={draft} onDraft={setDraft} /> : <ActionBar issue={issue} answers={answers} />}
+			{tab === "chat" ? <ChatComposer issue={issue} draft={draft} onDraft={setDraft} /> : <ActionBar issue={issue} flow={flow} />}
 		</div>
 	);
 }
@@ -252,10 +252,10 @@ function retry(issue: Issue) {
 	const last = [...issue.history].reverse().find((h) => ["plan", "replan", "approve", "rework", "chat", "revert"].includes(h.kind));
 	const { projectId: p, id } = issue;
 	switch (last?.kind) {
-		// 흐름에는 앞 300자만 남는다. 긴 질문이었다면 대화 탭의 원문을 다시 보낸다. 읽기 전용이었는지는 그때 권한 이름으로 안다.
+		// 흐름에는 앞 300자만 남는다. 긴 질문이었다면 대화 탭의 원문을 다시 보낸다. 권한은 그 차례의 모드를 그대로 쓴다.
 		case "chat": {
 			const prev = [...issue.runs].reverse().find((r) => r.kind === "chat");
-			return api.issueChat(p, id, prev?.prompt || last.text, !prev?.mode.startsWith("읽기"));
+			return api.issueChat(p, id, prev?.prompt || last.text, prev ? runChatMode(prev) : "auto");
 		}
 		case "replan":
 			return api.issuePlan(p, id, last.text);
@@ -307,7 +307,7 @@ function followDraft(issue: Issue) {
 /** 「후속 메모」 단추. 결과 확인 · 완료 · 보류 칸에 둔다 — 그 전 단계는 이 메모를 고치면 된다. */
 function FollowButton({ issue, disabled, onAsk }: { issue: Issue; disabled: boolean; onAsk: (a: Ask) => void }) {
 	return (
-		<Button variant="outline" disabled={disabled} title="이 메모에서 이어지는 새 메모를 만듭니다. 이 메모는 그대로 둡니다." onClick={() => onAsk({ kind: "follow", text: followDraft(issue) })}>
+		<Button variant="outline" disabled={disabled} title="이 메모에서 이어지는 새 메모를 만듭니다. 이 메모는 그대로 둡니다." {...keyAnchor("issue.follow")} onClick={() => onAsk({ kind: "follow", text: followDraft(issue) })}>
 			<CornerDownRight />
 			후속 메모
 		</Button>
@@ -323,6 +323,9 @@ function IssueLinks({ issue }: { issue: Issue }) {
 	const openIssue = useUi((s) => s.openIssue);
 	const prior = issue.follows ? issues?.find((i) => i.id === issue.follows?.id) : undefined;
 	const next = (issues ?? []).filter((i) => i.follows?.id === issue.id).sort((a, b) => a.number - b.number);
+	// 갈 곳이 없어도 키는 받는다. 넘기면 Alt ← 가 웹뷰의 뒤로 가기가 된다.
+	useKey({ id: "issue.prior", combo: "Alt+ArrowLeft", label: "앞선 메모", group: "상세 창", series: "issue.link", inInput: "skip", run: () => prior && openKeeping(prior.id) });
+	useKey({ id: "issue.follower", combo: "Alt+ArrowRight", label: "후속 메모로 가기", group: "상세 창", series: "issue.link", inInput: "skip", run: () => next[0] && openKeeping(next[0].id) });
 	if (!issue.follows && next.length === 0) return null;
 	const link = "rounded-sm text-subtle hover:text-foreground";
 	return (
@@ -352,26 +355,17 @@ function IssueLinks({ issue }: { issue: Issue }) {
 	);
 }
 
-function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
+/**
+ * 아래 칸의 상태와 동작, 그 키. 아래 칸은 대화 탭에서 그려지지 않아 거기 두면 대화 탭에서 키가 듣지 않으므로 상세 창에 둔다.
+ * 입력칸을 여는 키는 대화 탭에서 눌러도 아래 칸이 보이는 탭으로 옮긴다. 실행을 시작 · 끝내는 키는 두 번 눌러야 하고, 이슈 동작 키는 글을 쓰는 중에는 받지 않는다.
+ */
+function useIssueFlow(issue: Issue, answers: Answers, tab: Tab, setTab: (t: Tab) => void) {
 	const [ask, setAsk] = useState<Ask>(null);
 	const [busy, setBusy] = useState(false);
-	const activity = useLive((s) => (issue.run ? s.byTarget[issue.id]?.activity : undefined));
+	const [once, setOnce] = useState(false);
 	const { projectId: p, id } = issue;
 	const questions = issue.plan?.questions ?? [];
 	const answered = answeredCount(questions, answers);
-	// 프로젝트가 「편집 · 허용 목록」일 때만 고른다. 「모두 허용」 프로젝트에서는 늘 모두 허용이다.
-	const { data: projects } = useProjects();
-	const limited = projects?.find((x) => x.id === p)?.implMode !== "bypassPermissions";
-	const [once, setOnce] = useState(false);
-	const allowOnce = limited && (
-		<label
-			className="flex items-center gap-2 text-[12.5px] text-muted-foreground"
-			title="이번 구현만 명령 · 웹 · 스킬을 묻지 않고 허용합니다. 거부 목록은 지킵니다. 프로젝트 설정은 바뀌지 않습니다."
-		>
-			<Switch size="sm" checked={once} onCheckedChange={setOnce} />
-			이번만 모두 허용
-		</label>
-	);
 
 	const go = async (fn: () => Promise<unknown>) => {
 		setBusy(true);
@@ -390,7 +384,6 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 			setAsk(null);
 		});
 	};
-	const sendKey = useSendKey();
 
 	// 답이 없으면 「묻지 말고 승인」이다. 단추로는 누를 수 있어도 단축키로는 부르지 않는다 — 키 한 번에 구현이 시작되면 안 된다.
 	const implementWithAnswers = () => void go(() => (answered ? api.issueApprove(p, id, answersText(questions, answers), once) : api.issueApprove(p, id, undefined, once)));
@@ -398,12 +391,13 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 
 	// 계획의 질문에 답한 뒤 Ctrl+Enter 는 다시 계획, Ctrl+Shift+Enter 는 답대로 구현이다.
 	// 질문 칸에서 맨 Enter 는 이미 「다음 질문」이라 보내기 키 설정과 상관없이 Ctrl 조합으로 둔다.
-	const hotkeys = !issue.run && !ask && issue.status === "planned" && questions.length > 0;
+	// 대화 탭에서는 켜지 않는다. 그 탭의 Ctrl+Enter 는 대화 보내기다.
+	const hotkeys = !issue.run && !ask && tab !== "chat" && issue.status === "planned" && questions.length > 0;
 	const answerKey = (e: KeyboardEvent) => {
 		if (e.repeat || e.defaultPrevented) return false;
-		// 메모 편집기 · 제목 칸에서 누른 키는 그 칸의 것이다. 메모를 고치다 계획이 돌면 안 된다. 확인 창이 떠 있을 때도 넘긴다.
+		// 메모 편집기 · 제목 칸에서 누른 키는 그 칸의 것이다. 메모를 고치다 계획이 돌면 안 된다.
 		const t = e.target as HTMLElement | null;
-		if (t?.closest(".cm-editor, input") || document.querySelector('[role="alertdialog"]')) return false;
+		if (t?.closest(".cm-editor, input")) return false;
 		return !busy && answered > 0;
 	};
 	useKey({
@@ -423,15 +417,99 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 		run: (e) => answerKey(e) && (implementWithAnswers(), true),
 	});
 
-	const bar = "flex items-center gap-2 border-t border-border px-6 py-3.5";
+	const idle = !issue.run && !ask;
+	const opening = (a: Ask) => {
+		if (tab === "chat") setTab(tabFor(issue));
+		setAsk(a);
+	};
+	const noQuestions = questions.length === 0;
+	const canRework = idle && (issue.status === "review" || (issue.status === "planned" && noQuestions));
+	const action = { group: "상세 창", inInput: "skip", command: true, disabled: busy } as const;
+	useKey({
+		...action,
+		id: "issue.follow",
+		combo: "Alt+F",
+		label: "후속 메모 쓰기",
+		enabled: idle && (issue.status === "review" || issue.status === "done" || issue.status === "dropped"),
+		run: () => opening({ kind: "follow", text: followDraft(issue) }),
+	});
+	useKey({
+		...action,
+		id: "issue.ask",
+		combo: "Alt+R",
+		label: issue.status === "review" ? "수정 요청" : "다시 계획",
+		enabled: canRework,
+		run: () => opening({ kind: issue.status === "review" ? "rework" : "replan", text: "" }),
+	});
+	useKey({
+		...action,
+		id: "issue.plan",
+		combo: "Alt+P",
+		label: "계획 세우기",
+		enabled: idle && issue.status === "inbox" && !!issue.note.trim(),
+		run: (e) => void (e.repeat || go(() => api.issuePlan(p, id))),
+	});
+	// 답하지 않은 질문이 남았으면 받지 않는다. 「묻지 말고 승인」은 단추로만 누른다.
+	useKey({
+		...action,
+		id: "issue.approve",
+		combo: "Alt+A",
+		label: noQuestions ? "승인하고 구현" : "답대로 구현",
+		enabled: idle && issue.status === "planned" && (noQuestions || answered > 0),
+		confirm: { key: id, text: "구현을 시작합니다" },
+		run: implementWithAnswers,
+	});
+	useKey({
+		...action,
+		id: "issue.finish",
+		combo: "Alt+D",
+		label: issue.worktree ? "반영" : "완료",
+		enabled: idle && issue.status === "review",
+		confirm: { key: id, text: issue.worktree ? "본 작업트리에 반영합니다" : "완료합니다" },
+		run: () => void go(() => (issue.worktree ? api.issueMerge(p, id) : api.issueComplete(p, id))),
+	});
+	useKey({
+		...action,
+		id: "issue.stop",
+		combo: "Alt+S",
+		label: issue.run?.phase === "queued" ? "줄에서 빼기" : "중지",
+		enabled: !!issue.run,
+		confirm: { key: id, text: issue.run?.phase === "queued" ? "줄에서 뺍니다" : "중지합니다" },
+		run: () => void go(() => api.issueStop(p, id)),
+	});
+
+	return { ask, setAsk, busy, go, send, once, setOnce, implementWithAnswers, replanWithAnswers, questions, answered };
+}
+
+function ActionBar({ issue, flow }: { issue: Issue; flow: ReturnType<typeof useIssueFlow> }) {
+	const { ask, setAsk, busy, go, send, once, setOnce, implementWithAnswers, replanWithAnswers, questions, answered } = flow;
+	const activity = useLive((s) => (issue.run ? s.byTarget[issue.id]?.activity : undefined));
+	const { projectId: p, id } = issue;
+	// 프로젝트가 「편집 · 허용 목록」일 때만 고른다. 「모두 허용」 프로젝트에서는 늘 모두 허용이다.
+	const { data: projects } = useProjects();
+	const limited = projects?.find((x) => x.id === p)?.implMode !== "bypassPermissions";
+	const allowOnce = limited && (
+		<label
+			className="flex items-center gap-2 text-[12.5px] text-muted-foreground"
+			title="이번 구현만 명령 · 웹 · 스킬을 묻지 않고 허용합니다. 거부 목록은 지킵니다. 프로젝트 설정은 바뀌지 않습니다."
+		>
+			<Switch size="sm" checked={once} onCheckedChange={setOnce} />
+			이번만 모두 허용
+		</label>
+	);
+	const sendKey = useSendKey();
+
+	const bar ="flex items-center gap-2 border-t border-border px-6 py-3.5";
 
 	if (issue.run) {
 		return (
 			<div className={bar}>
 				<span className="min-w-0 flex-1 truncate text-[12.5px] text-subtle">{issue.run.phase === "queued" ? issue.run.waitFor || "앞선 작업을 기다리는 중" : activity}</span>
-				<Button variant="outline" disabled={busy} onClick={() => void go(() => api.issueStop(p, id))}>
-					중지
-				</Button>
+				<KeyTip id="issue.stop">
+					<Button variant="outline" disabled={busy} onClick={() => void go(() => api.issueStop(p, id))} {...keyAnchor("issue.stop")}>
+						중지
+					</Button>
+				</KeyTip>
 			</div>
 		);
 	}
@@ -473,9 +551,11 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 						보류
 					</Button>
 					<div className="flex-1" />
-					<Button disabled={busy || !issue.note.trim()} onClick={() => void go(() => api.issuePlan(p, id))}>
-						계획 세우기
-					</Button>
+					<KeyTip id="issue.plan">
+						<Button disabled={busy || !issue.note.trim()} onClick={() => void go(() => api.issuePlan(p, id))} {...keyAnchor("issue.plan")}>
+							계획 세우기
+						</Button>
+					</KeyTip>
 				</div>
 			);
 		case "planned":
@@ -492,7 +572,7 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 								{answered}/{questions.length} 답함
 							</span>
 							{/* 답이 정해졌으면 계획을 다시 세우지 않고 답을 지시로 붙여 바로 구현할 수도 있다. 답이 없으면 그냥 승인이다. */}
-							<Button variant="outline" disabled={busy} onClick={implementWithAnswers}>
+							<Button variant="outline" disabled={busy} onClick={implementWithAnswers} {...keyAnchor("issue.approve")}>
 								{answered ? "답대로 구현" : "묻지 말고 승인"}
 								{answered > 0 && <Kbd className="ml-1">Ctrl ⇧ ↵</Kbd>}
 							</Button>
@@ -503,12 +583,16 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 						</>
 					) : (
 						<>
-							<Button variant="outline" disabled={busy} onClick={() => setAsk({ kind: "replan", text: "" })}>
-								다시 계획
-							</Button>
-							<Button disabled={busy} onClick={() => void go(() => api.issueApprove(p, id, undefined, once))}>
-								승인하고 구현
-							</Button>
+							<KeyTip id="issue.ask">
+								<Button variant="outline" disabled={busy} onClick={() => setAsk({ kind: "replan", text: "" })} {...keyAnchor("issue.ask")}>
+									다시 계획
+								</Button>
+							</KeyTip>
+							<KeyTip id="issue.approve">
+								<Button disabled={busy} onClick={() => void go(() => api.issueApprove(p, id, undefined, once))} {...keyAnchor("issue.approve")}>
+									승인하고 구현
+								</Button>
+							</KeyTip>
 						</>
 					)}
 				</div>
@@ -519,18 +603,22 @@ function ActionBar({ issue, answers }: { issue: Issue; answers: Answers }) {
 					<RevertButton issue={issue} disabled={busy} />
 					<div className="flex-1" />
 					<FollowButton issue={issue} disabled={busy} onAsk={setAsk} />
-					<Button variant="outline" disabled={busy} onClick={() => setAsk({ kind: "rework", text: "" })}>
-						수정 요청
-					</Button>
+					<KeyTip id="issue.ask">
+						<Button variant="outline" disabled={busy} onClick={() => setAsk({ kind: "rework", text: "" })} {...keyAnchor("issue.ask")}>
+							수정 요청
+						</Button>
+					</KeyTip>
 					{/* 워크트리에서 돈 구현은 반영해야 본 작업트리에 들어간다. 반영 전에 완료하면 수정이 잊힌다. */}
 					{issue.worktree ? (
-						<Button disabled={busy} title={issue.worktree.path} onClick={() => void go(() => api.issueMerge(p, id))}>
+						<Button disabled={busy} title={issue.worktree.path} onClick={() => void go(() => api.issueMerge(p, id))} {...keyAnchor("issue.finish")}>
 							반영
 						</Button>
 					) : (
-						<Button disabled={busy} onClick={() => void go(() => api.issueComplete(p, id))}>
-							완료
-						</Button>
+						<KeyTip id="issue.finish">
+							<Button disabled={busy} onClick={() => void go(() => api.issueComplete(p, id))} {...keyAnchor("issue.finish")}>
+								완료
+							</Button>
+						</KeyTip>
 					)}
 				</div>
 			);
@@ -566,25 +654,31 @@ function RevertButton({ issue, disabled }: { issue: Issue; disabled: boolean }) 
 }
 
 /**
+ * 창을 닫지 않고 다른 이슈로 넘어간다.
+ * 메모 단계 이슈는 편집기가 열리며 초점을 가져가, 그대로 두면 다음 Alt ↑↓ 가 편집기의 줄 옮기기가 된다.
+ * 넘겨 보는 중에는 창에 초점을 돌려 이어 누를 수 있게 한다. 편집기는 마운트 뒤 효과에서 초점을 잡으므로 두 프레임 뒤에 본다.
+ */
+function openKeeping(id: string) {
+	const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]');
+	useUi.getState().openIssue(id);
+	requestAnimationFrame(() => requestAnimationFrame(() => sheet?.isConnected && sheet.focus()));
+}
+
+/**
  * 창을 닫지 않고 보드의 이전 · 다음 이슈를 연다. 순서는 지금 보드에 보이는 그대로다(걸러 보기 · 정렬 · 완료 숨기기 · 열 순서).
  * 단추는 늘 같은 자리에 두고, 넘어갈 곳이 없으면(끝 · 보드에 없는 이슈 · 산출물 화면) 흐리게만 한다 — 나타났다 사라지면 옆 단추가 밀린다.
  * 입력칸 · 편집기 안에서는 받지 않는다. 대화 입력칸에서 이슈가 바뀌면 안 되고, 편집기에서 Alt ↑↓ 는 줄 옮기기다.
  */
 function IssueNav({ issue }: { issue: Issue }) {
-	const openIssue = useUi((s) => s.openIssue);
 	const prev = useBoardNeighbor(issue.projectId, issue.id, -1);
 	const next = useBoardNeighbor(issue.projectId, issue.id, 1);
 	const go = (id: string | null) => {
-		if (confirming()) return false;
-		if (!id) return;
-		// 메모 단계 이슈는 편집기가 열리며 초점을 가져가, 그대로 두면 다음 Alt ↑↓ 가 편집기의 줄 옮기기가 된다.
-		// 넘겨 보는 중에는 창에 초점을 돌려 이어 누를 수 있게 한다. 편집기는 마운트 뒤 효과에서 초점을 잡으므로 두 프레임 뒤에 본다.
-		const sheet = document.querySelector<HTMLElement>('[data-slot="sheet-content"]');
-		openIssue(id);
-		requestAnimationFrame(() => requestAnimationFrame(() => sheet?.isConnected && sheet.focus()));
+		if (id) openKeeping(id);
 	};
-	useKey({ id: "issue.prev", combo: "Alt+ArrowUp", label: "이전 이슈", group: "상세 창", series: "issue.nav", inInput: "skip", run: () => go(prev) });
-	useKey({ id: "issue.next", combo: "Alt+ArrowDown", label: "다음 이슈", group: "상세 창", series: "issue.nav", inInput: "skip", run: () => go(next) });
+	// 옆 칸에 초점이 있으면 옆 칸 대화가 넘어간다.
+	const inDock = (e: KeyboardEvent) => !!(e.target as HTMLElement | null)?.closest?.("[data-dock]");
+	useKey({ id: "issue.prev", combo: "Alt+ArrowUp", label: "이전 이슈", group: "상세 창", series: "issue.nav", inInput: "skip", run: (e) => (inDock(e) ? false : go(prev)) });
+	useKey({ id: "issue.next", combo: "Alt+ArrowDown", label: "다음 이슈", group: "상세 창", series: "issue.nav", inInput: "skip", run: (e) => (inDock(e) ? false : go(next)) });
 	return (
 		<>
 			<KeyTip id="issue.prev">
@@ -604,6 +698,7 @@ function IssueNav({ issue }: { issue: Issue }) {
 /** 항목과 확인 창은 보드 카드의 우클릭 메뉴와 같이 쓴다. 지우면 훅이 이 창을 닫는다. */
 function IssueMenu({ issue }: { issue: Issue }) {
 	const { items, dialogs } = useIssueActions(issue);
+	useActionCommands(items, `#${issue.number}`);
 	return (
 		<>
 			<DropdownMenu>

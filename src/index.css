@@ -306,6 +306,19 @@
 	border-radius: 6px;
 	border: 1px solid var(--border);
 }
+.prose-docket .md-image {
+	display: inline-block;
+	max-width: 100%;
+	padding: 0;
+	border: 0;
+	border-radius: 6px;
+	background: none;
+	cursor: zoom-in;
+}
+.prose-docket .md-image:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
 .prose-docket hr {
 	border: 0;
 	border-top: 1px solid var(--border);

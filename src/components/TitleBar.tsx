@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { PanelRight, Square } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { PanelLeft, PanelRight, Search, Square } from "lucide-react";
 import { toast } from "sonner";
 import { api, errorText } from "@/lib/api";
+import { toggleDock } from "@/lib/dock";
 import { type Job, useJobs } from "@/lib/jobs";
+import { keyAnchor } from "@/lib/keys";
+import { useDockLayout } from "@/lib/layout";
 import { liveKey, useLive, useUi } from "@/lib/store";
+import { cn } from "@/lib/utils";
 import { type ActionList, ContextActions } from "./ActionMenu";
 import { RunDot } from "./bits";
+import { KeyTip } from "./KeyTip";
 import { NoticeCenter } from "./NoticeCenter";
 import {
 	AlertDialog,
@@ -34,6 +40,7 @@ export function TitleBar() {
 	}, []);
 
 	const jobs = useJobs();
+	const setPaletteOpen = useUi((s) => s.setPaletteOpen);
 
 	// 실행 중에 닫으면 묻는다. ✕ 단추 · Alt+F4 · 작업 표시줄 닫기가 모두 이 사건으로 온다.
 	// 묻고 나서는 destroy 로 닫는다. close 를 다시 부르면 이 사건이 또 와서 창이 닫히지 않는다.
@@ -57,6 +64,22 @@ export function TitleBar() {
 					docket
 				</span>
 			</div>
+			{/* 오른쪽 묶음은 실행 글자 폭에 따라 밀린다. 로고 옆은 자리가 변하지 않고, 사이드바가 띠로 접혀도 남는다. */}
+			<KeyTip id="palette" side="bottom">
+				<button
+					type="button"
+					onClick={(e) => {
+						// 마우스로 열었으면 닫을 때 초점을 돌려받지 않는다. 돌려받으면 툴팁이 다시 뜬다. 키로 연 사람은 자리를 돌려받아야 한다.
+						if (e.detail > 0) e.currentTarget.blur();
+						setPaletteOpen(true);
+					}}
+					{...keyAnchor("palette", "end")}
+					className="ml-2.5 flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+				>
+					<Search className="size-3.5" />
+					<span>명령어 팔레트</span>
+				</button>
+			</KeyTip>
 			<div data-tauri-drag-region className="flex-1 self-stretch" />
 			{/* 2026.10.29 : 사용량 · 종 · 실행 → 실행 · 사용량 │ 종. 생겼다 사라지던 실행 단추가 사용량 · 종을 밀어 자리가 흔들렸다.
 			    실행 단추는 쉴 때도 늘 두고, 종은 창 단추 옆에 따로 세워 자리를 외우게 한다. */}
@@ -65,6 +88,7 @@ export function TitleBar() {
 				<UsageMeter />
 			</div>
 			<Divider />
+			<DockToggle />
 			<NoticeCenter />
 			<Divider />
 			<div className="flex h-full">
@@ -126,6 +150,30 @@ export function TitleBar() {
 /** 제목 줄 묶음 사이의 세로선. */
 function Divider() {
 	return <span aria-hidden className="mx-1.5 h-4 w-px shrink-0 bg-border" />;
+}
+
+/** 옆 칸 대화를 열고 닫는다. 어느 화면에서든 닫아 둔 대화를 다시 띄우는 자리다. 아이콘은 옆 칸이 놓인 쪽을 따른다. */
+function DockToggle() {
+	const qc = useQueryClient();
+	const side = useUi((s) => s.dock.side);
+	const { shown } = useDockLayout();
+	return (
+		<KeyTip id="dock.toggle" side="bottom">
+			<button
+				type="button"
+				aria-label="옆 칸 대화 열고 닫기"
+				aria-pressed={shown}
+				onClick={() => toggleDock(qc)}
+				{...keyAnchor("dock.toggle")}
+				className={cn(
+					"grid size-7 place-items-center rounded-md text-muted-foreground transition-colors outline-none hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4",
+					shown && "bg-hover text-foreground",
+				)}
+			>
+				{side === "right" ? <PanelRight /> : <PanelLeft />}
+			</button>
+		</KeyTip>
+	);
 }
 
 /**

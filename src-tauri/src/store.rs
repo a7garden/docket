@@ -841,6 +841,21 @@ impl Store {
 		Ok(())
 	}
 
+	/// 앱을 켤 때 내용이 하나도 없는 대화를 휴지통으로 옮긴다. 대화는 첫 질문을 보낼 때 만들어지므로
+	/// 예전 판에서 쌓였거나 첫 질문을 보내다 실패한 것만 여기 걸린다.
+	pub fn sweep_blank_talks(&self) -> Result<()> {
+		let mut projects = self.projects()?;
+		projects.push(self.global_project()?);
+		for p in projects {
+			for v in self.scan(&p.id, true)? {
+				if is_blank_talk(&v.issue, &v.attachments) {
+					self.delete_issue(&p.id, &v.issue.id)?;
+				}
+			}
+		}
+		Ok(())
+	}
+
 	fn attachments_dir(&self, pid: &str, iid: &str) -> Result<PathBuf> {
 		Ok(self.issue_dir(safe_id(pid)?, safe_id(iid)?).join("attachments"))
 	}
@@ -1316,9 +1331,38 @@ impl Store {
 	}
 }
 
+/// 지워도 잃을 것이 없는 대화인가. 모델 · effort 만 고른 것은 내용으로 치지 않는다.
+fn is_blank_talk(i: &Issue, attachments: &[String]) -> bool {
+	i.talk
+		&& i.run.is_none()
+		&& i.runs.is_empty()
+		&& i.queue.is_empty()
+		&& i.changes.is_empty()
+		&& i.session_id.is_empty()
+		&& i.from_issue.is_none()
+		&& i.title.is_empty()
+		&& attachments.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// 내용이 하나라도 있으면 빈 대화가 아니다.
+	#[test]
+	fn blank_talk_has_nothing_to_lose() {
+		let blank = || Issue { talk: true, ..Default::default() };
+		assert!(is_blank_talk(&blank(), &[]));
+		assert!(is_blank_talk(&Issue { model: "opus".into(), ..blank() }, &[]));
+		assert!(!is_blank_talk(&blank(), &["a.png".to_string()]));
+		assert!(!is_blank_talk(&Issue { talk: false, ..blank() }, &[]));
+		assert!(!is_blank_talk(&Issue { runs: vec![RunRecord::default()], ..blank() }, &[]));
+		assert!(!is_blank_talk(&Issue { queue: vec![QueuedChat::default()], ..blank() }, &[]));
+		assert!(!is_blank_talk(&Issue { changes: vec![FileChange::default()], ..blank() }, &[]));
+		assert!(!is_blank_talk(&Issue { session_id: "s".into(), ..blank() }, &[]));
+		assert!(!is_blank_talk(&Issue { title: "제목".into(), ..blank() }, &[]));
+		assert!(!is_blank_talk(&Issue { from_issue: Some(IssueRef::default()), ..blank() }, &[]));
+	}
 
 	fn done(id: &str, number: u32, done_at: i64) -> PendingIssue {
 		PendingIssue { id: id.into(), number, title: String::new(), done_at }

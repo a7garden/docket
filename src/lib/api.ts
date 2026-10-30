@@ -7,6 +7,7 @@ import type {
 	DeliverableSettings,
 	GlossaryEntry,
 	GlossaryView,
+	ChatMode,
 	Issue,
 	KbHit,
 	KbSection,
@@ -145,8 +146,8 @@ export const api = {
 	issueRevert: (projectId: string, issueId: string) => invoke<Issue>("issue_revert", { projectId, issueId }),
 	/** 워크트리에서 끝난 구현을 본 작업트리에 옮긴다. 합치지 못하면 아무것도 쓰지 않고 오류를 낸다. */
 	issueMerge: (projectId: string, issueId: string) => invoke<Issue>("issue_merge", { projectId, issueId }),
-	issueChat: (projectId: string, issueId: string, text: string, edit: boolean, images: string[] = []) =>
-		invoke<Issue>("issue_chat", { projectId, issueId, text, edit, images }),
+	issueChat: (projectId: string, issueId: string, text: string, mode: ChatMode, images: string[] = []) =>
+		invoke<Issue>("issue_chat", { projectId, issueId, text, mode, images }),
 	/** keepFiles 는 고치려고 입력칸으로 되돌릴 때 첨부를 남긴다. */
 	issueQueueRemove: (projectId: string, issueId: string, queueId: string, keepFiles = false) =>
 		invoke<Issue>("issue_queue_remove", { projectId, issueId, queueId, keepFiles }),

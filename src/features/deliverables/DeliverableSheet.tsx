@@ -58,6 +58,7 @@ export function DeliverableSheet({ project }: { project: Project }) {
 		<Sheet open={!!d} onOpenChange={(o) => !o && openDeliverable(null)} modal={beside.modal}>
 			<SheetContent
 				side="right"
+				data-region="sheet"
 				showCloseButton={false}
 				onInteractOutside={beside.onInteractOutside}
 				onOpenAutoFocus={(e) => {

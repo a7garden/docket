@@ -234,8 +234,8 @@ export const issues: Issue[] = [
 		runs: [{ id: "r-live-plan", kind: "plan", startedAt: now - 2 * min, endedAt: 0, status: "running", costUsd: 0, tokens: tok(0), durationMs: 0, numTurns: 0, model: "", effort: "", error: "", prompt: "", mode: "", allowed: [], deniedRules: [], commands: [], denials: [] }],
 		// 계획이 도는 동안 넣어 둔 질문. 계획이 끝나면 한 차례로 묶여 나간다.
 		queue: [
-			{ id: "q1", text: "카라추바 곱셈도 후보로 같이 따져 줘", edit: false, images: [], at: now - min },
-			{ id: "q2", text: "느린 지점을 잰 그림이야. 이 구간이 맞는지 봐 줘", edit: true, images: ["붙여넣기-20261027-101500.png"], at: now - 30_000 },
+			{ id: "q1", text: "카라추바 곱셈도 후보로 같이 따져 줘", mode: "read", images: [], at: now - min },
+			{ id: "q2", text: "느린 지점을 잰 그림이야. 이 구간이 맞는지 봐 줘", mode: "auto", images: ["붙여넣기-20261027-101500.png"], at: now - 30_000 },
 		],
 		updatedAt: now - 2 * min,
 	}),

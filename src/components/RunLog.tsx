@@ -99,7 +99,8 @@ export function RunLog({
 	}
 
 	return (
-		<ol ref={box} className={cn("flex flex-col", className)}>
+		// 글 조각마다 Markdown 이 따로라, 한 실행의 그림을 함께 넘기도록 묶음은 기록 전체로 잡는다.
+		<ol ref={box} data-image-group="" className={cn("flex flex-col", className)}>
 			{events.map((e, i) => {
 				switch (e.t) {
 					case "init":

@@ -281,10 +281,27 @@ fn edit_perms(p: &Project, all: bool, once: bool) -> Perms {
 fn job_perms(job: &Job, p: &Project) -> Perms {
 	let all = p.impl_mode == "bypassPermissions";
 	match job {
-		Job::Plan { .. } | Job::Chat { edit: false, .. } => read_perms(p),
+		Job::Plan { .. } => read_perms(p),
+		// 대화는 입력칸의 선택만 따른다. 프로젝트의 구현 권한은 구현 · 수정의 것이다. 수동 승인은 물을 곳이 생길 때까지 읽기만 연다.
+		Job::Chat { mode: ChatMode::Read | ChatMode::Ask, .. } => read_perms(p),
+		Job::Chat { mode: ChatMode::Auto, .. } => Perms { label: "자동 승인".into(), ..edit_perms(p, false, false) },
+		Job::Chat { mode: ChatMode::Bypass, .. } => Perms { label: "권한 무시".into(), ..edit_perms(p, true, false) },
 		Job::Implement { allow_all, .. } | Job::Rework { allow_all, .. } => edit_perms(p, all || *allow_all, !all && *allow_all),
-		_ => edit_perms(p, all, false),
+		Job::Revert => edit_perms(p, all, false),
 	}
+}
+
+/// 고칠 수 있는 대화가 권한 근거를 고치지 못하게 막는다. 대기열의 모드는 이슈 폴더의 issue.json 에, 규칙은 settings 에 있다.
+/// Edit · Write 도구만 막는다. 권한 무시에서 명령으로 쓰는 것은 막지 못한다.
+fn chat_guard(job: &Job, issue_dir: &Path) -> Vec<String> {
+	if !matches!(job, Job::Chat { mode, .. } if mode.can_edit()) {
+		return Vec::new();
+	}
+	let issue_json = format!("{}/issue.json", abs_rule_glob(issue_dir).trim_end_matches("/**"));
+	["Edit", "Write"]
+		.iter()
+		.flat_map(|t| [format!("{t}({issue_json})"), format!("{t}(./.claude/settings*.json)"), format!("{t}(~/.claude/settings*.json)")])
+		.collect()
 }
 
 /// 계획 · 구현 · 대화 · 산출물 실행에 얹는 설정. 거부 목록과 함께 --settings 한 번으로 넘긴다 — 두 번 주면 앞의 것을 덮는지 확인하지 못했다.
@@ -1470,8 +1487,8 @@ enum Job {
 	/// allow_all: 프로젝트 설정과 상관없이 이번 실행만 「모두 허용」으로 돈다.
 	Implement { instruction: Option<String>, allow_all: bool },
 	Rework { feedback: String, allow_all: bool },
-	/// edit 를 켜면 구현과 같은 권한으로 돈다. 끄면 읽기 도구만 연다. images 는 이슈 첨부 폴더 안의 이름이다.
-	Chat { text: String, edit: bool, images: Vec<String> },
+	/// mode 는 사용자가 입력칸에서 고른 권한이다. images 는 이슈 첨부 폴더 안의 이름이다.
+	Chat { text: String, mode: ChatMode, images: Vec<String> },
 	/// 구현과 같은 권한 · 결과 형식으로 돈다. 되돌린 결과도 구현 결과처럼 받아 흐름에 남긴다.
 	Revert,
 }
@@ -1559,7 +1576,8 @@ fn issue_prompt(job: &Job, v: &IssueView, resumed: bool) -> String {
 			};
 			format!("{head}\n\n{}\n{IMPL_FORMAT}\n\n{RULES}\n", revert_block(&v.issue.changes))
 		}
-		Job::Chat { text, edit, images } => {
+		Job::Chat { text, mode: chat_mode, images } => {
+			let edit = chat_mode.can_edit();
 			let mut mode = String::new();
 			if !images.is_empty() {
 				mode.push_str("\n\n(첨부한 파일 — Read 도구로 열어 본다)\n");
@@ -1568,11 +1586,13 @@ fn issue_prompt(job: &Job, v: &IssueView, resumed: bool) -> String {
 				}
 			}
 			// 대화는 기본으로 고칠 수 있다. 묻기만 한 말에 코드가 바뀌면 사용자가 모르는 변경이 생기므로, 고치라고 한 때만 고치게 한다.
-			if *edit {
+			if edit {
 				mode.push_str("\n\n(묻는 말에는 답만 한다. 고치라고 하거나 고치는 데 동의했을 때만 파일을 고친다.)");
 			} else {
 				mode.push_str("\n\n(이번에는 파일을 고치지 않는다. 읽기 도구만 열려 있다.)");
 			}
+			// 사용자의 「허용할게」는 권한을 바꾸지 않는다. 설정을 고쳐 스스로 권한을 올리지 못하게 일러 둔다.
+			mode.push_str("\n\n(권한은 사용자가 입력칸에서만 바꾼다. 도구가 막히면 설정을 고치거나 다른 길로 우회하지 말고 막혔다고 답한다.)");
 			// 이어 붙인 차례에는 규칙 전체를 다시 싣지 않는다. 세션 첫 프롬프트에 있다. 계획 · 구현에서 이어진 세션이라도 같은 말을 한 줄로 일깨운다.
 			mode.push_str("\n\n(화면 설계를 보일 때는 ```html · ```svg 코드 블록으로 낸다. 화면을 고쳤으면 결과 화면을 찍어 답에 `![설명](전체 경로)` 로 건다. 화면이 바뀌지 않으면 둘 다 하지 않는다.)");
 			// 계획 전 · 승인 전 이슈만 대화에서 설계를 받는다. 구현 뒤에 표지가 오면 승인 대기로 되돌아가 버린다.
@@ -1612,14 +1632,14 @@ fn issue_prompt(job: &Job, v: &IssueView, resumed: bool) -> String {
 			if v.issue.talk {
 				return format!(
 					"사용자가 이 저장소에 대해 묻는다. 이 저장소의 코드를 확인하고 답하라.\n\n## 사용자\n{text}{mode}\n\n{MEMO_RULE}\n\n{VISUAL_RULE}\n{}\n\n{RULES}\n",
-					if *edit { format!("\n{}", shot_rule(v)) } else { String::new() }
+					if edit { format!("\n{}", shot_rule(v)) } else { String::new() }
 				);
 			}
 			format!(
 				"아래 메모로 진행 중인 개발 이슈에 대해 사용자가 묻는다. 이 저장소의 코드를 확인하고 답하라.\n\n{}\n{}\n## 사용자\n{text}{mode}\n\n{VISUAL_RULE}\n{}\n\n{RULES}\n",
 				note_block(v),
 				v.issue.plan.as_ref().map(plan_block).unwrap_or_default().replacen("승인된 계획", "지금 계획", 1),
-				if *edit { format!("\n{}", shot_rule(v)) } else { String::new() }
+				if edit { format!("\n{}", shot_rule(v)) } else { String::new() }
 			)
 		}
 	}
@@ -1846,7 +1866,8 @@ fn job_args(job: &Job, s: &Settings, p: &Project, issue: &Issue, add_dir: &Path,
 	let extra = extra_dirs(p);
 	let dirs: Vec<&Path> = std::iter::once(add_dir).chain(extra.iter().map(PathBuf::as_path)).collect();
 	let mut a = base_args(s, pick_model(s, &issue.model, job.kind()), pick_effort(s, &issue.effort, job.kind()), &dirs);
-	perm_args(&mut a, &job_perms(job, p), &[]);
+	let guard = chat_guard(job, add_dir);
+	perm_args(&mut a, &job_perms(job, p), &guard.iter().map(String::as_str).collect::<Vec<_>>());
 	match job {
 		Job::Plan { .. } => a.extend(["--json-schema".into(), PLAN_SCHEMA.into()]),
 		// 대화는 결과 형식을 정하지 않는다. 답은 글로 받는다.
@@ -2108,14 +2129,17 @@ async fn branch_out(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 /// 진행 중인 이슈에 질문을 보낸다. 계획 · 구현과 같은 세션을 이으므로 Claude 가 지금까지 읽고 고친 것을 기억한다.
 /// 설계가 정해지면 승인 대기로, 파일을 고쳤으면 결과 확인으로 단계를 옮긴다.
 /// 실행 중이면 대기열에 넣고, 대기열이 남아 있으면 그 뒤에 붙여 함께 보낸다.
-pub fn chat(app: &AppHandle, pid: &str, iid: &str, text: String, edit: bool, images: Vec<String>) -> Result<IssueView> {
+pub fn chat(app: &AppHandle, pid: &str, iid: &str, text: String, mode: ChatMode, images: Vec<String>) -> Result<IssueView> {
+	if mode == ChatMode::Ask {
+		return msg("수동 승인은 아직 쓸 수 없습니다");
+	}
 	// 첨부 폴더 밖을 가리키지 못하게 이름만 받고, 지금 있는 파일만 넘긴다.
 	let have = app.state::<Store>().attachments(pid, iid);
 	let images: Vec<String> = images.into_iter().filter(|n| have.contains(n)).collect();
 	if text.trim().is_empty() && images.is_empty() {
 		return msg("물을 것을 적어 주세요");
 	}
-	let item = QueuedChat { id: short_id(), text, edit, images, at: now_ms() };
+	let item = QueuedChat { id: short_id(), text, mode, images, at: now_ms() };
 	match send_queued(app, pid, iid, Some(item))? {
 		Some(v) => Ok(v),
 		None => app.state::<Store>().get_issue(pid, iid),
@@ -2127,6 +2151,17 @@ static DISPATCH: Mutex<()> = Mutex::new(());
 
 /// 대기열을 한 차례로 묶는다. 글은 넣은 차례대로 빈 줄을 두고 잇고, 첨부는 겹치는 이름을 한 번만 넣는다.
 /// 하나라도 고칠 수 있게 넣었으면 고칠 수 있는 쪽을 따른다. 읽기 전용으로 묶으면 그 질문이 바라던 고침을 못 한다.
+/// 권한 무시는 묶음 전부가 그럴 때만 쓴다. 읽기로 넣은 질문이 명령까지 열린 차례에 끌려가지 않게 자동 승인으로 낮춘다.
+fn batch_mode(items: &[QueuedChat]) -> ChatMode {
+	if items.iter().all(|q| q.mode == ChatMode::Bypass) {
+		ChatMode::Bypass
+	} else if items.iter().any(|q| q.mode.can_edit()) {
+		ChatMode::Auto
+	} else {
+		ChatMode::Read
+	}
+}
+
 fn batch_job(items: &[QueuedChat], have: &[String]) -> Option<Job> {
 	let text = items.iter().map(|q| q.text.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
 	let mut images: Vec<String> = Vec::new();
@@ -2138,7 +2173,7 @@ fn batch_job(items: &[QueuedChat], have: &[String]) -> Option<Job> {
 	if text.is_empty() && images.is_empty() {
 		return None;
 	}
-	Some(Job::Chat { text, edit: items.iter().any(|q| q.edit), images })
+	Some(Job::Chat { text, mode: batch_mode(items), images })
 }
 
 /// 실행 중이 아니면 대기열(과 extra)을 한 차례로 묶어 보낸다. 실행 중이면 extra 를 대기열 뒤에 넣는다.
@@ -2455,8 +2490,10 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 		rec.effort = pick_effort(&settings, &i.effort, kind).to_string();
 		rec.allowed = perms.allow;
 		rec.denied_rules = perms.deny;
-		if let Job::Chat { images, .. } = job {
+		rec.denied_rules.extend(chat_guard(job, &store.issue_dir(pid, iid)));
+		if let Job::Chat { images, mode, .. } = job {
 			rec.images = images.clone();
+			rec.chat_mode = Some(*mode);
 		}
 		i.runs.push(rec);
 		Ok(())
@@ -2499,7 +2536,7 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 	// 앱 대화는 앱 데이터 전체를 고칠 수 있다. 고칠 수 있게 보낸 차례 전에 설정을 남겨 잘못 고쳐도 되돌릴 수 있게 한다.
 	if pid == GLOBAL_PID {
 		crate::global_talk::prepare(&store);
-		if matches!(job, Job::Chat { edit: true, .. }) {
+		if matches!(job, Job::Chat { mode, .. } if mode.can_edit()) {
 			crate::global_talk::backup(&store, run_id);
 		}
 	}
@@ -3379,17 +3416,64 @@ mod tests {
 	/// 대기열 묶기: 글은 차례대로 빈 줄로 잇고, 사라진 첨부 · 겹친 첨부는 걸러 내고, 하나라도 고칠 수 있으면 고칠 수 있게 보낸다.
 	#[test]
 	fn batch_job_joins_queue_in_order() {
-		let q = |text: &str, edit: bool, images: &[&str]| QueuedChat { text: text.into(), edit, images: images.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+		let q = |text: &str, mode: ChatMode, images: &[&str]| QueuedChat { text: text.into(), mode, images: images.iter().map(|s| s.to_string()).collect(), ..Default::default() };
 		let have = vec!["a.png".to_string(), "b.png".to_string()];
-		let Some(Job::Chat { text, edit, images }) = batch_job(&[q("첫 물음 ", false, &["a.png"]), q("", false, &["gone.png"]), q("둘째", true, &["a.png", "b.png"])], &have) else {
+		let Some(Job::Chat { text, mode, images }) = batch_job(&[q("첫 물음 ", ChatMode::Read, &["a.png"]), q("", ChatMode::Read, &["gone.png"]), q("둘째", ChatMode::Auto, &["a.png", "b.png"])], &have) else {
 			panic!("묶지 못했다");
 		};
 		assert_eq!(text, "첫 물음\n\n둘째");
-		assert!(edit);
+		assert_eq!(mode, ChatMode::Auto);
 		assert_eq!(images, vec!["a.png", "b.png"]);
-		let Some(Job::Chat { edit, .. }) = batch_job(&[q("읽기만", false, &[])], &have) else { panic!() };
-		assert!(!edit);
-		assert!(batch_job(&[q("  ", true, &["gone.png"])], &have).is_none(), "빈 묶음을 보냈다");
+		let Some(Job::Chat { mode, .. }) = batch_job(&[q("읽기만", ChatMode::Read, &[])], &have) else { panic!() };
+		assert_eq!(mode, ChatMode::Read);
+		assert!(batch_job(&[q("  ", ChatMode::Auto, &["gone.png"])], &have).is_none(), "빈 묶음을 보냈다");
+		// 권한 무시는 묶음 전부가 그럴 때만 쓴다.
+		let Some(Job::Chat { mode, .. }) = batch_job(&[q("가", ChatMode::Bypass, &[]), q("나", ChatMode::Bypass, &[])], &have) else { panic!() };
+		assert_eq!(mode, ChatMode::Bypass);
+		let Some(Job::Chat { mode, .. }) = batch_job(&[q("가", ChatMode::Read, &[]), q("나", ChatMode::Bypass, &[])], &have) else { panic!() };
+		assert_eq!(mode, ChatMode::Auto);
+	}
+
+	/// 모드가 생기기 전에 저장한 대기열은 edit 로 읽는다.
+	#[test]
+	fn saved_queue_reads_old_edit_flag() {
+		let read = |s: &str| serde_json::from_str::<QueuedChat>(s).unwrap().mode;
+		assert_eq!(read(r#"{"id":"a","text":"t","edit":true}"#), ChatMode::Auto);
+		assert_eq!(read(r#"{"id":"a","text":"t","edit":false}"#), ChatMode::Read);
+		assert_eq!(read(r#"{"id":"a","text":"t","mode":"bypass"}"#), ChatMode::Bypass);
+		let back = serde_json::to_string(&QueuedChat { mode: ChatMode::Bypass, ..Default::default() }).unwrap();
+		assert!(back.contains(r#""mode":"bypass""#) && !back.contains("edit"));
+	}
+
+	/// 대화 모드별 인자: 프로젝트의 구현 권한을 따르지 않고, 어느 모드도 위험 플래그를 쓰지 않으며, 고칠 수 있으면 권한 근거를 막는다.
+	#[test]
+	fn chat_modes_map_to_args() {
+		let p = Project { allowed_tools: vec!["Bash(npm test:*)".into()], impl_mode: "bypassPermissions".into(), ..Default::default() };
+		let (s, i, dir) = (Settings::default(), Issue::default(), Path::new("D:\\data\\issues\\i1"));
+		let args = |mode| job_args(&Job::Chat { text: "물음".into(), mode, images: vec![] }, &s, &p, &i, dir, None);
+		let at = |a: &[String], k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
+		let settings = |a: &[String]| at(a, "--settings").unwrap();
+
+		let read = args(ChatMode::Read);
+		assert_eq!(at(&read, "--permission-mode").as_deref(), Some("default"));
+		assert!(at(&read, "--tools").unwrap().starts_with("Read,Grep,Glob"));
+		assert!(!settings(&read).contains("issue.json"));
+		// 수동 승인은 물을 곳이 없는 동안 읽기만 연다.
+		assert_eq!(at(&args(ChatMode::Ask), "--tools"), at(&read, "--tools"));
+
+		let auto = args(ChatMode::Auto);
+		assert_eq!(at(&auto, "--permission-mode").as_deref(), Some("acceptEdits"));
+		assert!(auto.iter().any(|x| x == "Bash(npm test:*)") && !auto.iter().any(|x| x == "Bash"), "자동 승인이 명령을 다 열었다");
+		assert!(settings(&auto).contains("Edit(//d/data/issues/i1/issue.json)") && settings(&auto).contains("Write(./.claude/settings*.json)"));
+
+		let bypass = args(ChatMode::Bypass);
+		assert_eq!(at(&bypass, "--permission-mode").as_deref(), Some("acceptEdits"));
+		assert!(bypass.iter().any(|x| x == "Bash") && bypass.iter().any(|x| x == "Skill"));
+		assert!(settings(&bypass).contains("git push"), "권한 무시가 거부 규칙을 뺐다");
+		for a in [&read, &auto, &bypass] {
+			assert!(!a.iter().any(|x| x.contains("dangerously") || x == "bypassPermissions"), "위험 플래그를 썼다: {a:?}");
+		}
+		assert_eq!(job_perms(&Job::Chat { text: String::new(), mode: ChatMode::Bypass, images: vec![] }, &p).label, "권한 무시");
 	}
 
 	/// 제목 짓기: 프롬프트에서 그림 줄 · 첨부 경로를 걷고, 답에서 따옴표 · 머리표 · 덧붙인 설명을 걷는다.
@@ -3541,7 +3625,7 @@ mod tests {
 		let all = [
 			job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None),
 			job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None),
-			job_args(&Job::Chat { text: "물음".into(), edit: true, images: vec![] }, &s, &p, &i, dir, None),
+			job_args(&Job::Chat { text: "물음".into(), mode: ChatMode::Auto, images: vec![] }, &s, &p, &i, dir, None),
 			doc_args(&s, &p, dir, dir, None),
 		];
 		for a in &all {
@@ -3592,7 +3676,7 @@ mod tests {
 		for a in [
 			job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None),
 			job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None),
-			job_args(&Job::Chat { text: "물음".into(), edit: false, images: vec![] }, &s, &p, &i, dir, None),
+			job_args(&Job::Chat { text: "물음".into(), mode: ChatMode::Read, images: vec![] }, &s, &p, &i, dir, None),
 		] {
 			assert_eq!(opened(&a), vec!["issue".to_string(), e.clone()], "이슈 폴더 뒤에 함께 여는 폴더가 실리지 않았다: {a:?}");
 		}
@@ -3630,7 +3714,7 @@ mod tests {
 		assert_eq!(model(&none), None);
 
 		let s = Settings { plan_model: "opus".into(), impl_model: "sonnet".into(), chat_model: "haiku".into(), ..Default::default() };
-		let chat = Job::Chat { text: "물음".into(), edit: false, images: vec![] };
+		let chat = Job::Chat { text: "물음".into(), mode: ChatMode::Read, images: vec![] };
 		assert_eq!(model(&job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None)).as_deref(), Some("opus"));
 		assert_eq!(model(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None)).as_deref(), Some("sonnet"));
 		assert_eq!(model(&job_args(&Job::Revert, &s, &p, &i, dir, None)).as_deref(), Some("sonnet"));
@@ -3651,7 +3735,7 @@ mod tests {
 		assert_eq!(effort(&doc_args(&Settings::default(), &p, dir, dir, None)), None);
 
 		let s = Settings { plan_effort: "high".into(), impl_effort: "medium".into(), chat_effort: "low".into(), ..Default::default() };
-		let chat = Job::Chat { text: "물음".into(), edit: false, images: vec![] };
+		let chat = Job::Chat { text: "물음".into(), mode: ChatMode::Read, images: vec![] };
 		assert_eq!(effort(&job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None)).as_deref(), Some("high"));
 		assert_eq!(effort(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None)).as_deref(), Some("medium"));
 		assert_eq!(effort(&job_args(&Job::Revert, &s, &p, &i, dir, None)).as_deref(), Some("medium"));
@@ -3829,7 +3913,7 @@ mod tests {
 		view.issue.session_id = o.parser.session_id.clone();
 
 		// 대화: 계획 세션을 이어 묻는다. 계획 때 본 것을 기억해야 답할 수 있는 질문이다.
-		let job = Job::Chat { text: "방금 세운 계획에서 고칠 파일 이름만 답해. 다른 말은 붙이지 마.".into(), edit: false, images: vec![] };
+		let job = Job::Chat { text: "방금 세운 계획에서 고칠 파일 이름만 답해. 다른 말은 붙이지 마.".into(), mode: ChatMode::Read, images: vec![] };
 		let spec = Spec {
 			exe: exe.clone(),
 			cwd: PathBuf::from(&root),
@@ -3989,7 +4073,7 @@ mod perm_tests {
 		let dir = std::env::temp_dir().join(format!("docket-perm-{}", short_id()));
 		std::fs::create_dir_all(&dir).unwrap();
 		let view = IssueView { issue: Issue { number: 1, ..Default::default() }, note: "권한 시험".into(), attachments: Vec::new(), dir: dir.to_string_lossy().into() };
-		let job = Job::Chat { text: "Bash 로 `git log --oneline -1` 을 실행해 결과를 말해. 그다음 Bash 로 `touch probe.txt` 도 실행해 봐. 막히면 막혔다고만 말하고 다른 방법은 쓰지 마.".into(), edit: false, images: vec![] };
+		let job = Job::Chat { text: "Bash 로 `git log --oneline -1` 을 실행해 결과를 말해. 그다음 Bash 로 `touch probe.txt` 도 실행해 봐. 막히면 막혔다고만 말하고 다른 방법은 쓰지 마.".into(), mode: ChatMode::Read, images: vec![] };
 		let spec = Spec {
 			exe,
 			cwd: PathBuf::from(&root),
@@ -4011,5 +4095,111 @@ mod perm_tests {
 		assert_eq!(touch.suggest, vec!["Bash(touch:*)"]);
 		assert!(!Path::new(&root).join("probe.txt").exists(), "읽기 모드에서 파일이 생겼다");
 		let _ = std::fs::remove_dir_all(&dir);
+	}
+
+	/// 실제 claude 를 부른다. 자동 승인 대화가 이슈의 issue.json 과 저장소 설정을 고치지 못해야 한다.
+	/// `cargo test chat_guard_real -- --ignored --nocapture`
+	#[tokio::test]
+	#[ignore]
+	async fn chat_guard_real_blocks_permission_files() {
+		let exe = resolve_claude("").expect("claude 실행 파일");
+		let settings = Settings { chat_model: "haiku".into(), ..Default::default() };
+		let root = std::env::temp_dir().join(format!("docket-guard-{}", short_id()));
+		let dir = root.join("issue");
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::create_dir_all(root.join(".claude")).unwrap();
+		std::fs::write(dir.join("issue.json"), "{}").unwrap();
+		std::fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+		let project = Project { path: root.to_string_lossy().into(), ..Default::default() };
+		let (issue_json, repo_settings, other) = (dir.join("issue.json"), root.join(".claude/settings.json"), dir.join("other.json"));
+		std::fs::write(&other, "{}").unwrap();
+		let job = Job::Chat {
+			text: format!("Read 로 읽은 뒤 Write 도구로 {} · {} · {} 세 파일을 각각 내용 x 로 덮어써. 막힌 파일이 있으면 막혔다고만 말하고 다른 방법은 쓰지 말고 다음 파일로 넘어가.", issue_json.display(), repo_settings.display(), other.display()),
+			mode: ChatMode::Auto,
+			images: vec![],
+		};
+		let view = IssueView { issue: Issue { number: 1, ..Default::default() }, note: "권한 시험".into(), attachments: Vec::new(), dir: dir.to_string_lossy().into() };
+		let spec = Spec {
+			exe,
+			cwd: root.clone(),
+			args: job_args(&job, &settings, &project, &view.issue, &dir, None),
+			prompt: issue_prompt(&job, &view, true),
+			log: root.join("guard.jsonl"),
+			root: root.to_string_lossy().into(),
+			run_id: "guard".into(),
+			project: String::new(),
+			kind: "test",
+		};
+		let o = exec(spec, &RunCtl::new(), |_, _| {}).await;
+		assert!(o.ok, "실패: {}", o.error);
+		assert_eq!(std::fs::read_to_string(&issue_json).unwrap(), "{}", "issue.json 을 고쳤다");
+		assert_eq!(std::fs::read_to_string(&repo_settings).unwrap(), "{}", "저장소 설정을 고쳤다");
+		// 대조: 같은 폴더의 다른 파일은 고쳐져야 막힌 까닭이 거부 규칙이다.
+		assert_eq!(std::fs::read_to_string(&other).unwrap(), "x", "다른 파일까지 막혔다");
+		let _ = std::fs::remove_dir_all(&root);
+	}
+
+	/// 실제 claude 를 부른다. 수동 승인을 잇기 전의 실측이다 — --permission-prompts host 와 표준 입출력으로 승인 요청을 받는지 본다.
+	/// 허용 목록의 명령은 묻지 않고, 목록 밖은 묻고, 거부 규칙은 묻지 않고 막아야 한다.
+	/// `cargo test permission_prompt_stdio -- --ignored --nocapture`
+	#[tokio::test]
+	#[ignore]
+	async fn permission_prompt_stdio_real() {
+		use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+		let exe = resolve_claude("").expect("claude 실행 파일");
+		let root = std::env::temp_dir().join(format!("docket-ask-{}", short_id()));
+		std::fs::create_dir_all(&root).unwrap();
+		let settings = serde_json::json!({ "permissions": { "deny": ["Bash(git push:*)"] } }).to_string();
+		let mut child = tokio::process::Command::new(&exe)
+			.current_dir(&root)
+			.args(["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", "haiku"])
+			.args(["--permission-prompts", "host", "--permission-prompt-tool", "stdio", "--permission-mode", "default"])
+			.args(["--allowedTools", "Bash(git --version:*)", "--settings", &settings])
+			.stdin(std::process::Stdio::piped())
+			.stdout(std::process::Stdio::piped())
+			.stderr(std::process::Stdio::inherit())
+			.kill_on_drop(true)
+			.spawn()
+			.expect("claude 실행");
+		let mut stdin = child.stdin.take().unwrap();
+		let prompt = "Bash 로 다음 세 명령을 한 번에 하나씩 차례로 실행해: `git --version`, `git push origin nothing`, `touch probe.txt`. 막히면 다른 방법은 쓰지 말고 다음으로 넘어가. 끝나면 결과만 말해.";
+		let first = serde_json::json!({ "type": "user", "message": { "role": "user", "content": prompt } });
+		stdin.write_all(format!("{first}\n").as_bytes()).await.unwrap();
+		let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+		let mut asked: Vec<String> = Vec::new();
+		let mut done = false;
+		let read = tokio::time::timeout(std::time::Duration::from_secs(180), async {
+			while let Some(line) = lines.next_line().await.unwrap() {
+				let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+				match v["type"].as_str() {
+					Some("control_request") if v["request"]["subtype"] == "can_use_tool" => {
+						let input = v["request"]["input"].clone();
+						let cmd = input["command"].as_str().unwrap_or("").to_string();
+						println!("물음: {} {cmd}", v["request"]["tool_name"]);
+						asked.push(cmd);
+						// 사용자가 생각하는 시간을 흉내 낸다. 응답을 늦춰도 실행이 기다리는지 본다.
+						tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+						let reply = serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": v["request_id"], "response": { "behavior": "allow", "updatedInput": input } } });
+						stdin.write_all(format!("{reply}\n").as_bytes()).await.unwrap();
+					}
+					Some("result") => {
+						println!("결과: {}", v["result"]);
+						done = true;
+						break;
+					}
+					_ => {}
+				}
+			}
+		})
+		.await;
+		drop(stdin);
+		assert!(read.is_ok(), "시간 안에 끝나지 않았다. 물음: {asked:?}");
+		assert!(done, "결과 줄이 없다");
+		// touch 는 허락했으니 실제로 파일이 생겨야 한다. whoami 같은 읽기 전용 명령은 CLI 가 원래 묻지 않아 쓰지 않는다.
+		assert!(asked.iter().any(|c| c.contains("touch")), "목록 밖 명령을 묻지 않았다: {asked:?}");
+		assert!(root.join("probe.txt").exists(), "허락한 명령이 돌지 않았다");
+		assert!(!asked.iter().any(|c| c.contains("git --version")), "허용 목록의 명령을 물었다: {asked:?}");
+		assert!(!asked.iter().any(|c| c.contains("git push")), "거부 규칙의 명령을 물었다: {asked:?}");
+		let _ = std::fs::remove_dir_all(&root);
 	}
 }

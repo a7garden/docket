@@ -5,9 +5,10 @@ import { BookMarked, FolderPlus, MessagesSquare, Settings2 } from "lucide-react"
 import { toast } from "sonner";
 import { projectActions } from "@/features/project/ProjectHeader";
 import { api, errorText } from "@/lib/api";
-import { keyAnchor } from "@/lib/keys";
+import { keyAnchor, useCommands } from "@/lib/keys";
 import { useNoticeCounts } from "@/lib/notices";
-import { focusOnly, qk, usePluginMenus, useProjects, useTalks } from "@/lib/queries";
+import { focusOnly, qk, useAllTalks, usePluginMenus, useProjects } from "@/lib/queries";
+import { roveItem, useRovingList } from "@/lib/rovingList";
 import { useUi } from "@/lib/store";
 import { GLOBAL_PID, type Issue, type Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -40,22 +41,18 @@ export function Sidebar({ rail = false }: { rail?: boolean }) {
 	const { projectId, view, setProject, setView } = useUi();
 	const { data: projects = [] } = useProjects();
 	const lists = useQueries({ queries: projects.map((p) => ({ queryKey: qk.issues(p.id), queryFn: () => api.issues(p.id), ...focusOnly(p.id) })) });
-	const { data: appTalks = [] } = useTalks(GLOBAL_PID);
+	const { app: appTalks, byProject } = useAllTalks(projects);
 	const counts = useNoticeCounts();
+	const rove = useRovingList();
+	useCommands([{ label: "프로젝트 폴더 추가", onSelect: () => void pickProject(qc) }]);
 
 	return (
-		<aside className={cn("flex shrink-0 flex-col border-r border-border bg-sidebar p-2", rail ? "w-14" : "w-56")}>
+		<aside data-region="sidebar" {...rove} className={cn("flex shrink-0 flex-col border-r border-border bg-sidebar p-2", rail ? "w-14" : "w-56")}>
 			{rail ? (
 				<div className="h-1" />
 			) : (
 				<div className="flex h-8 items-center justify-between pr-0.5 pl-2.5">
-					{/* 모든 프로젝트를 건너 찾는 키는 프로젝트 목록 머리에서 알린다. 늘 보이는 안내는 두지 않는다. */}
-					<KeyTip id="palette" side="right">
-						{/* Label 은 속성을 넘기지 않아 툴팁이 붙지 않는다. 감싸는 칸에 붙인다. */}
-						<span>
-							<Label>프로젝트</Label>
-						</span>
-					</KeyTip>
+					<Label>프로젝트</Label>
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<Button size="icon-xs" variant="ghost" aria-label="프로젝트 추가" onClick={() => void pickProject(qc)}>
@@ -73,25 +70,26 @@ export function Sidebar({ rail = false }: { rail?: boolean }) {
 						project={p}
 						rail={rail}
 						issues={lists[i]?.data ?? []}
-						notices={counts(p.id).total}
-						active={p.id === projectId && (view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary")}
+						notices={counts(p.id).total - counts(p.id).talks}
+						active={p.id === projectId && (view === "board" || view === "deliverables" || view === "knowledge" || view === "glossary")}
 						onClick={() => {
 							setProject(p.id);
-							if (view !== "deliverables" && view !== "talks" && view !== "knowledge" && view !== "glossary") setView("board");
+							if (view !== "deliverables" && view !== "knowledge" && view !== "glossary") setView("board");
 						}}
 					/>
 				))}
 			</nav>
 			<div className="mt-2 flex flex-col gap-0.5 border-t border-border pt-2">
-				{/* 앱 자체를 손보는 자리끼리 묶는다. 프로젝트가 하나도 없어도 열린다. 앱 대화와 프로젝트별 대화를 모아 본다. 숫자는 앱 대화의 읽지 않은 답만 센다 — 프로젝트 대화는 그 프로젝트 줄이 이미 센다. */}
+				{/* 프로젝트에 매이지 않는 자리끼리 묶는다. 프로젝트가 하나도 없어도 열린다. 대화는 앱 대화와 프로젝트별 대화를 모아 보는 유일한 자리라, 숫자도 모든 대화의 읽지 않은 답을 센다 — 프로젝트 줄은 대화를 뺀다. */}
 				<NavItem
 					icon={<MessagesSquare />}
 					label="대화"
-					active={view === "allTalks"}
-					onClick={() => setView("allTalks")}
+					active={view === "talks"}
+					onClick={() => setView("talks")}
+					keyId="view.talks"
 					rail={rail}
-					running={appTalks.some((t) => t.run)}
-					notices={counts(GLOBAL_PID).total}
+					running={appTalks.some((t) => t.run) || byProject.some((g) => g.talks.some((t) => t.run))}
+					notices={projects.reduce((n, p) => n + counts(p.id).talks, counts(GLOBAL_PID).talks)}
 				/>
 				<NavItem icon={<BookMarked />} label="Claude 설정" active={view === "claude"} onClick={() => setView("claude")} rail={rail} />
 				<NavItem icon={<Settings2 />} label="설정" active={view === "settings"} onClick={() => setView("settings")} keyId="view.settings" rail={rail} />
@@ -123,7 +121,7 @@ function RailTip({ rail, label, children }: { rail: boolean; label: string; chil
 }
 
 /**
- * 2026.10.29 : 숫자를 「결정할 이슈」 수에서 그 프로젝트의 알림 수로 바꿨다. 알림함 = 프로젝트 줄의 합, 프로젝트 줄 = 탭 숫자의 합이 되게 한다.
+ * 2026.10.29 : 숫자를 「결정할 이슈」 수에서 그 프로젝트의 알림 수로 바꿨다. 알림함 = 프로젝트 줄과 「대화」 줄의 합, 프로젝트 줄 = 탭 숫자의 합이 되게 한다.
  * 결정할 이슈는 보드의 「내 차례」에서 본다.
  */
 function ProjectItem({
@@ -149,8 +147,9 @@ function ProjectItem({
 			onClick={onClick}
 			title={rail ? undefined : project.path}
 			aria-label={rail ? project.name : undefined}
+			{...roveItem(active)}
 			className={cn(
-				"group relative flex h-8 w-full items-center gap-2.5 rounded-md text-left text-[13.5px] transition-colors",
+				"group relative flex h-8 w-full items-center gap-2.5 rounded-md text-left text-[13.5px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
 				rail ? "justify-center px-0" : "px-2.5",
 				active ? "bg-hover font-semibold text-foreground" : "text-muted-foreground hover:bg-hover hover:text-foreground",
 			)}
@@ -199,8 +198,9 @@ function NavItem({
 			onClick={onClick}
 			aria-label={rail ? label : undefined}
 			{...(keyId ? keyAnchor(keyId, "end") : {})}
+			{...roveItem(active)}
 			className={cn(
-				"relative flex h-8 items-center gap-2.5 rounded-md text-[13.5px] transition-colors [&_svg]:size-4 [&_svg]:shrink-0",
+				"relative flex h-8 items-center gap-2.5 rounded-md text-[13.5px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset [&_svg]:size-4 [&_svg]:shrink-0",
 				rail ? "justify-center px-0" : "px-2.5",
 				active ? "bg-hover font-semibold text-foreground" : "text-muted-foreground hover:bg-hover hover:text-foreground",
 			)}

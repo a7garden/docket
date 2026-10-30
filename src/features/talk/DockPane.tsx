@@ -1,14 +1,17 @@
 import { type PointerEvent as ReactPointerEvent, useEffect, useRef } from "react";
 import { ArrowLeftRight, ChevronDown, Maximize2, X } from "lucide-react";
+import { useActionCommands } from "@/components/ActionMenu";
 import { Empty, RunDot } from "@/components/bits";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { inTyping, useCommands, useKey } from "@/lib/keys";
 import { MAIN_MIN, SIDEBAR_RAIL, useDockLayout } from "@/lib/layout";
 import { useAllTalks, useAppProject, useProjects } from "@/lib/queries";
+import { closingDock, focusInput, soon } from "@/lib/regions";
 import { DOCK_WIDTH, useUi } from "@/lib/store";
 import { GLOBAL_PID, type Issue } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { TalkPane, TalkTag } from "./Talks";
+import { TalkPane, TalkTag, useTalkActions } from "./Talks";
 
 /**
  * 옆 칸 대화. 본문 옆의 레이아웃 칸이라 보드 · 산출물 · 설정을 쓰는 동안 그대로 남는다.
@@ -24,6 +27,34 @@ export function DockPane() {
 	const { app: appTalks, byProject, loading } = useAllTalks(projects);
 	const talk = [...appTalks, ...byProject.flatMap((g) => g.talks)].find((t) => t.id === dock.talk?.id);
 	const path = talk?.projectId === GLOBAL_PID ? (app?.path ?? "") : (projects.find((p) => p.id === talk?.projectId)?.path ?? "");
+	const right = dock.side === "right";
+	const expand = () => {
+		if (!talk) return;
+		const ui = useUi.getState();
+		ui.openTalk({ projectId: talk.projectId, id: talk.id });
+		ui.setView("talks");
+	};
+
+	// 옆 칸에 초점이 있을 때만 받는다. 고르개와 같은 순서로 넘긴다. 입력칸에서 눌러도 쓰다 만 글은 대화마다 남는다.
+	const order = [...appTalks, ...byProject.flatMap((g) => g.talks)];
+	const step = (e: KeyboardEvent, d: number) => {
+		const from = e.target as HTMLElement | null;
+		if (!from?.closest?.("[data-dock]")) return false;
+		const next = order[order.findIndex((t) => t.id === talk?.id) + d];
+		if (!next) return;
+		useUi.getState().dockTalk({ projectId: next.projectId, id: next.id });
+		if (inTyping(from)) soon(() => focusInput("dock"));
+	};
+	useKey({ id: "dock.prev", combo: "Alt+ArrowUp", label: "옆 칸 이전 대화", group: "대화", series: "dock.nav", enabled: shown, run: (e) => step(e, -1) });
+	useKey({ id: "dock.next", combo: "Alt+ArrowDown", label: "옆 칸 다음 대화", group: "대화", series: "dock.nav", enabled: shown, run: (e) => step(e, 1) });
+	useCommands(
+		shown
+			? [
+					{ label: right ? "옆 칸을 왼쪽으로 옮기기" : "옆 칸을 오른쪽으로 옮기기", sub: "옆 칸", onSelect: () => setDock({ side: right ? "left" : "right" }) },
+					{ label: "옆 칸 대화를 대화 화면으로 펼치기", sub: "옆 칸", disabled: !talk, onSelect: expand },
+				]
+			: [],
+	);
 
 	// 이슈 · 산출물 상세 창이 이 칸을 피해 열리도록 칸이 차지한 폭을 CSS 변수로 알린다. 상세 창은 body 에 그려져 이 칸의 조상이 아니다.
 	useEffect(() => {
@@ -33,10 +64,10 @@ export function DockPane() {
 	}, [shown, width, dock.side]);
 
 	if (!shown) return null;
-	const right = dock.side === "right";
 	return (
 		<aside
 			data-dock
+			data-region="dock"
 			aria-label="옆 칸 대화"
 			style={{ width }}
 			className={cn("relative flex shrink-0 flex-col bg-background", right ? "border-l border-border" : "border-r border-border")}
@@ -56,24 +87,22 @@ export function DockPane() {
 				<Button
 					size="icon-sm"
 					variant="ghost"
-					aria-label="대화 탭으로 펼치기"
-					title="대화 탭으로 펼치기"
+					aria-label="대화 화면으로 펼치기"
+					title="대화 화면으로 펼치기"
 					disabled={!talk}
-					onClick={() => {
-						if (!talk) return;
-						const ui = useUi.getState();
-						ui.openTalk({ projectId: talk.projectId, id: talk.id });
-						ui.setView(talk.projectId === GLOBAL_PID ? "allTalks" : "talks");
-					}}
+					onClick={expand}
 				>
 					<Maximize2 />
 				</Button>
-				<Button size="icon-sm" variant="ghost" aria-label="옆 칸 닫기" title="옆 칸 닫기 (Ctrl+J)" onClick={() => setDock({ open: false })}>
+				<Button size="icon-sm" variant="ghost" aria-label="옆 칸 닫기" title="옆 칸 닫기 (Ctrl+J)" onClick={() => closingDock(() => setDock({ open: false }))}>
 					<X />
 				</Button>
 			</header>
 			{talk ? (
-				<TalkPane key={talk.id} talk={talk} projectPath={path} compact />
+				<>
+					<DockTalkCommands key={`c:${talk.id}`} talk={talk} />
+					<TalkPane key={talk.id} talk={talk} projectPath={path} compact />
+				</>
 			) : (
 				!loading && <Empty className="grid flex-1 place-items-center px-6 break-keep">띄워 둔 대화를 찾지 못했습니다. 위에서 다른 대화를 고르세요.</Empty>
 			)}
@@ -81,7 +110,14 @@ export function DockPane() {
 	);
 }
 
-/** 머리의 제목이 곧 대화 고르기다. 대화 탭 목록과 같이 앱 · 프로젝트별로 묶어 보인다. */
+/** 옆 칸에는 「더 보기」가 없다. 대화 동작은 Ctrl+K 와 대화 목록의 우클릭으로 닿는다. */
+function DockTalkCommands({ talk }: { talk: Issue }) {
+	const { items, dialogs } = useTalkActions(talk, true);
+	useActionCommands(items, "옆 칸");
+	return dialogs;
+}
+
+/** 머리의 제목이 곧 대화 고르기다. 대화 화면 목록과 같이 앱 · 프로젝트별로 묶어 보인다. */
 function TalkPicker({ talk }: { talk: Issue | undefined }) {
 	const { data: projects = [] } = useProjects();
 	const { app, byProject } = useAllTalks(projects);

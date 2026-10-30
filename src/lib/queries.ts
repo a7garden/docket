@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { useUi } from "./store";
-import { GLOBAL_PID, type PluginPlace, type Project } from "./types";
+import { GLOBAL_PID, type Issue, type PluginPlace, type Project } from "./types";
 
 export const qk = {
 	info: ["info"] as const,
@@ -79,7 +79,7 @@ export function useAppProject() {
 	return useQuery({ queryKey: qk.appProject, queryFn: api.appProject, staleTime: Infinity });
 }
 
-/** 앱 대화와 모든 프로젝트 대화. 대화 탭 목록 · 옆 칸이 함께 쓴다 — Ctrl+K 와 같은 쿼리 키라 캐시를 나눠 쓴다. */
+/** 앱 대화와 모든 프로젝트 대화. 대화 화면 목록 · 옆 칸 · 사이드바가 함께 쓴다 — Ctrl+K 와 같은 쿼리 키라 캐시를 나눠 쓴다. */
 export function useAllTalks(projects: Project[]) {
 	const app = useTalks(GLOBAL_PID);
 	const lists = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id), ...focusOnly(p.id) })) });
@@ -97,6 +97,21 @@ export function useIssues(pid: string | null) {
 
 export function useTalks(pid: string | null) {
 	return useQuery({ queryKey: qk.talks(pid ?? ""), queryFn: () => api.talks(pid!), enabled: !!pid });
+}
+
+/** 그 메모에서 갈라 낸 대화 중 가장 최근 것. 목록이 최근 순이다. 지운 대화는 목록에 없어 저절로 빠진다. */
+export const forkOf = (talks: Issue[], issueId: string) => talks.find((t) => t.fromIssue?.id === issueId);
+
+/** 메모에서 갈라 낸 대화의 id. 보드 카드마다 붙으므로 id 만 골라, 대화에 답이 오가는 동안 카드가 다시 그려지지 않게 한다. */
+export function useForkedTalk(issue: Issue) {
+	const { data } = useQuery({
+		queryKey: qk.talks(issue.projectId),
+		queryFn: () => api.talks(issue.projectId),
+		enabled: !issue.talk,
+		select: (talks) => forkOf(talks, issue.id)?.id,
+		...focusOnly(issue.projectId),
+	});
+	return data;
 }
 
 export function useDeliverables(pid: string | null) {

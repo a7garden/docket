@@ -81,7 +81,7 @@ export function useMarkSeen(id: string | undefined, at: number, active = true) {
 
 export type NoticeTone = "brand" | "ok" | "danger";
 
-/** 알림이 걸리는 프로젝트 탭. 이슈 안 대화 탭의 답은 그 이슈의 알림이라 보드로 센다. */
+/** 알림이 걸리는 화면. talks 는 프로젝트 탭이 아니라 사이드바 「대화」로 센다. 이슈 안 대화 탭의 답은 그 이슈의 알림이라 보드로 센다. */
 export type NoticeView = "board" | "talks" | "deliverables";
 
 export interface Notice extends Target {
@@ -136,7 +136,7 @@ export function useNotices(): Notice[] {
 		talks: talks[n]?.data ?? [],
 		docs: docs[n]?.data ?? [],
 	}));
-	// 앱 대화는 프로젝트가 없다. 알림 줄이 쓰는 이름만 채운 칸을 둔다 — 셈은 GLOBAL_PID 로 묶여 어느 프로젝트 숫자에도 더해지지 않고 알림함과 대화 탭의 「앱」 묶음에만 보인다.
+	// 앱 대화는 프로젝트가 없다. 알림 줄이 쓰는 이름만 채운 칸을 둔다 — 셈은 GLOBAL_PID 로 묶여 어느 프로젝트 숫자에도 더해지지 않고 알림함과 사이드바 「대화」의 숫자에만 보인다.
 	all.push({ project: { id: GLOBAL_PID, name: "앱" } as Project, issues: [], talks: appTalks, docs: [] });
 
 	const out: Notice[] = [];

@@ -254,8 +254,6 @@ export function Board({ project }: { project: Project }) {
 		{ label: `고른 ${sel.count}개 보류`, icon: <Archive />, disabled: !canDrop, onSelect: drop },
 		{ label: `고른 ${sel.count}개 지우기`, icon: <Trash2 />, destructive: true, disabled: !canDelete, onSelect: () => setConfirmDelete(true) },
 	];
-	// 창 · 메뉴가 떠 있으면 키는 그쪽 것이다. Esc 로 메뉴를 닫았는데 고른 것까지 풀리면 다시 골라야 한다.
-	const overlay = () => !!document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]');
 	useKey({
 		id: "board.selectAll",
 		combo: "Mod+A",
@@ -264,7 +262,7 @@ export function Board({ project }: { project: Project }) {
 		group: "보드",
 		inInput: "skip",
 		enabled: !sheetOpen && order.length > 0,
-		run: () => (overlay() ? false : sel.all()),
+		run: () => sel.all(),
 	});
 	useKey({
 		id: "board.clearSelection",
@@ -273,7 +271,7 @@ export function Board({ project }: { project: Project }) {
 		group: "보드",
 		inInput: "skip",
 		enabled: !sheetOpen && sel.count > 0,
-		run: () => (overlay() ? false : sel.clear()),
+		run: () => sel.clear(),
 	});
 
 	const shown = stages.reduce((n, s) => n + groups[s.id].length, 0) + (withDropped ? groups.dropped.length : 0);
@@ -404,6 +402,7 @@ function FilterBar({
 		combo: "Mod+F",
 		label: "메모 찾기",
 		group: "보드",
+		command: true,
 		run: () => {
 			input.current?.focus();
 			input.current?.select();

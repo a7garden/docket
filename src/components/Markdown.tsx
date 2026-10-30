@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "@/lib/api";
 import { fileUrl, isUnder, resolveImage } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { ImageViewer, type ViewerState } from "./ImageViewer";
 import { Mockup } from "./Mockup";
 
 /** hast 노드 중 여기서 읽는 것만. 타입 패키지를 따로 들이지 않는다. */
@@ -49,6 +50,7 @@ function MdImage({ src, alt, base, root }: { src: string; alt: string; base?: st
 	const ready = direct ?? (path && base && isUnder(path, base) ? fileUrl(path) : undefined);
 	const [url, setUrl] = useState(ready);
 	const [broken, setBroken] = useState(false);
+	const [view, setView] = useState<ViewerState | null>(null);
 	useEffect(() => {
 		setBroken(false);
 		if (ready || !path) {
@@ -65,7 +67,35 @@ function MdImage({ src, alt, base, root }: { src: string; alt: string; base?: st
 	if (!direct && !path) return <span className="img-missing">그림 주소가 비어 있습니다{alt && ` · ${alt}`}</span>;
 	if (broken) return <span className="img-missing">그림을 열 수 없습니다 · {path ?? src}</span>;
 	if (!url) return null;
-	return <img src={url} alt={alt} loading="lazy" onError={() => setBroken(true)} />;
+	return (
+		<>
+			<button
+				type="button"
+				className="md-image"
+				title="크게 보기"
+				onClick={(e) => {
+					// 링크를 건 그림은 링크가 받는다. 눌러서 페이지를 여는 배지 같은 것이다.
+					if (e.currentTarget.closest("a")) return;
+					e.stopPropagation();
+					setView(imageGroup(e.currentTarget));
+				}}
+			>
+				<img src={url} alt={alt} loading="lazy" data-path={path} onError={() => setBroken(true)} />
+			</button>
+			{view && <ImageViewer {...view} onClose={() => setView(null)} />}
+		</>
+	);
+}
+
+/**
+ * 누른 그림과 같은 묶음의 그림을 화면 순서대로 모은다. 묶음은 가장 가까운 `data-image-group`, 없으면 그 글 하나다.
+ * Markdown 은 memo 라 렌더 중에 등록하면 순서를 따로 맞춰야 한다. DOM 은 곧 화면 순서이고, 깨진 그림은 아예 없다.
+ */
+function imageGroup(button: HTMLElement): ViewerState {
+	const root = button.closest("[data-image-group]") ?? button.closest(".prose-docket");
+	const imgs = [...(root?.querySelectorAll<HTMLImageElement>(".md-image img") ?? [])].filter((i) => !i.closest("a"));
+	const items = imgs.map((i) => ({ url: i.src, name: i.alt || (i.dataset.path ?? i.src).split(/[\\/]/).pop() || "그림", path: i.dataset.path }));
+	return { items, start: Math.max(0, imgs.indexOf(button.querySelector("img")!)) };
 }
 
 /**

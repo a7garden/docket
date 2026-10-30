@@ -488,6 +488,9 @@ pub struct RunRecord {
 	pub images: Vec<String>,
 	/// 이 실행이 돈 권한. 나중에 「그때 무엇이 열려 있었나」를 설정이 바뀐 뒤에도 알 수 있게 실행마다 남긴다.
 	pub mode: String,
+	/// 대화 차례가 돈 모드. 다시 시도할 때 그대로 쓴다. 이 칸이 생기기 전의 기록은 비어 있다.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub chat_mode: Option<ChatMode>,
 	pub allowed: Vec<String>,
 	pub denied_rules: Vec<String>,
 	/// Claude 가 실행하려 한 명령(Bash · PowerShell). 막힌 것도 들어 있다.
@@ -604,15 +607,55 @@ pub struct Worktree {
 	pub at: i64,
 }
 
-/// 실행이 끝나기를 기다리는 질문 하나. 보낼 때의 「읽기 전용」 여부와 첨부를 따로 든다.
+/// 대화 한 차례의 권한. 사용자가 입력칸에서 고른 값만 들어온다. 실행은 차례마다 이 값으로 권한을 정한다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum ChatMode {
+	/// 읽기 도구만 연다.
+	#[default]
+	Read,
+	/// 허용 목록 밖의 도구를 실행 전에 화면에서 묻는다. 아직 승인 받을 곳이 없어 보낼 수 없다.
+	Ask,
+	/// 편집과 허용 목록만 묻지 않는다. 목록 밖의 명령은 막힌다.
+	Auto,
+	/// 명령 · 웹 · 스킬까지 묻지 않는다. 거부 규칙은 지킨다.
+	Bypass,
+}
+
+impl ChatMode {
+	pub fn can_edit(self) -> bool {
+		matches!(self, ChatMode::Auto | ChatMode::Bypass)
+	}
+}
+
+/// 실행이 끝나기를 기다리는 질문 하나. 보낼 때의 권한 모드와 첨부를 따로 든다.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, from = "SavedQueuedChat")]
 pub struct QueuedChat {
 	pub id: String,
 	pub text: String,
-	pub edit: bool,
+	pub mode: ChatMode,
 	pub images: Vec<String>,
 	pub at: i64,
+}
+
+/// 저장된 대기열을 읽는 꼴. 모드가 생기기 전의 질문은 edit 만 들고 있다.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct SavedQueuedChat {
+	id: String,
+	text: String,
+	mode: Option<ChatMode>,
+	edit: bool,
+	images: Vec<String>,
+	at: i64,
+}
+
+impl From<SavedQueuedChat> for QueuedChat {
+	fn from(q: SavedQueuedChat) -> Self {
+		let mode = q.mode.unwrap_or(if q.edit { ChatMode::Auto } else { ChatMode::Read });
+		QueuedChat { id: q.id, text: q.text, mode, images: q.images, at: q.at }
+	}
 }
 
 impl Issue {

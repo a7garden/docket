@@ -1,38 +1,33 @@
 import { type ClipboardEvent, type KeyboardEvent, memo, type RefObject, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ArrowDown, Check, ChevronRight, Clock, Copy, History, Image as ImageIcon, ImagePlus, MessagesSquare, SquareTerminal, StickyNote, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Clock, Copy, History, Image as ImageIcon, ImagePlus, MessagesSquare, Square, SquareTerminal, StickyNote, X } from "lucide-react";
 import { toast } from "sonner";
 import { copy } from "@/components/ActionMenu";
+import { AttachmentThumbs, DropOverlay } from "@/components/AttachmentThumbs";
 import { Chip } from "@/components/bits";
 import { RunEvents, RunLog } from "@/components/RunLog";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Kbd } from "@/components/ui/kbd";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
+import { canEdit, CHAT_MODES, chatModeInfo, mergeChatModes, useChatMode } from "@/lib/chatMode";
 import { useDropZone } from "@/lib/drop";
-import { attachmentPath, clock, cost, duration, fileUrl, isImage, newId, relTime, tokens } from "@/lib/format";
-import { useIssues, useProjects, useSettings, useTerminalPlugin } from "@/lib/queries";
+import { attachmentPath, clock, cost, duration, newId, relTime, tokens } from "@/lib/format";
+import { forkOf, useForkedTalk, useIssues, useProjects, useSettings, useTerminalPlugin } from "@/lib/queries";
 import { RUN_KIND_LABEL } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
-import type { HistoryEntry, Issue, QueuedChat, RunRecord, Turn } from "@/lib/types";
+import type { ChatMode, HistoryEntry, Issue, QueuedChat, RunRecord, Turn } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** 쓰다 만 질문은 탭을 오가도 남는다. 그래서 상태를 상세 창이 들고 있다. */
 export interface Draft {
 	text: string;
-	/** 대화는 기본으로 고칠 수 있다. 끄면 읽기 전용으로 묻는다. */
-	edit: boolean;
 	/** 붙여 넣거나 끌어 놓은 파일. 올리는 즉시 이슈 첨부 폴더에 들어가고, 보낼 때 이름만 넘긴다. */
 	images: string[];
 }
 
-export const NO_DRAFT: Draft = { text: "", edit: true, images: [] };
-
-/** 프로젝트 대화는 구조를 묻는 데서 시작하므로 읽기 전용이 기본이다. 구현과 줄을 서지 않아 바로 답한다. */
-export const NO_TALK_DRAFT: Draft = { text: "", edit: false, images: [] };
+export const NO_DRAFT: Draft = { text: "", images: [] };
 
 /** 작은따옴표로 감싸면 PowerShell · bash 어느 쪽에 붙여도 경로의 $ · 빈칸이 풀리지 않는다. */
 function resumeCommand(path: string, sessionId: string) {
@@ -196,43 +191,12 @@ function Bubble({ text, from, issue, images = [] }: { text: string; from?: strin
 	return (
 		<div className="flex flex-col items-end gap-1">
 			{from && <span className="text-[11.5px] text-subtle">{from}</span>}
-			{issue && images.length > 0 && <Thumbs issue={issue} names={images} />}
+			{issue && images.length > 0 && <AttachmentThumbs className="max-w-[85%] justify-end" names={images} pathOf={(n) => attachmentPath(issue, n)} />}
 			{text.trim() && (
 				<div className="max-w-[85%] rounded-lg bg-secondary px-3.5 py-2.5 text-[13.5px] leading-relaxed break-keep whitespace-pre-wrap text-foreground selectable">
 					{text}
 				</div>
 			)}
-		</div>
-	);
-}
-
-/** 대화에 붙인 첨부. 누르면 기본 프로그램으로 연다. onRemove 를 주면 보내기 전 초안에서 뺄 수 있다. */
-function Thumbs({ issue, names, onRemove }: { issue: Issue; names: string[]; onRemove?: (name: string) => void }) {
-	return (
-		<div className={cn("flex flex-wrap gap-2", !onRemove && "max-w-[85%] justify-end")}>
-			{names.map((name) => (
-				<div key={name} className="group relative">
-					<button type="button" title={`${name} 열기`} onClick={() => void api.open(attachmentPath(issue, name))}>
-						{isImage(name) ? (
-							<img src={fileUrl(attachmentPath(issue, name))} alt={name} className="h-16 w-24 rounded-md border border-border object-cover" />
-						) : (
-							<div className="flex h-16 w-24 items-center justify-center rounded-md border border-border px-2 text-center text-[11px] break-all text-muted-foreground">
-								{name}
-							</div>
-						)}
-					</button>
-					{onRemove && (
-						<button
-							type="button"
-							aria-label={`${name} 빼기`}
-							onClick={() => onRemove(name)}
-							className="absolute -top-1.5 -right-1.5 hidden size-5 place-items-center rounded-full border border-border bg-popover text-muted-foreground group-hover:grid hover:text-foreground"
-						>
-							<X className="size-3" />
-						</button>
-					)}
-				</div>
-			))}
 		</div>
 	);
 }
@@ -306,16 +270,17 @@ export function SessionBar({ issue, projectPath, compact = false }: { issue: Iss
  */
 export function PromoteButton({ issue }: { issue: Issue }) {
 	const [busy, setBusy] = useState(false);
+	const forked = useForkedTalk(issue);
 	return (
 		<Button
 			size="sm"
 			variant="ghost"
-			disabled={busy || !!issue.run}
-			title={issue.run ? "실행이 끝나면 갈라 낼 수 있습니다" : "메모는 그대로 두고 이 대화를 프로젝트 대화로 갈라 내 옆 칸에 띄웁니다"}
+			disabled={busy || (!forked && !!issue.run)}
+			title={forked ? "이 메모에서 갈라 낸 대화를 옆 칸에 띄웁니다" : issue.run ? "실행이 끝나면 갈라 낼 수 있습니다" : "메모는 그대로 두고 이 대화를 프로젝트 대화로 갈라 내 옆 칸에 띄웁니다"}
 			onClick={() => void promoteTalk(issue, setBusy)}
 		>
 			<MessagesSquare />
-			대화로 이어 가기
+			{forked ? "갈라 낸 대화 열기" : "대화로 이어 가기"}
 		</Button>
 	);
 }
@@ -323,7 +288,8 @@ export function PromoteButton({ issue }: { issue: Issue }) {
 export async function promoteTalk(issue: Issue, setBusy: (b: boolean) => void = () => {}) {
 	setBusy(true);
 	try {
-		const t = await api.talkPromote(issue.projectId, issue.id, newId());
+		// 화면에 보인 이름과 상관없이 목록을 새로 읽어 고른다. 낡은 값으로 고르면 같은 메모의 대화가 늘어난다.
+		const t = forkOf(await api.talks(issue.projectId), issue.id) ?? (await api.talkPromote(issue.projectId, issue.id, newId()));
 		useUi.getState().dockTalk({ projectId: t.projectId, id: t.id });
 	} catch (e) {
 		toast.error(errorText(e));
@@ -526,7 +492,10 @@ function QueueList({ issue, onEdit, disabled }: { issue: Issue; onEdit: (q: Queu
 							{q.images.length}
 						</span>
 					)}
-					{!q.edit && <span className="shrink-0 text-subtle">읽기 전용 ·</span>}
+					<span className="flex shrink-0 items-center gap-1.5 text-subtle">
+						<ModeDot mode={q.mode} />
+						{chatModeInfo(q.mode).label} ·
+					</span>
 					<span className="min-w-0 flex-1 truncate text-foreground" title={q.text}>
 						{q.text.trim() || "첨부만"}
 					</span>
@@ -548,10 +517,50 @@ function QueueList({ issue, onEdit, disabled }: { issue: Issue; onEdit: (q: Queu
 	);
 }
 
+function ModeDot({ mode }: { mode: ChatMode }) {
+	return <span aria-hidden className={cn("size-2 shrink-0 rounded-full", chatModeInfo(mode).dot)} />;
+}
+
+/** 입력칸의 권한 모드. 차례마다 권한을 정해 시작하므로 실행 중에 바꾸면 다음 차례부터 적용한다. 좁은 칸에서도 권한 무시는 이름을 줄이지 않는다. */
+function ModeMenu({ mode, onMode, compact }: { mode: ChatMode; onMode: (m: ChatMode) => void; compact: boolean }) {
+	const cur = chatModeInfo(mode);
+	return (
+		<DropdownMenu>
+			<DropdownMenuTrigger asChild>
+				<Button size="sm" variant="ghost" className="shrink-0 gap-1.5 px-2 text-[12.5px] text-muted-foreground" title={`권한 모드 — ${cur.desc}. 바꾸면 다음 차례부터 적용합니다`}>
+					<ModeDot mode={mode} />
+					{compact ? cur.short : cur.label}
+					<ChevronDown className="size-3.5 text-subtle" />
+				</Button>
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="start" className="pop w-80">
+				<DropdownMenuLabel className="text-[12px] font-normal text-subtle">권한 모드 · 다음 차례부터 적용합니다</DropdownMenuLabel>
+				{CHAT_MODES.map((m) => (
+					<DropdownMenuItem key={m.value} disabled={!!m.unavailable} onSelect={() => onMode(m.value)} className="flex items-start gap-2.5">
+						<span className="flex h-[18px] shrink-0 items-center">
+							<ModeDot mode={m.value} />
+						</span>
+						<span className="flex min-w-0 flex-1 flex-col gap-0.5">
+							<span className="text-[13px] text-foreground">
+								{m.label}
+								{m.unavailable && <span className="ml-1.5 text-[11.5px] text-subtle">{m.unavailable}</span>}
+							</span>
+							<span className="text-[12px] leading-snug break-keep text-subtle">{m.desc}</span>
+						</span>
+						{m.value === mode && <Check className="mt-0.5 size-3.5 shrink-0" aria-label="지금 모드" />}
+					</DropdownMenuItem>
+				))}
+			</DropdownMenuContent>
+		</DropdownMenu>
+	);
+}
+
 /** 상세 창 아래 칸. 실행 중이면 무엇을 하는지와 중지를 두고, 그 사이 적은 질문은 대기열에 넣는다. */
-export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: Draft; onDraft: (d: Draft) => void }) {
+export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = false }: { issue: Issue; draft: Draft; onDraft: (d: Draft) => void; beforeSend?: () => Promise<void>; compact?: boolean }) {
 	const [busy, setBusy] = useState(false);
 	const sendKey = useSendKey();
+	const mode = useChatMode(issue);
+	const setChatMode = useUi((s) => s.setChatMode);
 	const activity = useLive((s) => (issue.run ? s.byTarget[issue.id]?.activity : undefined));
 	const { projectId: p, id } = issue;
 	const running = !!issue.run;
@@ -571,7 +580,9 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 	const send = () => {
 		if (busy || empty) return;
 		void go(async () => {
-			await api.issueChat(p, id, draft.text, draft.edit, draft.images);
+			await beforeSend?.();
+			await api.issueChat(p, id, draft.text, mode, draft.images);
+			setChatMode(id, mode);
 			onDraft({ ...draft, text: "", images: [] });
 			scrollChatToBottom(id);
 		});
@@ -582,10 +593,10 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 			await api.issueQueueRemove(p, id, q.id, true);
 			const d = latest.current;
 			const blank = !d.text.trim() && d.images.length === 0;
+			setChatMode(id, blank ? q.mode : mergeChatModes(mode, q.mode));
 			onDraft({
 				text: [d.text.trimEnd(), q.text].filter((t) => t.trim()).join("\n\n"),
 				images: [...d.images, ...q.images.filter((n) => !d.images.includes(n))],
-				edit: blank ? q.edit : d.edit || q.edit,
 			});
 		});
 
@@ -613,83 +624,93 @@ export function ChatComposer({ issue, draft, onDraft }: { issue: Issue; draft: D
 		void api.attachmentDelete(p, id, name).catch(() => {});
 	};
 
+	const keys = ` · ${sendKey.label}${sendKey.hint}`;
 	return (
-		<div ref={dropRef} className={cn("flex flex-col gap-2.5 border-t border-border px-6 py-4", over && "bg-secondary")}>
+		<div ref={dropRef} className={cn("flex flex-col gap-2 border-t border-border py-3", compact ? "px-4" : "px-6")}>
 			<QueueList issue={issue} onEdit={editQueued} disabled={busy} />
-			{draft.images.length > 0 && <Thumbs issue={issue} names={draft.images} onRemove={remove} />}
-			<Textarea
-				value={draft.text}
-				onChange={(e) => onDraft({ ...draft, text: e.target.value })}
-				onPaste={paste}
-				onKeyDown={(e) => {
-					if (sendKey.isSend(e)) send();
-				}}
-				placeholder={
-					(draft.edit ? "묻거나 고칠 것" : "물을 것") +
-					(running
-						? " · 답이 끝나면 대기 중인 질문과 묶어 보냅니다"
-						: issue.sessionId
-							? " · 이미지는 붙여 넣거나 끌어 놓습니다"
-							: issue.talk
-								? " · 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다"
-								: " · 메모를 읽고 새 세션을 엽니다") +
-					sendKey.hint
-				}
-				className="max-h-48 min-h-20 resize-none bg-transparent text-[13.5px] leading-relaxed"
-			/>
-			<div className="flex items-center gap-2">
-				<Button
-					size="icon-sm"
-					variant="ghost"
-					aria-label="파일 첨부"
-					title="이미지 · 파일 첨부 (붙여넣기 · 끌어 놓기도 됩니다)"
-					disabled={busy}
-					onClick={async () => {
-						const picked = await openDialog({ multiple: true, title: "대화에 첨부할 파일" });
-						if (Array.isArray(picked) && picked.length) importFiles(picked);
+			<div className="relative rounded-xl border border-border bg-card transition-colors focus-within:border-border-strong">
+				{over && <DropOverlay />}
+				{draft.images.length > 0 && <AttachmentThumbs className="px-3 pt-3" names={draft.images} pathOf={(n) => attachmentPath(issue, n)} onRemove={remove} />}
+				<Textarea
+					data-composer
+					value={draft.text}
+					onChange={(e) => onDraft({ ...draft, text: e.target.value })}
+					onPaste={paste}
+					onKeyDown={(e) => {
+						if (sendKey.isSend(e)) send();
 					}}
-				>
-					<ImagePlus />
-				</Button>
-				<label
-					className="flex items-center gap-2 text-[12.5px] text-muted-foreground"
-					title="끄면 구현과 같은 권한으로 돌아 파일을 고칠 수 있고, 바뀐 파일은 변경 탭에 쌓입니다. 켜면 읽기 도구만 열고 구현과 줄을 서지 않습니다."
-				>
-					<Switch size="sm" checked={!draft.edit} onCheckedChange={(ro) => onDraft({ ...draft, edit: !ro })} />
-					읽기 전용
-				</label>
-				<span className="min-w-0 flex-1 truncate text-right text-[12.5px] text-subtle">
-					{running && (issue.run?.phase === "queued" ? issue.run.waitFor || "앞선 작업을 기다리는 중" : activity)}
-				</span>
-				{running && (
-					<Button variant="outline" disabled={busy} onClick={() => void go(() => api.issueStop(p, id))}>
-						중지
-					</Button>
-				)}
-				{/* 중지했거나 앱을 다시 켜서 남은 대기열. 저절로 보내지 않고 사용자가 이어 보낸다. */}
-				{!running && waiting > 0 && (
+					placeholder={
+						(canEdit(mode) ? "묻거나 고칠 것" : "물을 것") +
+						(running
+							? " · 답이 끝나면 대기 중인 질문과 묶어 보냅니다"
+							: issue.sessionId
+								? ""
+								: issue.talk
+									? " · 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다"
+									: " · 메모를 읽고 새 세션을 엽니다")
+					}
+					className="max-h-48 min-h-16 resize-none rounded-none border-0 bg-transparent px-3 pt-2.5 pb-1 text-[13.5px] leading-relaxed focus-visible:ring-0 dark:bg-transparent"
+				/>
+				<div className="flex items-center gap-1 px-2 pb-2">
 					<Button
-						variant="outline"
+						size="icon-sm"
+						variant="ghost"
+						aria-label="파일 첨부"
+						title="이미지 · 파일 첨부 — 붙여 넣거나 끌어 놓아도 됩니다"
 						disabled={busy}
-						title="대기 중인 질문을 한 차례로 묶어 보냅니다"
-						onClick={() =>
-							void go(async () => {
-								await api.issueQueueSend(p, id);
-								scrollChatToBottom(id);
-							})
-						}
+						onClick={async () => {
+							const picked = await openDialog({ multiple: true, title: "대화에 첨부할 파일" });
+							if (Array.isArray(picked) && picked.length) importFiles(picked);
+						}}
 					>
-						대기 {waiting}건 보내기
+						<ImagePlus />
 					</Button>
-				)}
-				<Button
-					disabled={busy || empty}
-					title={running ? "답이 끝나면 대기 중인 질문과 묶어 보냅니다" : waiting > 0 ? "대기 중인 질문 뒤에 붙여 함께 보냅니다" : undefined}
-					onClick={send}
-				>
-					{running ? "대기열에 넣기" : "보내기"}
-					<Kbd className="ml-1 bg-primary-foreground/15 text-primary-foreground">{sendKey.label}</Kbd>
-				</Button>
+					<ModeMenu mode={mode} onMode={(m) => setChatMode(id, m)} compact={compact} />
+					<span className="mx-1 min-w-0 flex-1 truncate text-right text-[12.5px] text-subtle">
+						{running && (issue.run?.phase === "queued" ? issue.run.waitFor || "앞선 작업을 기다리는 중" : activity)}
+					</span>
+					{/* 중지했거나 앱을 다시 켜서 남은 대기열. 저절로 보내지 않고 사용자가 이어 보낸다. */}
+					{!running && waiting > 0 && (
+						<Button
+							size="sm"
+							variant="outline"
+							disabled={busy}
+							className="shrink-0"
+							title="대기 중인 질문을 한 차례로 묶어 보냅니다"
+							onClick={() =>
+								void go(async () => {
+									await api.issueQueueSend(p, id);
+									scrollChatToBottom(id);
+								})
+							}
+						>
+							대기 {waiting}건 보내기
+						</Button>
+					)}
+					{running ? (
+						<>
+							{!empty && (
+								<Button size="sm" variant="outline" disabled={busy} className="shrink-0" title={`답이 끝나면 대기 중인 질문과 묶어 보냅니다${keys}`} onClick={send}>
+									대기열에 넣기
+								</Button>
+							)}
+							<Button size="icon-sm" disabled={busy} className="ml-1 shrink-0 rounded-full" aria-label="중지" title="중지" onClick={() => void go(() => api.issueStop(p, id))}>
+								<Square className="size-3 fill-current" />
+							</Button>
+						</>
+					) : (
+						<Button
+							size="icon-sm"
+							disabled={busy || empty}
+							className="ml-1 shrink-0 rounded-full"
+							aria-label="보내기"
+							title={`${waiting > 0 ? "대기 중인 질문 뒤에 붙여 함께 보내기" : "보내기"}${keys}`}
+							onClick={send}
+						>
+							<ArrowUp />
+						</Button>
+					)}
+				</div>
 			</div>
 		</div>
 	);

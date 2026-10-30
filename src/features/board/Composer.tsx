@@ -1,14 +1,15 @@
 import { useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ImagePlus, StickyNote, X } from "lucide-react";
+import { ImagePlus, StickyNote } from "lucide-react";
 import { toast } from "sonner";
+import { AttachmentThumbs, DropOverlay } from "@/components/AttachmentThumbs";
 import { MarkdownEditor, type EditorHandle } from "@/components/MarkdownEditor";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Switch } from "@/components/ui/switch";
 import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
-import { attachmentRef, delayText, fileUrl, isImage, joinPath, newId } from "@/lib/format";
+import { attachmentRef, delayText, joinPath, newId } from "@/lib/format";
 import { useKey } from "@/lib/keys";
 import { useAppInfo, useSettings } from "@/lib/queries";
 import type { Project } from "@/lib/types";
@@ -40,6 +41,7 @@ export function Composer({ project }: { project: Project }) {
 		combo: "Mod+N",
 		label: "메모 붙이기",
 		group: "보드",
+		command: true,
 		run: () => {
 			setOpen(true);
 			setTimeout(() => editor.current?.focus(), 30);
@@ -123,13 +125,13 @@ export function Composer({ project }: { project: Project }) {
 		<div
 			ref={dropRef}
 			className={cn(
-				"rounded-md border border-border-strong bg-card p-4 transition-colors",
-				over && "border-foreground/50",
+				"relative rounded-md border border-border-strong bg-card p-4 transition-colors",
 			)}
 			onKeyDown={(e) => {
 				if (e.key === "Escape") setOpen(false);
 			}}
 		>
+			{over && <DropOverlay />}
 			<MarkdownEditor
 				ref={editor}
 				value={note}
@@ -145,26 +147,8 @@ export function Composer({ project }: { project: Project }) {
 				onSubmit={submit}
 				onPasteImage={pasteImage}
 			/>
-			{attachments.length > 0 && (
-				<div className="mt-3 flex flex-wrap gap-2">
-					{attachments.map((name) => (
-						<div key={name} className="group relative">
-							{isImage(name) && draftDir ? (
-								<img src={fileUrl(joinPath(draftDir, "attachments", name))} alt={name} className="h-16 w-24 rounded-md border border-border object-cover" />
-							) : (
-								<div className="flex h-16 w-24 items-center justify-center rounded-md border border-border px-2 text-center text-[11px] break-all text-muted-foreground">{name}</div>
-							)}
-							<button
-								type="button"
-								aria-label={`${name} 빼기`}
-								onClick={() => void removeAttachment(name)}
-								className="absolute -top-1.5 -right-1.5 hidden size-5 place-items-center rounded-full border border-border bg-popover text-muted-foreground group-hover:grid hover:text-foreground"
-							>
-								<X className="size-3" />
-							</button>
-						</div>
-					))}
-				</div>
+			{attachments.length > 0 && draftDir && (
+				<AttachmentThumbs className="mt-3" names={attachments} pathOf={(name) => joinPath(draftDir, "attachments", name)} onRemove={(name) => void removeAttachment(name)} />
 			)}
 			<div className="mt-3 flex items-center gap-3 border-t border-border pt-3">
 				<Button variant="ghost" size="sm" onClick={() => void pickImages()}>
