@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { ChevronDown, ChevronRight, MessageSquarePlus } from "lucide-react";
-import { Empty, RunDot } from "@/components/bits";
+import { RunDot } from "@/components/bits";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useWithNewTalk } from "@/lib/newTalk";
@@ -17,7 +17,7 @@ import { TalkRow, TalkSlot, useTalkKeys } from "./Talks";
  * 프로젝트 대화를 열어도 사이드바의 현재 프로젝트는 그대로다. 프로젝트가 하나도 없어도 열린다.
  */
 export function AllTalks() {
-	const { data: projects = [] } = useProjects();
+	const { data: projects = [], isLoading: projectsLoading } = useProjects();
 	const { data: app } = useAppProject();
 	const { app: savedApp, byProject: savedByProject, loading } = useAllTalks(projects);
 	const withNew = useWithNewTalk();
@@ -35,10 +35,13 @@ export function AllTalks() {
 	const targetName = target === GLOBAL_PID ? "앱" : (projects.find((p) => p.id === target)?.name ?? "");
 
 	// 연 대화가 여기 없으면(처음 · 지운 뒤) 현재 프로젝트의 가장 최근 대화를, 없으면 가장 최근 앱 대화를 연다.
+	// 그것도 없으면 저장 전 대화의 시작 화면을 연다. 프로젝트 목록을 받기 전에는 현재 프로젝트를 몰라 기다린다.
 	const fallback = byProject.find((g) => g.project.id === home?.id)?.talks[0] ?? appTalks[0];
 	useEffect(() => {
-		if (!loading && !talk && fallback) openTalk({ projectId: fallback.projectId, id: fallback.id });
-	}, [loading, talk, fallback, openTalk]);
+		if (loading || projectsLoading || talk) return;
+		if (fallback) openTalk({ projectId: fallback.projectId, id: fallback.id });
+		else openNewTalk(target);
+	}, [loading, projectsLoading, talk, fallback, target, openTalk, openNewTalk]);
 
 	// 아직 묻지 않은 대화가 그 자리에 있으면 그것을 다시 연다. 없으면 저장 전 대화를 연다 — 대화는 첫 질문을 보낼 때 만들어진다.
 	const create = (pid: string) => {
@@ -72,34 +75,7 @@ export function AllTalks() {
 				</aside>
 
 				<section className="surface flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md">
-					{talk ? (
-						<TalkSlot key={talk.id} talk={talk} projectPath={pathOf(talk.projectId)} />
-					) : (
-						!loading && (
-							<Empty className="grid flex-1 place-items-center leading-relaxed break-keep">
-								<div>
-									{target === GLOBAL_PID ? (
-										<>
-											어느 프로젝트에도 묶이지 않고 이 앱 자체를 두고 묻는 대화입니다.
-											<br />
-											플러그인을 만들거나 설정 · 기록을 살펴 달라고 할 수 있습니다.
-										</>
-									) : (
-										<>
-											메모를 쓰지 않고 이 저장소에 대해 바로 물어볼 수 있습니다.
-											<br />
-											묻다가 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다.
-										</>
-									)}
-									<div className="mt-4">
-										<Button onClick={() => create(target)}>
-											<MessageSquarePlus />새 대화
-										</Button>
-									</div>
-								</div>
-							</Empty>
-						)
-					)}
+					{talk && <TalkSlot key={talk.id} talk={talk} projectPath={pathOf(talk.projectId)} />}
 				</section>
 			</div>
 		</>

@@ -70,6 +70,10 @@ const VCS_READ: &[&str] = &[
 /// 확인할 수 없어서다. 이 목록으로 열면 일반 권한 판정 안에서 돌아 거부 규칙이 늘 앞선다 (2026-10-28 실측: Bash 를 열고
 /// Bash(whoami) 를 거부하자 whoami 가 「rule」로 막혔다).
 const ALL_TOOLS: &[&str] = &["Bash", "PowerShell", "WebFetch", "WebSearch", "Skill"];
+/// 대화의 「권한 무시」에서 더 여는 파일 도구. 이 앱은 물을 곳이 없어 작업 폴더 밖의 파일 도구가 바로 거부되는데, 같은 폴더를 명령으로는 읽을 수 있어 앞뒤가 맞지 않았다.
+/// 2026.11.02 실측(CLI 2.1.316): 경로 없이 이 이름들을 열자 acceptEdits 에서 작업 폴더 밖의 Read · Glob · Grep · Write 가 통과했다.
+/// 거부 규칙은 그대로 앞선다 — 같은 실행에서 절대 경로 규칙의 폴더와 ./.claude/settings*.json 의 Edit · Write 가 「denied」로 막히고 파일이 바뀌지 않았다.
+const OUTSIDE_FILE_TOOLS: &[&str] = &["Read", "Glob", "Grep", "Edit", "Write"];
 
 /* ---------- 화면으로 보내는 실행 사건 ---------- */
 
@@ -285,7 +289,11 @@ fn job_perms(job: &Job, p: &Project) -> Perms {
 		// 대화는 입력칸의 선택만 따른다. 프로젝트의 구현 권한은 구현 · 수정의 것이다. 수동 승인은 물을 곳이 생길 때까지 읽기만 연다.
 		Job::Chat { mode: ChatMode::Read | ChatMode::Ask, .. } => read_perms(p),
 		Job::Chat { mode: ChatMode::Auto, .. } => Perms { label: "자동 승인".into(), ..edit_perms(p, false, false) },
-		Job::Chat { mode: ChatMode::Bypass, .. } => Perms { label: "권한 무시".into(), ..edit_perms(p, true, false) },
+		Job::Chat { mode: ChatMode::Bypass, .. } => {
+			let mut perms = Perms { label: "권한 무시".into(), ..edit_perms(p, true, false) };
+			perms.allow.extend(OUTSIDE_FILE_TOOLS.iter().map(|s| s.to_string()));
+			perms
+		}
 		Job::Implement { allow_all, .. } | Job::Rework { allow_all, .. } => edit_perms(p, all || *allow_all, !all && *allow_all),
 		Job::Revert => edit_perms(p, all, false),
 	}
@@ -1592,7 +1600,11 @@ fn issue_prompt(job: &Job, v: &IssueView, resumed: bool) -> String {
 				mode.push_str("\n\n(이번에는 파일을 고치지 않는다. 읽기 도구만 열려 있다.)");
 			}
 			// 사용자의 「허용할게」는 권한을 바꾸지 않는다. 설정을 고쳐 스스로 권한을 올리지 못하게 일러 둔다.
-			mode.push_str("\n\n(권한은 사용자가 입력칸에서만 바꾼다. 도구가 막히면 설정을 고치거나 다른 길로 우회하지 말고 막혔다고 답한다.)");
+			mode.push_str(if *chat_mode == ChatMode::Bypass {
+				"\n\n(권한은 사용자가 입력칸에서만 바꾼다. 지금은 권한 무시라 작업 폴더 밖의 파일도 읽고 고칠 수 있다. 거부 규칙에 막히면 설정을 고치거나 다른 길로 우회하지 말고 막혔다고 답한다.)"
+			} else {
+				"\n\n(권한은 사용자가 입력칸에서만 바꾼다. 도구가 막히면 설정을 고치거나 다른 길로 우회하지 말고 막혔다고 답한다.)"
+			});
 			// 이어 붙인 차례에는 규칙 전체를 다시 싣지 않는다. 세션 첫 프롬프트에 있다. 계획 · 구현에서 이어진 세션이라도 같은 말을 한 줄로 일깨운다.
 			mode.push_str("\n\n(화면 설계를 보일 때는 ```html · ```svg 코드 블록으로 낸다. 화면을 고쳤으면 결과 화면을 찍어 답에 `![설명](전체 경로)` 로 건다. 화면이 바뀌지 않으면 둘 다 하지 않는다.)");
 			// 계획 전 · 승인 전 이슈만 대화에서 설계를 받는다. 구현 뒤에 표지가 오면 승인 대기로 되돌아가 버린다.
@@ -3469,6 +3481,11 @@ mod tests {
 		let bypass = args(ChatMode::Bypass);
 		assert_eq!(at(&bypass, "--permission-mode").as_deref(), Some("acceptEdits"));
 		assert!(bypass.iter().any(|x| x == "Bash") && bypass.iter().any(|x| x == "Skill"));
+		for tool in OUTSIDE_FILE_TOOLS {
+			assert!(bypass.iter().any(|x| x == tool), "권한 무시가 파일 도구를 열지 않았다: {tool}");
+			assert!(!auto.iter().any(|x| x == tool), "자동 승인이 작업 폴더 밖 파일 도구를 열었다: {tool}");
+		}
+		assert!(settings(&bypass).contains("issue.json"), "권한 무시가 권한 근거를 고칠 수 있다");
 		assert!(settings(&bypass).contains("git push"), "권한 무시가 거부 규칙을 뺐다");
 		for a in [&read, &auto, &bypass] {
 			assert!(!a.iter().any(|x| x.contains("dangerously") || x == "bypassPermissions"), "위험 플래그를 썼다: {a:?}");

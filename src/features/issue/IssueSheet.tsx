@@ -26,6 +26,7 @@ import { useBoardNeighbor } from "../board/boardFocus";
 import { totals } from "../board/IssueCard";
 import { ChangesTab } from "./ChangesTab";
 import { runChatMode } from "@/lib/chatMode";
+import { ChatIntro, ChatStarters, isBlankChat } from "./ChatEmpty";
 import { ChatComposer, ChatTab, type Draft, NO_DRAFT, SessionBar, useSendKey, useTranscript } from "./ChatTab";
 import { HistoryTab } from "./HistoryTab";
 import { RevertConfirm, useIssueActions } from "./issueActions";
@@ -164,6 +165,7 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 		setTab((cur) => (cur === "chat" && issue.run?.kind !== "plan" && issue.run?.kind !== "implement" ? cur : tabFor(issue)));
 	}, [issue.status, issue.run?.kind, !!issue.run]); // eslint-disable-line react-hooks/exhaustive-deps
 	const [draft, setDraft] = useState<Draft>(NO_DRAFT);
+	const blankChat = tab === "chat" && isBlankChat(issue);
 	useTranscript(issue);
 	const state = stateOf(issue);
 	const chats = issue.runs.filter((r) => r.kind === "chat").length;
@@ -214,7 +216,7 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 				</div>
 				{/* 스크롤 칸 안에 두면 대화가 길어질수록 맨 위까지 올려야 닿는다. 밖에 두어 늘 보이게 한다. */}
 				{tab === "chat" && <SessionBar issue={issue} projectPath={projectPath} />}
-				<div data-scroll className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+				<div data-scroll className={cn("min-h-0 flex-1 overflow-y-auto px-6 py-5", blankChat && "flex flex-col")}>
 					<TabsContent value="note">
 						<NoteTab issue={issue} />
 					</TabsContent>
@@ -224,8 +226,16 @@ function IssueDetail({ issue, projectPath, onClose }: { issue: Issue; projectPat
 					<TabsContent value="changes">
 						<ChangesTab issue={issue} projectPath={projectPath} />
 					</TabsContent>
-					<TabsContent value="chat">
-						<ChatTab issue={issue} projectPath={projectPath} />
+					{/* 입력칸은 동작 막대와 번갈아 나오는 아래 자리에 둔다. 가운데로 올리면 탭을 넘길 때마다 튄다. */}
+					<TabsContent value="chat" className={cn(blankChat && "flex flex-col justify-center-safe gap-4")}>
+						{blankChat ? (
+							<>
+								<ChatIntro issue={issue} />
+								<ChatStarters issue={issue} draft={draft} onDraft={setDraft} />
+							</>
+						) : (
+							<ChatTab issue={issue} projectPath={projectPath} />
+						)}
 					</TabsContent>
 					<TabsContent value="history">
 						<HistoryTab issue={issue} />

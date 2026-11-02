@@ -141,17 +141,8 @@ export const ChatTab = memo(function ChatTab({ issue, projectPath }: { issue: Is
 
 	return (
 		<div ref={box} className="flex flex-col gap-5">
-			{items.length === 0 && issue.talk && (
-				<p className="text-[13px] leading-relaxed break-keep text-subtle">
-					이 저장소에 대해 무엇이든 물어보세요. Claude 가 코드를 읽고 답합니다. 묻다가 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다.
-				</p>
-			)}
-			{items.length === 0 && !issue.talk && (
-				<p className="text-[13px] leading-relaxed text-subtle">
-					아직 Claude 와 나눈 말이 없습니다. 아래에 적으면 메모{issue.plan ? " · 계획" : ""}을 읽고 새 세션을 엽니다. 묻기만 할 수도, 바로 고치게 할 수도 있고 고친 파일은 변경 탭에
-					쌓입니다.
-				</p>
-			)}
+			{/* 시작 전의 대화는 상위가 시작 화면을 그린다. 여기 오는 빈 목록은 세션을 바꾼 직후처럼 세션은 있고 기록이 없는 때다. */}
+			{items.length === 0 && <p className="text-[13px] leading-relaxed break-keep text-subtle">이 세션에 보일 기록이 없습니다. 아래에 적으면 이 세션을 이어 묻습니다.</p>}
 			{items.map((x) =>
 				"turn" in x ? (
 					<TerminalTurn key={`t${x.at}`} issue={issue} root={projectPath} turn={x.turn} />
@@ -555,8 +546,11 @@ function ModeMenu({ mode, onMode, compact }: { mode: ChatMode; onMode: (m: ChatM
 	);
 }
 
-/** 상세 창 아래 칸. 실행 중이면 무엇을 하는지와 중지를 두고, 그 사이 적은 질문은 대기열에 넣는다. */
-export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = false }: { issue: Issue; draft: Draft; onDraft: (d: Draft) => void; beforeSend?: () => Promise<void>; compact?: boolean }) {
+/**
+ * 상세 창 아래 칸. 실행 중이면 무엇을 하는지와 중지를 두고, 그 사이 적은 질문은 대기열에 넣는다.
+ * hero 는 시작 화면의 가운데 꼴이다. 안쪽 여백은 상위가 준다.
+ */
+export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = false, hero = false }: { issue: Issue; draft: Draft; onDraft: (d: Draft) => void; beforeSend?: () => Promise<void>; compact?: boolean; hero?: boolean }) {
 	const [busy, setBusy] = useState(false);
 	const sendKey = useSendKey();
 	const mode = useChatMode(issue);
@@ -626,7 +620,7 @@ export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = fals
 
 	const keys = ` · ${sendKey.label}${sendKey.hint}`;
 	return (
-		<div ref={dropRef} className={cn("flex flex-col gap-2 border-t border-border py-3", compact ? "px-4" : "px-6")}>
+		<div ref={dropRef} className={cn("flex flex-col gap-2", hero ? "mx-auto w-full max-w-3xl" : cn("border-t border-border py-3", compact ? "px-4" : "px-6"))}>
 			<QueueList issue={issue} onEdit={editQueued} disabled={busy} />
 			<div className="relative rounded-xl border border-border bg-card transition-colors focus-within:border-border-strong">
 				{over && <DropOverlay />}
@@ -640,14 +634,7 @@ export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = fals
 						if (sendKey.isSend(e)) send();
 					}}
 					placeholder={
-						(canEdit(mode) ? "묻거나 고칠 것" : "물을 것") +
-						(running
-							? " · 답이 끝나면 대기 중인 질문과 묶어 보냅니다"
-							: issue.sessionId
-								? ""
-								: issue.talk
-									? " · 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다"
-									: " · 메모를 읽고 새 세션을 엽니다")
+						(canEdit(mode) ? "묻거나 고칠 것" : "물을 것") + (running ? " · 답이 끝나면 대기 중인 질문과 묶어 보냅니다" : "")
 					}
 					className="max-h-48 min-h-16 resize-none rounded-none border-0 bg-transparent px-3 pt-2.5 pb-1 text-[13.5px] leading-relaxed focus-visible:ring-0 dark:bg-transparent"
 				/>

@@ -17,7 +17,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { ChatComposer, ChatTab, NO_DRAFT, SessionBar, useTranscript } from "@/features/issue/ChatTab";
+import { ChatIntro, ChatStarters, isBlankChat } from "@/features/issue/ChatEmpty";
+import { ChatComposer, ChatTab, type Draft, NO_DRAFT, SessionBar, useTranscript } from "@/features/issue/ChatTab";
 import { canEdit, useChatMode } from "@/lib/chatMode";
 import { AppTalkSettings } from "@/features/project/ProjectHeader";
 import { api, errorText } from "@/lib/api";
@@ -141,6 +142,8 @@ export function TalkPane({ talk, projectPath, compact = false }: { talk: Issue; 
 	// 대화 화면에서 연 대화의 답은 본 것이다. 알림함 · 목록의 점이 꺼진다.
 	useMarkSeen(talk.id, lastEnded(talk.runs));
 	const pad = compact ? "px-4" : "px-6";
+	const blank = isBlankChat(talk);
+	const onDraft = (d: Draft) => setDraft(talk.id, d);
 	return (
 		<>
 			{!compact && (
@@ -171,15 +174,23 @@ export function TalkPane({ talk, projectPath, compact = false }: { talk: Issue; 
 				</div>
 			)}
 			<SessionBar issue={talk} projectPath={projectPath} compact={compact} />
-			<div data-scroll className={cn("min-h-0 flex-1 overflow-y-auto py-5", pad)}>
-				<ChatTab issue={talk} projectPath={projectPath} />
+			{/* 입력칸은 두 꼴에서 같은 자리의 자식이다. 다시 만들어지지 않아야 첫 질문을 보낼 때 초점과 쓰던 글이 남는다. */}
+			<div className={cn("flex min-h-0 flex-1 flex-col", blank && cn("justify-center-safe gap-4 overflow-y-auto py-6", pad))}>
+				{blank ? (
+					<ChatIntro issue={talk} compact={compact} />
+				) : (
+					<div data-scroll className={cn("min-h-0 flex-1 overflow-y-auto py-5", pad)}>
+						<ChatTab issue={talk} projectPath={projectPath} />
+					</div>
+				)}
+				{talk.projectId === GLOBAL_PID && canEdit(mode) && (
+					<div className={cn("border-brand/30 bg-brand/10 py-1.5 text-[12px] break-keep text-brand-text", blank ? "mx-auto w-full max-w-3xl rounded-md border px-3" : cn("border-t", pad))}>
+						설정 · 이슈 기록까지 고칠 수 있습니다 · 보내기 전에 설정 파일을 백업합니다
+					</div>
+				)}
+				<ChatComposer issue={talk} draft={draft} onDraft={onDraft} beforeSend={unsaved ? save : undefined} compact={compact} hero={blank} />
+				{blank && <ChatStarters issue={talk} draft={draft} onDraft={onDraft} />}
 			</div>
-			{talk.projectId === GLOBAL_PID && canEdit(mode) && (
-				<div className={cn("border-t border-brand/30 bg-brand/10 py-1.5 text-[12px] break-keep text-brand-text", pad)}>
-					설정 · 이슈 기록까지 고칠 수 있습니다 · 보내기 전에 설정 파일을 백업합니다
-				</div>
-			)}
-			<ChatComposer issue={talk} draft={draft} onDraft={(d) => setDraft(talk.id, d)} beforeSend={unsaved ? save : undefined} compact={compact} />
 		</>
 	);
 }

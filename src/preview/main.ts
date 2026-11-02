@@ -102,6 +102,12 @@ if (q.get("issue")) {
 	setTimeout(() => useUi.getState().openIssue(q.get("issue")), 400);
 }
 
+// ?newTalk=<프로젝트 id> 로 저장 전 대화의 시작 화면을 연 채 띄운다(앱 대화는 global). 대화 목록이 차 있어도 볼 수 있다.
+if (q.get("newTalk")) {
+	const { useUi } = await import("@/lib/store");
+	useUi.getState().openNewTalk(q.get("newTalk")!);
+}
+
 // ?palette= 로 Ctrl+K 팔레트를 연 채 띄운다. 값이 있으면 검색어로 넣는다 — 브라우저 밖에서 화면을 찍을 때 키를 누를 길이 없다.
 if (q.has("palette")) {
 	setTimeout(() => {

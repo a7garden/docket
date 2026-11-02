@@ -17,7 +17,7 @@ export const CHAT_MODES: ChatModeInfo[] = [
 	{ value: "read", label: "읽기 전용", short: "읽기", desc: "읽기 도구와 이력 조회만 엽니다", dot: "bg-run" },
 	{ value: "ask", label: "수동 승인", short: "수동", desc: "허용 목록 밖의 도구는 실행 전에 묻습니다", dot: "bg-ok", unavailable: "준비 중" },
 	{ value: "auto", label: "자동 승인", short: "자동", desc: "편집과 허용 목록은 묻지 않고, 목록 밖의 명령은 막습니다", dot: "bg-brand" },
-	{ value: "bypass", label: "권한 무시", short: "권한 무시", desc: "명령 · 웹 · 스킬도 묻지 않습니다. 거부 규칙은 지키고, 앱을 다시 켜도 유지됩니다", dot: "bg-danger" },
+	{ value: "bypass", label: "권한 무시", short: "권한 무시", desc: "명령 · 웹 · 스킬과 프로젝트 밖 파일도 묻지 않습니다. 거부 규칙은 지키고, 앱을 다시 켜도 유지됩니다", dot: "bg-danger" },
 ];
 
 export function chatModeInfo(mode: ChatMode) {
