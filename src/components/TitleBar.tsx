@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
 import { PanelLeft, PanelRight, Search, Square } from "lucide-react";
@@ -8,7 +9,9 @@ import { toggleDock } from "@/lib/dock";
 import { type Job, useJobs } from "@/lib/jobs";
 import { keyAnchor } from "@/lib/keys";
 import { useDockLayout } from "@/lib/layout";
+import { useSettings } from "@/lib/queries";
 import { liveKey, useLive, useUi } from "@/lib/store";
+import { systemNotify } from "@/lib/systemNotify";
 import { cn } from "@/lib/utils";
 import { type ActionList, ContextActions } from "./ActionMenu";
 import { RunDot } from "./bits";
@@ -30,6 +33,19 @@ import { UsageMeter } from "./UsageMeter";
 
 const win = getCurrentWindow();
 
+const TRAY_HINT_KEY = "docket.trayHinted";
+
+/** 처음 트레이로 숨을 때 한 번만 알린다. 닫았는데 꺼지지 않았다고 헷갈리지 않게. */
+function hintTray(on: boolean) {
+	try {
+		if (localStorage.getItem(TRAY_HINT_KEY)) return;
+		localStorage.setItem(TRAY_HINT_KEY, "1");
+	} catch {
+		return;
+	}
+	if (on) void systemNotify("docket 이 트레이에서 계속 돕니다", "끝내려면 트레이 아이콘 › 끝내기를 고르세요. 설정 › 빠른 메모 · 트레이에서 닫기 동작을 바꿉니다.");
+}
+
 /** 창틀을 직접 그린다. 기본 창틀은 유리 배경과 따로 놀아 앱 위에 회색 띠가 얹힌다. */
 export function TitleBar() {
 	const [max, setMax] = useState(false);
@@ -42,18 +58,35 @@ export function TitleBar() {
 	const jobs = useJobs();
 	const setPaletteOpen = useUi((s) => s.setPaletteOpen);
 
-	// 실행 중에 닫으면 묻는다. ✕ 단추 · Alt+F4 · 작업 표시줄 닫기가 모두 이 사건으로 온다.
-	// 묻고 나서는 destroy 로 닫는다. close 를 다시 부르면 이 사건이 또 와서 창이 닫히지 않는다.
+	// ✕ 단추 · Alt+F4 · 작업 표시줄 닫기가 모두 이 사건으로 온다. 닫기 동작이 「트레이로 숨기기」면 숨기기만 한다 — 작업은 이어 간다.
+	// 「끝내기」거나 트레이 메뉴의 「끝내기」(docket://quit)면 앱을 끝낸다. 실행 중이면 먼저 묻는다.
+	// 끝낼 때는 창만 닫지 않고 appQuit 으로 앱을 끝낸다. 숨은 빠른 메모 창 · 트레이가 남아 프로세스가 살아 있게 된다.
+	const { data: settings } = useSettings();
 	const [closing, setClosing] = useState(false);
 	const count = useRef(0);
 	count.current = jobs.length;
+	const prefs = useRef(settings);
+	prefs.current = settings;
 	useEffect(() => {
-		const un = win.onCloseRequested((e) => {
-			if (count.current === 0) return;
-			e.preventDefault();
+		const quit = () => {
+			if (count.current === 0) return void api.appQuit();
+			void win.show();
+			void win.unminimize();
+			void win.setFocus();
 			setClosing(true);
+		};
+		const un = win.onCloseRequested((e) => {
+			e.preventDefault();
+			if (prefs.current?.closeToTray ?? true) {
+				void win.hide();
+				hintTray(prefs.current?.systemNotify ?? true);
+			} else quit();
 		});
-		return () => void un.then((f) => f());
+		const unQuit = listen("docket://quit", quit);
+		return () => {
+			void un.then((f) => f());
+			void unQuit.then((f) => f());
+		};
 	}, []);
 
 	return (
@@ -114,7 +147,7 @@ export function TitleBar() {
 					<AlertDialogHeader>
 						<AlertDialogTitle>Claude 작업 {jobs.length}개가 아직 돌고 있습니다</AlertDialogTitle>
 						<AlertDialogDescription>
-							닫으면 모두 멈춥니다. 이미 고친 파일은 남고 변경 탭에 기록돼 있습니다. 다시 열면 끊긴 작업을 「다시 시도」로 이어 갈 수 있습니다.
+							끝내면 모두 멈춥니다. 이미 고친 파일은 남고 변경 탭에 기록돼 있습니다. 다시 열면 끊긴 작업을 「다시 시도」로 이어 갈 수 있습니다.
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<ul className="flex max-h-48 flex-col gap-1 overflow-y-auto text-[13px]">
@@ -127,18 +160,18 @@ export function TitleBar() {
 						))}
 					</ul>
 					<AlertDialogFooter>
-						<AlertDialogCancel>닫지 않기</AlertDialogCancel>
+						<AlertDialogCancel>끝내지 않기</AlertDialogCancel>
 						<AlertDialogAction
 							variant="destructive"
 							onClick={() =>
 								void (async () => {
-									// 멈추라고 알린 뒤 닫는다. 미처 못 멈춘 claude 는 앱이 끝날 때 작업 개체가 끈다.
+									// 멈추라고 알린 뒤 끝낸다. 미처 못 멈춘 claude 는 앱이 끝날 때 작업 개체가 끈다.
 									await api.runsStopAll().catch(() => 0);
-									await win.destroy();
+									await api.appQuit();
 								})()
 							}
 						>
-							중지하고 닫기
+							중지하고 끝내기
 						</AlertDialogAction>
 					</AlertDialogFooter>
 				</AlertDialogContent>

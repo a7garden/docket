@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { BookA, BookMarked, Check, ChevronRight, Copy, FileStack, FolderOpen, FolderPlus, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink, X } from "lucide-react";
+import { Archive, BookA, BookMarked, Brain, Check, ChevronRight, Copy, FileStack, FolderOpen, FolderPlus, LayoutGrid, Library, MessagesSquare, MoreHorizontal, Plus, Settings2, Unlink, X } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, attempt, copy, DropdownActions, useActionCommands } from "@/components/ActionMenu";
 import { Label } from "@/components/bits";
@@ -21,22 +21,23 @@ import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /**
- * 프로젝트 머리의 화면 탭. Ctrl+1~4 가 이 순서를 그대로 따른다 — 숫자가 곧 탭 자리다.
- * 탭 순서를 바꾸면 키 숫자도 함께 바뀐다. 대화는 프로젝트 탭이 아니라 사이드바 「대화」(Ctrl+5)다.
+ * 프로젝트 머리의 화면 탭. Ctrl+1~5 가 이 순서를 그대로 따른다 — 숫자가 곧 탭 자리다.
+ * 탭 순서를 바꾸면 키 숫자도 함께 바뀐다. 대화는 프로젝트 탭이 아니라 사이드바 「대화」(Ctrl+6)다.
  */
 export const PROJECT_TABS: [View, string][] = [
 	["board", "보드"],
 	["deliverables", "산출물"],
 	["knowledge", "지식베이스"],
 	["glossary", "어휘 사전"],
+	["memory", "기억"],
 ];
 
 /** 프로젝트를 고르고(이미 보던 것이면 연 이슈를 닫지 않는다) 그 프로젝트의 화면으로 간다. */
 export function goProject(id: string, view?: View) {
 	const ui = useUi.getState();
 	if (ui.projectId !== id) ui.setProject(id);
-	// 프로젝트 머리는 보드 · 산출물 · 지식베이스 · 어휘 사전에만 있다. 대화 · Claude 설정 · 설정 화면에서 불렀으면 보드로 간다.
-	const next = view ?? (ui.view === "deliverables" || ui.view === "knowledge" || ui.view === "glossary" ? ui.view : "board");
+	// 프로젝트 머리는 보드 · 산출물 · 지식베이스 · 어휘 사전 · 기억에만 있다. 대화 · Claude 설정 · 설정 화면에서 불렀으면 보드로 간다.
+	const next = view ?? (ui.view === "deliverables" || ui.view === "knowledge" || ui.view === "glossary" || ui.view === "memory" ? ui.view : "board");
 	if (ui.view !== next) ui.setView(next);
 }
 
@@ -51,9 +52,9 @@ export function goTalks(id: string) {
 
 /**
  * 프로젝트 메뉴. 머리의 「프로젝트 메뉴」와 사이드바 우클릭이 같이 쓴다.
- * `nav` 는 사이드바에서만 켠다 — 머리에는 보드 · 산출물 · 지식베이스 · 어휘 사전 칸이 이미 있다.
+ * `nav` 는 사이드바에서만 켠다 — 머리에는 보드 · 산출물 · 지식베이스 · 어휘 사전 · 기억 칸이 이미 있다.
  */
-export function projectActions(project: Project, nav = false): ActionList {
+export function projectActions(project: Project, qc: QueryClient, nav = false): ActionList {
 	const ui = () => useUi.getState();
 	return [
 		nav && { label: "보드", icon: <LayoutGrid />, onSelect: () => goProject(project.id, "board") },
@@ -61,6 +62,7 @@ export function projectActions(project: Project, nav = false): ActionList {
 		nav && { label: "산출물", icon: <FileStack />, onSelect: () => goProject(project.id, "deliverables") },
 		nav && { label: "지식베이스", icon: <Library />, onSelect: () => goProject(project.id, "knowledge") },
 		nav && { label: "어휘 사전", icon: <BookA />, onSelect: () => goProject(project.id, "glossary") },
+		nav && { label: "기억", icon: <Brain />, onSelect: () => goProject(project.id, "memory") },
 		"sep",
 		{
 			label: "프로젝트 설정",
@@ -74,7 +76,27 @@ export function projectActions(project: Project, nav = false): ActionList {
 		"sep",
 		{ label: "프로젝트 폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.open(project.path)) },
 		{ label: "경로 복사", icon: <Copy />, onSelect: () => void copy(project.path, "경로") },
+		"sep",
+		{ label: "프로젝트 보관", icon: <Archive />, onSelect: () => void archiveProject(project, qc) },
 	];
+}
+
+/** 되돌릴 수 있는 일이라 묻지 않고 바로 하고, 알림에 되돌리기를 둔다. 보던 프로젝트 · 대화 정리는 목록이 바뀌면 App 이 한다. */
+async function archiveProject(project: Project, qc: QueryClient) {
+	await attempt(async () => {
+		await api.projectArchive(project.id, true);
+		await qc.invalidateQueries({ queryKey: qk.projects });
+		toast(`「${project.name}」 를 보관했습니다`, { action: { label: "되돌리기", onClick: () => void restoreProject(project.id, qc) } });
+	});
+}
+
+/** 되살리고 그 프로젝트의 보드로 간다. 목록을 먼저 새로 읽는다 — 그 전에 고르면 App 이 없는 프로젝트로 보고 첫 프로젝트로 옮긴다. */
+export async function restoreProject(id: string, qc: QueryClient) {
+	await attempt(async () => {
+		await api.projectArchive(id, false);
+		await qc.invalidateQueries({ queryKey: qk.projects });
+		goProject(id, "board");
+	});
 }
 
 export function ProjectHeader({ project }: { project: Project }) {
@@ -83,21 +105,22 @@ export function ProjectHeader({ project }: { project: Project }) {
 	const editing = useUi((s) => s.editingProjectId === project.id);
 	const editProject = useUi((s) => s.editProject);
 	const notices = useNoticeCounts()(project.id);
-	useActionCommands(projectActions(project), project.name);
+	const qc = useQueryClient();
+	useActionCommands(projectActions(project, qc), project.name);
 	return (
 		<header className="flex items-center gap-4">
-			<div className="min-w-0">
-				<h1 className="truncate text-[18px] font-semibold tracking-[-0.02em]">{project.name}</h1>
+			{/* 탭과 한 줄에 둔다. 자리가 모자라면 경로가 먼저 줄고, 이름은 절반까지 지킨다. */}
+			<div className="flex min-w-0 flex-1 items-baseline gap-2.5">
+				<h1 className="max-w-[50%] shrink-0 truncate text-[16px] font-semibold tracking-[-0.02em]">{project.name}</h1>
 				<button
 					type="button"
-					className="mono block max-w-full truncate text-[12px] text-subtle hover:text-foreground"
-					title="탐색기에서 열기"
+					className="mono min-w-0 truncate text-[12px] text-subtle hover:text-foreground"
+					title={`${project.path} — 탐색기에서 열기`}
 					onClick={() => void api.open(project.path).catch((e) => toast.error(errorText(e)))}
 				>
 					{project.path}
 				</button>
 			</div>
-			<div className="flex-1" />
 			<div className="inline-flex rounded-lg bg-secondary p-0.5">
 				{PROJECT_TABS.map(([v, label]) => {
 					// 지식베이스 · 어휘 사전에는 알림이 없다. 보고 있는 탭의 숫자도 남긴다 — 탭을 연 것만으로는 항목을 본 것이 아니다.
@@ -129,7 +152,7 @@ export function ProjectHeader({ project }: { project: Project }) {
 					</Button>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="end" className="pop w-52">
-					<DropdownActions items={projectActions(project)} />
+					<DropdownActions items={projectActions(project, qc)} />
 				</DropdownMenuContent>
 			</DropdownMenu>
 			<ProjectSettings project={project} open={editing} onOpenChange={(o) => editProject(o ? project.id : null)} />
@@ -143,14 +166,12 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 	const [tools, setTools] = useState(project.allowedTools.join("\n"));
 	const [deny, setDeny] = useState(project.deniedTools.join("\n"));
 	const [removing, setRemoving] = useState(false);
-	const [wipe, setWipe] = useState(false);
 	useEffect(() => {
 		if (open) {
 			setP(project);
 			setTools(project.allowedTools.join("\n"));
 			setDeny(project.deniedTools.join("\n"));
 			setRemoving(false);
-			setWipe(false);
 		}
 	}, [open, project]);
 
@@ -165,17 +186,6 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 		}
 	};
 
-	const remove = async () => {
-		try {
-			await api.projectRemove(project.id, wipe);
-			await qc.invalidateQueries({ queryKey: qk.projects });
-			useUi.getState().setProject(null);
-			onOpenChange(false);
-		} catch (e) {
-			toast.error(errorText(e));
-		}
-	};
-
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="pop max-h-[88vh] gap-5 overflow-y-auto p-6 sm:max-w-lg">
@@ -184,23 +194,14 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 					<DialogDescription className="mono truncate text-[12px]">{project.path}</DialogDescription>
 				</DialogHeader>
 				{removing ? (
-					<div className="flex flex-col gap-4">
-						<p className="text-[13.5px] leading-relaxed break-keep">
-							「{project.name}」 를 목록에서 뺍니다. 프로젝트 폴더의 파일은 건드리지 않습니다.
-						</p>
-						<label className="flex items-start gap-3 text-[13px]">
-							<Switch checked={wipe} onCheckedChange={setWipe} className="mt-0.5" />
-							<span className="leading-relaxed break-keep text-muted-foreground">이 프로젝트의 이슈 · 첨부 · 산출물도 앱 데이터의 휴지통 폴더로 옮깁니다</span>
-						</label>
-						<DialogFooter>
-							<Button variant="ghost" onClick={() => setRemoving(false)}>
-								취소
-							</Button>
-							<Button variant="destructive" onClick={() => void remove()}>
-								목록에서 빼기
-							</Button>
-						</DialogFooter>
-					</div>
+					<RemoveProject
+						project={project}
+						onCancel={() => setRemoving(false)}
+						onRemoved={() => {
+							useUi.getState().setProject(null);
+							onOpenChange(false);
+						}}
+					/>
 				) : (
 					<>
 						<div className="flex flex-col gap-1.5">
@@ -297,6 +298,35 @@ function ProjectSettings({ project, open, onOpenChange }: { project: Project; op
 				)}
 			</DialogContent>
 		</Dialog>
+	);
+}
+
+/** 「목록에서 빼기」 확인. 프로젝트 설정 창과 보관한 프로젝트 창이 함께 쓴다. */
+export function RemoveProject({ project, onCancel, onRemoved }: { project: Project; onCancel: () => void; onRemoved: () => void }) {
+	const qc = useQueryClient();
+	const [wipe, setWipe] = useState(false);
+	const remove = () =>
+		attempt(async () => {
+			await api.projectRemove(project.id, wipe);
+			await qc.invalidateQueries({ queryKey: qk.projects });
+			onRemoved();
+		});
+	return (
+		<div className="flex flex-col gap-4">
+			<p className="text-[13.5px] leading-relaxed break-keep">「{project.name}」 를 목록에서 뺍니다. 프로젝트 폴더의 파일은 건드리지 않습니다.</p>
+			<label className="flex items-start gap-3 text-[13px]">
+				<Switch checked={wipe} onCheckedChange={setWipe} className="mt-0.5" />
+				<span className="leading-relaxed break-keep text-muted-foreground">이 프로젝트의 이슈 · 첨부 · 산출물도 앱 데이터의 휴지통 폴더로 옮깁니다</span>
+			</label>
+			<DialogFooter>
+				<Button variant="ghost" onClick={onCancel}>
+					취소
+				</Button>
+				<Button variant="destructive" onClick={() => void remove()}>
+					목록에서 빼기
+				</Button>
+			</DialogFooter>
+		</div>
 	);
 }
 

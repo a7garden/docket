@@ -22,6 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorText } from "@/lib/api";
 import { joinPath, relTime } from "@/lib/format";
@@ -186,7 +187,7 @@ export function ClaudeConfig() {
 													setFile(null);
 												});
 											return (
-												<ContextActions key={r.path} items={resourceActions(r, () => setDeleting(r), pick)}>
+												<ContextActions key={r.path} items={resourceActions(r, () => setDeleting(r), pick, () => void qc.invalidateQueries({ queryKey: qk.resources(project?.id ?? null) }))}>
 													<button
 														type="button"
 														onClick={pick}
@@ -197,7 +198,7 @@ export function ClaudeConfig() {
 														)}
 													>
 														<span className={cn("truncate text-[13px] font-medium", (!r.exists || r.excluded) && "text-subtle")}>{r.name}</span>
-														{r.excluded && <span className="text-[11.5px] text-subtle">docket 실행에서는 빠짐</span>}
+														{r.excluded && <span className="text-[11.5px] text-subtle">docket 실행에서는 빠짐 · 열어서 「docket 실행에 싣기」로 켭니다</span>}
 														{r.description ? (
 															<span className="line-clamp-2 text-[12px] leading-snug break-keep text-subtle">{r.description}</span>
 														) : (
@@ -294,6 +295,37 @@ export function ClaudeConfig() {
 	);
 }
 
+/**
+ * 전역 CLAUDE.md · rules 를 docket 이 띄우는 실행(계획 · 구현 · 대화 · 산출물)에 실을지. 터미널 claude 는 늘 싣는다.
+ * 켜면 실행마다 그만큼 토큰이 더 들고, 끄면 그 지침을 따르지 않는다. 다음 실행부터 적용한다.
+ */
+function RunInclude({ resource, projectId }: { resource: Resource; projectId: string | null }) {
+	const qc = useQueryClient();
+	const [busy, setBusy] = useState(false);
+	const on = !resource.excluded;
+	const flip = async (include: boolean) => {
+		setBusy(true);
+		try {
+			const s = await api.claudeRunInclude(resource.runKey ?? "", include);
+			qc.setQueryData(qk.settings, s);
+			await qc.invalidateQueries({ queryKey: qk.resources(projectId) });
+			toast(include ? "다음 실행부터 이 지침을 싣습니다" : "다음 실행부터 이 지침을 뺍니다");
+		} catch (e) {
+			toast.error(errorText(e));
+		}
+		setBusy(false);
+	};
+	return (
+		<label
+			className="flex h-8 shrink-0 cursor-pointer items-center gap-2 rounded-lg px-2 text-[12.5px] text-muted-foreground hover:bg-hover"
+			title="docket 이 띄우는 계획 · 구현 · 대화 · 산출물 실행에 이 지침을 싣습니다. 켜면 실행마다 그만큼 토큰이 더 듭니다."
+		>
+			<Switch size="sm" checked={on} disabled={busy} onCheckedChange={(v) => void flip(v)} />
+			docket 실행에 싣기
+		</label>
+	);
+}
+
 function ResourceEditor({
 	resource,
 	projectId,
@@ -372,6 +404,7 @@ function ResourceEditor({
 						))}
 					</div>
 				)}
+				{resource.runKey && <RunInclude resource={resource} projectId={projectId} />}
 				{/* 고친 것이 없을 때는 노란색을 쓰지 않는다. 흐린 노란 단추가 결정할 일이 있는 것처럼 보인다. */}
 				<Button variant={draft === null ? "outline" : "default"} disabled={draft === null} onClick={() => void save()}>
 					저장
@@ -384,7 +417,7 @@ function ResourceEditor({
 							</Button>
 						</DropdownMenuTrigger>
 						<DropdownMenuContent align="end" className="pop w-48">
-							<DropdownActions items={resourceActions(resource, () => setConfirmDelete(true))} />
+							<DropdownActions items={resourceActions(resource, () => setConfirmDelete(true), undefined, () => void qc.invalidateQueries({ queryKey: qk.resources(projectId) }))} />
 						</DropdownMenuContent>
 					</DropdownMenu>
 				)}
@@ -541,12 +574,22 @@ function FolderView({ resource }: { resource: Resource }) {
 }
 
 /** 편집 화면의 「더 보기」와 목록 우클릭이 같이 쓴다. 목록에서만 `onOpen` 을 준다. 지침 · 설정 파일 · 폴더는 지우지 않는다. */
-function resourceActions(r: Resource, onDelete: () => void, onOpen?: () => void): ActionList {
+function resourceActions(r: Resource, onDelete: () => void, onOpen?: () => void, onChanged?: () => void): ActionList {
 	const removable = CREATABLE.some((k) => k.kind === r.kind) && r.exists;
 	return [
 		onOpen && { label: "열기", icon: <PanelRight />, onSelect: onOpen },
 		"sep",
 		r.kind === "settings" && { label: "파일 열기", icon: <ExternalLink />, onSelect: () => void attempt(() => api.open(r.path)) },
+		!!r.runKey && {
+			label: r.excluded ? "docket 실행에 싣기" : "docket 실행에서 빼기",
+			icon: <PanelRight />,
+			onSelect: () =>
+				void attempt(async () => {
+					await api.claudeRunInclude(r.runKey ?? "", !!r.excluded);
+					onChanged?.();
+					toast(r.excluded ? "다음 실행부터 이 지침을 싣습니다" : "다음 실행부터 이 지침을 뺍니다");
+				}),
+		},
 		r.exists && { label: "폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.reveal(r.dir || r.path)) },
 		{ label: "경로 복사", icon: <Copy />, onSelect: () => void copy(r.path, "경로") },
 		"sep",

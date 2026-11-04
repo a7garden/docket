@@ -50,7 +50,8 @@ export function answersText(qs: Question[], a: Answers) {
 	return lines.join("\n");
 }
 
-export function Questions({ questions, answers, onChange }: { questions: Question[]; answers: Answers; onChange: (a: Answers) => void }) {
+/** noteless 는 「덧붙일 말」 칸을 감춘다. 대화 중 Claude 의 되묻기(AskUserQuestion)는 답만 돌려준다. */
+export function Questions({ questions, answers, onChange, noteless = false }: { questions: Question[]; answers: Answers; onChange: (a: Answers) => void; noteless?: boolean }) {
 	const [cur, setCur] = useState(0);
 	const done = answeredCount(questions, answers);
 	const q = questions[cur];
@@ -108,7 +109,7 @@ export function Questions({ questions, answers, onChange }: { questions: Questio
 
 			{q && <QuestionBody key={cur} q={q} ans={ans} onPick={pick} onOther={(other) => setAns(cur, { picked: q.multi ? ans.picked : [], other })} onNext={() => advance(cur, answers)} />}
 
-			<div className="border-t border-border px-4 py-3">
+			<div className={cn("border-t border-border px-4 py-3", noteless && "hidden")}>
 				<textarea
 					value={answers.note}
 					onChange={(e) => onChange({ ...answers, note: e.target.value })}

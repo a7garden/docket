@@ -82,8 +82,20 @@ const OUTSIDE_FILE_TOOLS: &[&str] = &["Read", "Glob", "Grep", "Edit", "Write"];
 pub enum RunEvent {
 	Init { model: String, session_id: String },
 	Text { text: String },
+	/// 대화 실행에서 답 글이 흘러 들어오는 조각. 완성된 Text 가 오면 화면이 그것으로 바꿔 끼운다. 기록 파일에는 남기지 않는다.
+	Delta { text: String },
+	/// 생각(thinking) 블록. 화면은 접은 채 보인다.
+	Thinking { text: String },
 	Tool { id: String, name: String, summary: String },
-	ToolDone { id: String, ok: bool },
+	/// output 은 도구 결과 글의 앞부분이다. 화면이 펼쳐 볼 수 있게 한다.
+	ToolDone {
+		id: String,
+		ok: bool,
+		#[serde(skip_serializing_if = "String::is_empty")]
+		output: String,
+	},
+	/// Claude 가 도구를 쓰려고 허락 · 답을 기다린다(수동 승인 · AskUserQuestion). 화면은 이슈의 run.asks 로 카드를 그린다.
+	Ask { request_id: String, tool: String, summary: String, input: Value, suggest: Vec<String> },
 	Change { rel: String, kind: String, added: u32, removed: u32 },
 	Denied { id: String, tool: String, target: String, reason: String, suggest: Vec<String> },
 	Done { ok: bool, cost_usd: f64, duration_ms: u64, num_turns: u32, error: String },
@@ -286,8 +298,10 @@ fn job_perms(job: &Job, p: &Project) -> Perms {
 	let all = p.impl_mode == "bypassPermissions";
 	match job {
 		Job::Plan { .. } => read_perms(p),
-		// 대화는 입력칸의 선택만 따른다. 프로젝트의 구현 권한은 구현 · 수정의 것이다. 수동 승인은 물을 곳이 생길 때까지 읽기만 연다.
-		Job::Chat { mode: ChatMode::Read | ChatMode::Ask, .. } => read_perms(p),
+		// 대화는 입력칸의 선택만 따른다. 프로젝트의 구현 권한은 구현 · 수정의 것이다.
+		Job::Chat { mode: ChatMode::Read, .. } => read_perms(p),
+		// 수동 승인: 모든 도구를 열고 default 모드로 돈다. 허용 목록 밖은 CLI 가 묻고, 앱이 그 물음을 화면 카드로 받는다(exec_with).
+		Job::Chat { mode: ChatMode::Ask, .. } => Perms { tools: None, mode: "default", allow: p.allowed_tools.clone(), deny: p.denied_tools.clone(), label: "수동 승인".into() },
 		Job::Chat { mode: ChatMode::Auto, .. } => Perms { label: "자동 승인".into(), ..edit_perms(p, false, false) },
 		Job::Chat { mode: ChatMode::Bypass, .. } => {
 			let mut perms = Perms { label: "권한 무시".into(), ..edit_perms(p, true, false) };
@@ -317,11 +331,12 @@ fn chat_guard(job: &Job, issue_dir: &Path) -> Vec<String> {
 ///   개인 운영 규칙이라 실행마다 7,400 토큰쯤을 캐시에 새로 쓰고 차례마다 다시 읽었다. 빼니 12,316 → 4,177 토큰(CLI 2.1.311 실측).
 ///   저장소 · 상위 폴더 CLAUDE.md 는 그대로 실린다. --safe-mode 는 저장소 지침까지 끄고, --setting-sources 로 사용자 설정을 빼면
 ///   사용자 settings.json 의 거부 규칙(SVN 쓰기 금지 등) · 훅까지 빠져 쓰지 않는다. 사용자 스킬 목록은 150 토큰쯤이라 남긴다.
+/// 2026.11.04 : 뺄 목록을 설정(run_excludes)으로 옮겼다. 「Claude 설정」 화면에서 항목마다 싣고 뺀다.
 fn run_settings(deny: &[&str]) -> Value {
 	// 값은 glob 이라 \ 가 이스케이프로 읽힐 수 있다. / 로 적어도 Windows 경로에 맞는 것을 확인했다.
 	let home = crate::claude_files::claude_home().to_string_lossy().replace('\\', "/");
 	let home = home.trim_end_matches('/');
-	let excludes: Vec<String> = crate::claude_files::RUN_EXCLUDES.iter().map(|e| format!("{home}/{e}")).collect();
+	let excludes: Vec<String> = crate::claude_files::run_excludes().iter().map(|e| format!("{home}/{e}")).collect();
 	let mut v = serde_json::json!({
 		"claudeMdExcludes": excludes,
 		"autoMemoryEnabled": false,
@@ -358,6 +373,26 @@ pub struct Parser {
 	pub result: Option<Value>,
 	pub commands: Vec<String>,
 	pub denials: Vec<Denial>,
+	/// init 이 알려 준 슬래시 명령(앞의 / 없이). 입력칸 자동완성이 쓴다.
+	pub slash_commands: Vec<String>,
+	/// 마지막 바깥 응답이 읽은 문맥 크기(입력 + 캐시 읽기 + 캐시 작성 + 출력)
+	pub context_tokens: u64,
+	/// result 줄의 modelUsage 가 알려 준 모델 창 크기. 없으면 0 이다.
+	pub context_window: u64,
+	/// 이미 막힌 것으로 남긴 도구 호출. 앱이 거부로 답한 호출을 CLI 가 다시 알려 와도 두 번 남기지 않는다.
+	denied_ids: HashSet<String>,
+}
+
+/// 도구 결과에서 화면에 펼쳐 보일 글. 길면 앞부분만 둔다 — 실시간 사건과 다시 펼친 기록이 모두 화면으로 간다.
+fn tool_output(c: &Value) -> String {
+	const MAX: usize = 4000;
+	let text = match c.get("content") {
+		Some(Value::String(s)) => s.clone(),
+		Some(Value::Array(a)) => a.iter().filter_map(|x| x.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"),
+		_ => String::new(),
+	};
+	let n = text.chars().count();
+	if n > MAX { format!("{}\n… ({}자 더 있음)", text.chars().take(MAX).collect::<String>(), n - MAX) } else { text }
 }
 
 impl Parser {
@@ -373,7 +408,22 @@ impl Parser {
 			result: None,
 			commands: Vec::new(),
 			denials: Vec::new(),
+			slash_commands: Vec::new(),
+			context_tokens: 0,
+			context_window: 0,
+			denied_ids: HashSet::new(),
 		}
+	}
+
+	/// 앱이 승인 요청에 거부로 답한 호출을 막힌 것으로 남긴다. 「허용」 단추가 그대로 쓰인다.
+	fn deny_asked(&mut self, id: &str, tool: &str, input: &Value) -> Option<RunEvent> {
+		if !id.is_empty() && !self.denied_ids.insert(id.to_string()) {
+			return None;
+		}
+		let d = Denial { target: denial_target(tool, input, &self.root), suggest: suggest_rules(tool, input, &self.root), tool: tool.to_string(), reason: "ask".into() };
+		let ev = RunEvent::Denied { id: id.to_string(), tool: d.tool.clone(), target: d.target.clone(), reason: d.reason.clone(), suggest: d.suggest.clone() };
+		self.denials.push(d);
+		Some(ev)
 	}
 
 	pub fn feed(&mut self, v: &Value) -> Vec<RunEvent> {
@@ -385,11 +435,27 @@ impl Parser {
 			"system" if v.get("subtype").and_then(|x| x.as_str()) == Some("init") => {
 				self.session_id = v.get("session_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
 				self.model = v.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string();
+				if let Some(a) = v.get("slash_commands").and_then(|x| x.as_array()) {
+					self.slash_commands = a.iter().filter_map(|x| x.as_str()).map(|s| s.trim_start_matches('/').to_string()).collect();
+				}
 				out.push(RunEvent::Init { model: self.model.clone(), session_id: self.session_id.clone() });
+			}
+			// 흘러 들어오는 답 글(--include-partial-messages). 글 조각만 넘긴다. 완성된 블록은 assistant 줄로 다시 온다.
+			"stream_event" if !nested => {
+				if v.pointer("/event/type").and_then(|x| x.as_str()) == Some("content_block_delta")
+					&& v.pointer("/event/delta/type").and_then(|x| x.as_str()) == Some("text_delta")
+					&& let Some(t) = v.pointer("/event/delta/text").and_then(|x| x.as_str())
+					&& !t.is_empty()
+				{
+					out.push(RunEvent::Delta { text: t.to_string() });
+				}
 			}
 			// 권한으로 막힌 호출. 도구 결과에는 「거부됨」 한 줄만 오므로 무엇을 왜 막았는지는 이 사건에서 읽는다.
 			"system" if v.get("subtype").and_then(|x| x.as_str()) == Some("permission_denied") && !nested => {
 				let id = v.get("tool_use_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+				if !id.is_empty() && !self.denied_ids.insert(id.clone()) {
+					return out;
+				}
 				let tool = v.get("tool_name").and_then(|x| x.as_str()).map(String::from).or_else(|| self.tools.get(&id).cloned()).unwrap_or_default();
 				let input = self.inputs.get(&id).cloned().unwrap_or(Value::Null);
 				let reason = if v.get("decision_reason_type").and_then(|x| x.as_str()) == Some("rule") { "rule" } else { "ask" };
@@ -398,9 +464,23 @@ impl Parser {
 				self.denials.push(d);
 			}
 			"assistant" if !nested => {
+				// 컨텍스트 크기: 이 응답이 읽은 입력 전부와 낸 글. 차례가 쌓이면 다음 차례가 이만큼을 다시 읽는다.
+				if let Some(u) = v.pointer("/message/usage") {
+					let n = |k: &str| u.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+					let total = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens") + n("output_tokens");
+					if total > 0 {
+						self.context_tokens = total;
+					}
+				}
 				let content = v.pointer("/message/content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
 				for c in content {
 					match c.get("type").and_then(|x| x.as_str()) {
+						Some("thinking") => {
+							let t = c.get("thinking").and_then(|x| x.as_str()).unwrap_or("").trim();
+							if !t.is_empty() {
+								out.push(RunEvent::Thinking { text: t.to_string() });
+							}
+						}
 						Some("text") => {
 							// 대화 답 끝의 단계 · 메모 표지는 앱이 읽는 신호다. 화면에는 걷어 내고 보인다. 메모 본문은 무엇을 등록했는지 보이게 남긴다.
 							let text = memo_blocks(&stage_mark(c.get("text").and_then(|x| x.as_str()).unwrap_or("")).0).0;
@@ -439,10 +519,13 @@ impl Parser {
 								self.changes.push(ch);
 							}
 					}
-					out.push(RunEvent::ToolDone { id, ok });
+					out.push(RunEvent::ToolDone { id, ok, output: tool_output(c) });
 				}
 			}
 			"result" => {
+				if let Some(m) = v.get("modelUsage").and_then(|x| x.as_object()) {
+					self.context_window = m.values().filter_map(|u| u.get("contextWindow").and_then(|x| x.as_u64())).max().unwrap_or(0);
+				}
 				let ok = !v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false)
 					&& v.get("subtype").and_then(|x| x.as_str()) == Some("success");
 				let error = if ok {
@@ -812,7 +895,7 @@ pub fn resolve_claude(setting: &str) -> Option<PathBuf> {
 	known.into_iter().find(|p| p.is_file())
 }
 
-fn command(exe: &Path) -> tokio::process::Command {
+pub fn command(exe: &Path) -> tokio::process::Command {
 	let mut cmd = tokio::process::Command::new(exe);
 	#[cfg(windows)]
 	cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW · 실행할 때마다 콘솔 창이 뜨지 않게
@@ -906,11 +989,31 @@ fn bind_to_app(_child: &tokio::process::Child) {}
 pub struct RunCtl {
 	cancel: AtomicBool,
 	notify: Notify,
+	/// 사용자가 승인 카드에 답한 줄(control_response). 실행이 표준 입력으로 넘긴다.
+	answers: Mutex<Vec<String>>,
+	answered: Notify,
+	/// 이번 실행에서 「이 대화 내내 허락」한 규칙. 같은 규칙에 걸리는 물음은 다시 묻지 않고 허락한다.
+	remembered: Mutex<Vec<String>>,
 }
 
 impl RunCtl {
 	fn new() -> Self {
-		Self { cancel: AtomicBool::new(false), notify: Notify::new() }
+		Self { cancel: AtomicBool::new(false), notify: Notify::new(), answers: Mutex::new(Vec::new()), answered: Notify::new(), remembered: Mutex::new(Vec::new()) }
+	}
+
+	fn answer(&self, line: String, remember: &[String]) {
+		self.remembered.lock().unwrap().extend(remember.iter().cloned());
+		self.answers.lock().unwrap().push(line);
+		self.answered.notify_one();
+	}
+
+	fn take_answers(&self) -> Vec<String> {
+		std::mem::take(&mut *self.answers.lock().unwrap())
+	}
+
+	fn remembers(&self, rules: &[String]) -> bool {
+		let r = self.remembered.lock().unwrap();
+		!rules.is_empty() && rules.iter().all(|x| r.contains(x))
 	}
 
 	pub(crate) fn cancelled(&self) -> bool {
@@ -1082,6 +1185,8 @@ pub struct Runner {
 	active: Mutex<HashMap<String, Arc<RunCtl>>>,
 	/// 제목을 짓고 있는 이슈. 실행 줄 · 「실행 중」 목록과는 따로 센다. 도구 없이 글 한 줄만 받는 짧은 호출이다.
 	titling: Mutex<HashSet<String>>,
+	/// 프로젝트마다 마지막 실행의 init 이 알려 준 슬래시 명령. 입력칸 자동완성이 쓴다.
+	slash: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl Runner {
@@ -1103,6 +1208,22 @@ impl Runner {
 			ctl.notify.notify_one();
 		}
 		active.len()
+	}
+
+	/// 승인 요청에 답한다. 그 실행이 이미 끝났으면 false.
+	fn answer(&self, key: &str, line: String, remember: &[String]) -> bool {
+		match self.active.lock().unwrap().get(key) {
+			Some(ctl) => {
+				ctl.answer(line, remember);
+				true
+			}
+			None => false,
+		}
+	}
+
+	/// 그 프로젝트의 실행이 init 에서 알려 준 슬래시 명령. 아직 돌린 적이 없으면 빈 목록이다.
+	pub fn slash_commands(&self, pid: &str) -> Vec<String> {
+		self.slash.lock().unwrap().get(pid).cloned().unwrap_or_default()
 	}
 
 	/// notify_one 은 기다리는 쪽이 아직 없어도 허가를 남긴다. 줄 서 있던 작업도 바로 깨어난다.
@@ -1235,6 +1356,7 @@ static HANCOM: AtomicBool = AtomicBool::new(false);
 
 pub fn note_settings(s: &Settings) {
 	HANCOM.store(s.hancom_check, Ordering::Relaxed);
+	crate::claude_files::set_run_excludes(&s.run_excludes);
 }
 
 struct Spec {
@@ -1257,7 +1379,35 @@ struct Outcome {
 	parser: Parser,
 }
 
-async fn exec(spec: Spec, ctl: &RunCtl, mut emit: impl FnMut(&RunEvent, &Parser)) -> Outcome {
+async fn exec(spec: Spec, ctl: &RunCtl, emit: impl FnMut(&RunEvent, &Parser)) -> Outcome {
+	exec_with(spec, None, ctl, emit).await
+}
+
+/// stream-json 입력 줄 하나. 대화 실행은 프롬프트를 이 꼴로 넣고 표준 입력을 열어 둔다.
+fn user_line(text: &str) -> String {
+	serde_json::json!({ "type": "user", "message": { "role": "user", "content": text } }).to_string()
+}
+
+/// 승인 요청에 돌려줄 줄. allow 면 updated_input 으로 돌고, 아니면 message 를 까닭으로 거부한다.
+fn control_response(request_id: &str, allow: bool, updated_input: Value, message: &str) -> String {
+	let response = if allow {
+		serde_json::json!({ "behavior": "allow", "updatedInput": updated_input })
+	} else {
+		serde_json::json!({ "behavior": "deny", "message": message })
+	};
+	serde_json::json!({ "type": "control_response", "response": { "subtype": "success", "request_id": request_id, "response": response } }).to_string()
+}
+
+/// 승인 요청을 화면에 물을지. 수동 승인은 모두 묻고, 다른 모드는 Claude 의 되묻기(AskUserQuestion)만 묻는다.
+/// 나머지는 예전처럼 막는다 — 자동 승인 · 권한 무시는 「목록 밖은 막는다」가 약속이다.
+fn ask_user(mode: ChatMode, tool: &str) -> bool {
+	mode == ChatMode::Ask || tool == "AskUserQuestion"
+}
+
+/// interactive 가 있으면 대화 실행이다: 프롬프트를 stream-json 한 줄로 넣고 결과 줄이 올 때까지 표준 입력을 열어 둔 채
+/// 승인 요청(control_request · can_use_tool)을 화면에 묻는다(RunEvent::Ask → 사용자의 답이 RunCtl::answer 로 온다).
+/// 답 글 조각(Delta)은 기록 파일에 남기지 않고, 60ms 마다 묶어 화면으로 보낸다 — 조각마다 보내면 긴 답에서 화면이 느려진다.
+async fn exec_with(spec: Spec, interactive: Option<ChatMode>, ctl: &RunCtl, mut emit: impl FnMut(&RunEvent, &Parser)) -> Outcome {
 	let mut parser = Parser::new(&spec.root, &spec.run_id);
 	let fail = |parser: Parser, error: String| Outcome { ok: false, stopped: false, error, parser };
 
@@ -1278,9 +1428,18 @@ async fn exec(spec: Spec, ctl: &RunCtl, mut emit: impl FnMut(&RunEvent, &Parser)
 	};
 	bind_to_app(&child);
 
-	if let Some(mut stdin) = child.stdin.take() {
-		let _ = stdin.write_all(spec.prompt.as_bytes()).await;
-		let _ = stdin.shutdown().await;
+	let mut input = child.stdin.take();
+	if let Some(stdin) = input.as_mut() {
+		if interactive.is_some() {
+			let _ = stdin.write_all(format!("{}\n", user_line(&spec.prompt)).as_bytes()).await;
+			let _ = stdin.flush().await;
+		} else {
+			let _ = stdin.write_all(spec.prompt.as_bytes()).await;
+			let _ = stdin.shutdown().await;
+		}
+	}
+	if interactive.is_none() {
+		input = None;
 	}
 	let stdout = child.stdout.take().unwrap();
 	let mut stderr = child.stderr.take().unwrap();
@@ -1296,32 +1455,88 @@ async fn exec(spec: Spec, ctl: &RunCtl, mut emit: impl FnMut(&RunEvent, &Parser)
 	let mut log = tokio::fs::File::create(&spec.log).await.ok();
 	let mut lines = BufReader::new(stdout).lines();
 	let mut stopped = ctl.cancelled();
+	let mut delta = String::new();
+	let mut flushed = std::time::Instant::now();
 
 	while !stopped {
 		tokio::select! {
 			line = lines.next_line() => match line {
 				Ok(Some(l)) => {
-					if let Some(f) = log.as_mut() {
-						let _ = f.write_all(l.as_bytes()).await;
-						let _ = f.write_all(b"\n").await;
+					let v = serde_json::from_str::<Value>(&l).unwrap_or(Value::Null);
+					let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+					// 글 조각은 기록에 남기지 않는다. 완성된 블록이 assistant 줄로 다시 오고, 남기면 기록 파일만 커진다.
+					if t != "stream_event"
+						&& let Some(f) = log.as_mut() {
+							let _ = f.write_all(l.as_bytes()).await;
+							let _ = f.write_all(b"\n").await;
+						}
+					// 구독 사용률은 실행 하나가 아니라 앱 전체의 것이라 Parser 를 거치지 않고 따로 넘긴다.
+					if t == "rate_limit_event" {
+						crate::usage::record(&v);
 					}
-					if let Ok(v) = serde_json::from_str::<Value>(&l) {
-						// 구독 사용률은 실행 하나가 아니라 앱 전체의 것이라 Parser 를 거치지 않고 따로 넘긴다.
-						if v.get("type").and_then(|x| x.as_str()) == Some("rate_limit_event") {
-							crate::usage::record(&v);
+					if t == "control_request" {
+						if let (Some(mode), Some(stdin)) = (interactive, input.as_mut()) {
+							let rid = v.get("request_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+							let req = v.get("request").cloned().unwrap_or(Value::Null);
+							if req.get("subtype").and_then(|x| x.as_str()) == Some("can_use_tool") {
+								let tool = req.get("tool_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+								let tin = req.get("input").cloned().unwrap_or(Value::Null);
+								let suggest = suggest_rules(&tool, &tin, &spec.root);
+								if ask_user(mode, &tool) && !(tool != "AskUserQuestion" && ctl.remembers(&suggest)) {
+									let ev = RunEvent::Ask { request_id: rid, summary: summarize(&tool, &tin, &spec.root), tool, input: tin, suggest };
+									emit(&ev, &parser);
+								} else {
+									let allow = ask_user(mode, &tool);
+									let line = control_response(&rid, allow, tin.clone(), "허용 목록에 없어 막혔습니다. 사용자가 입력칸에서 권한을 바꾸기 전에는 다른 길로 우회하지 않는다.");
+									let _ = stdin.write_all(format!("{line}\n").as_bytes()).await;
+									let _ = stdin.flush().await;
+									if !allow {
+										let id = req.get("tool_use_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+										if let Some(ev) = parser.deny_asked(&id, &tool, &tin) {
+											emit(&ev, &parser);
+										}
+									}
+								}
+							}
 						}
-						for ev in parser.feed(&v) {
-							emit(&ev, &parser);
+						continue;
+					}
+					let done = t == "result";
+					for ev in parser.feed(&v) {
+						if let RunEvent::Delta { text } = &ev {
+							delta.push_str(text);
+							continue;
 						}
+						if !delta.is_empty() {
+							emit(&RunEvent::Delta { text: std::mem::take(&mut delta) }, &parser);
+						}
+						emit(&ev, &parser);
+					}
+					if !delta.is_empty() && (t != "stream_event" || flushed.elapsed() >= Duration::from_millis(60)) {
+						emit(&RunEvent::Delta { text: std::mem::take(&mut delta) }, &parser);
+						flushed = std::time::Instant::now();
+					}
+					// 결과가 왔으면 표준 입력을 닫아 claude 를 끝낸다. 열어 두면 다음 입력을 기다리며 남는다.
+					if done && let Some(mut stdin) = input.take() {
+						let _ = stdin.shutdown().await;
 					}
 				}
 				_ => break,
 			},
+			_ = ctl.answered.notified(), if input.is_some() => {
+				if let Some(stdin) = input.as_mut() {
+					for line in ctl.take_answers() {
+						let _ = stdin.write_all(format!("{line}\n").as_bytes()).await;
+					}
+					let _ = stdin.flush().await;
+				}
+			}
 			_ = ctl.wait_cancel() => {
 				stopped = true;
 			}
 		}
 	}
+	drop(input);
 	if stopped {
 		let _ = child.start_kill();
 	}
@@ -1771,6 +1986,27 @@ fn doc_material(v: &DeliverableView, request: &str, current: Option<&str>) -> St
 	s
 }
 
+/// 트리거로 고른 DB 자료의 최신 구조 파일. 본문은 싣지 않고 경로만 준다 — 표가 크면 프롬프트가 넘친다.
+/// 손으로 시킨 작성에도 붙는다. 그래서 손으로 쓴 판도 그때의 구조를 읽은 것으로 본다(dbsrc::pending_for).
+fn db_material(store: &Store, p: &Project, d: &Deliverable) -> String {
+	let mut lines = Vec::new();
+	for sid in d.db_triggers() {
+		let Some(src) = p.db_sources.iter().find(|s| s.id == sid) else { continue };
+		let dir = crate::dbsrc::source_dir(store, &p.id, sid);
+		let Some(last) = crate::dbsrc::read_index(&dir).snapshots.last().cloned() else { continue };
+		let cols = if src.columns.is_empty() { String::new() } else { format!(" · 칸: {}", src.columns.join(" · ")) };
+		lines.push(format!("- 「{}」: {} ({}행{cols})\n", src.name, crate::dbsrc::snap_path(&dir, &last.id).display(), last.rows));
+	}
+	if lines.is_empty() {
+		return String::new();
+	}
+	format!(
+		"## DB 구조\n이 산출물은 아래 DB 자료를 따른다. 앱이 DB 에서 받아 둔 구조다(탭으로 나눈 표, 첫 줄은 칸 이름). \
+		필요한 부분을 Read 로 읽는다. DB 에 직접 접속하지 않는다 — 접속 정보는 주지 않았다.\n{}",
+		lines.concat()
+	)
+}
+
 /// format 이 있으면 확장자를 그것으로 못 박는다. 비우면 템플릿을 따르고, 템플릿도 없으면 md 다.
 /// plugin 은 앱에 실은 플러그인 폴더다. 쪽 그림 도구(scripts/render.py)는 어느 스킬에도 딸리지 않아 절대 경로로 알려 준다.
 /// check 는 쪽 그림을 그릴 폴더다. 실행이 끝나면 앱이 지운다.
@@ -1883,7 +2119,16 @@ fn job_args(job: &Job, s: &Settings, p: &Project, issue: &Issue, add_dir: &Path,
 	match job {
 		Job::Plan { .. } => a.extend(["--json-schema".into(), PLAN_SCHEMA.into()]),
 		// 대화는 결과 형식을 정하지 않는다. 답은 글로 받는다.
-		Job::Chat { .. } => {}
+		// 표준 입출력으로 묻고 답한다(exec_with): 프롬프트는 stream-json 한 줄, 승인 요청은 control_request 로 온다. 답 글은 조각으로 흘려 받는다.
+		// 읽기 전용은 읽기 도구만 열어 물을 것이 없다 — 예전처럼 묻지 않고 막는다.
+		Job::Chat { mode, .. } => {
+			a.extend(["--input-format".into(), "stream-json".into(), "--include-partial-messages".into()]);
+			if *mode != ChatMode::Read
+				&& let Some(at) = a.iter().position(|x| x == "--permission-prompts") {
+					a[at + 1] = "host".into();
+					a.extend(["--permission-prompt-tool".into(), "stdio".into()]);
+				}
+		}
 		_ => a.extend(["--json-schema".into(), IMPL_SCHEMA.into()]),
 	}
 	if let Some(sid) = resume {
@@ -1912,7 +2157,7 @@ fn unsent_hits(hits: &[KbHit], runs: &[RunRecord], session: &str) -> Vec<KbHit> 
 
 /// 앱에 실은 Claude 플러그인 폴더(src-tauri/claude-plugin → 설치본의 리소스 폴더). 한글 · 워드 · 엑셀 · 파워포인트 스킬과
 /// 문장 다듬기(anti-slop)가 들어 있어, 이 PC 의 Claude 에 무엇이 깔렸든 같은 꼴로 만든다. 개발 실행에서는 빌드가 target/<프로필> 아래로 복사해 둔다.
-fn plugin_dir(app: &AppHandle) -> Option<PathBuf> {
+pub fn plugin_dir(app: &AppHandle) -> Option<PathBuf> {
 	let dir = app.path().resource_dir().ok()?.join("claude-plugin");
 	dir.join(".claude-plugin").join("plugin.json").is_file().then_some(dir)
 }
@@ -1929,8 +2174,7 @@ pub async fn doc_tools_check(app: &AppHandle) -> Value {
 		return serde_json::json!({ "python": "", "items": [], "install": "", "error": "앱에 실은 플러그인 폴더를 찾지 못했다" });
 	};
 	let script = dir.join("scripts").join("doctor.py");
-	for (exe, pre) in [("py", vec!["-3"]), ("python", vec![]), ("python3", vec![])] {
-		let Ok(path) = which(exe) else { continue };
+	for (path, pre) in python_candidates() {
 		let run = command(&path).args(&pre).arg(&script).env("PYTHONIOENCODING", "utf-8").output();
 		let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(60), run).await else { continue };
 		if let Ok(v) = serde_json::from_slice::<Value>(&out.stdout) {
@@ -1938,6 +2182,11 @@ pub async fn doc_tools_check(app: &AppHandle) -> Value {
 		}
 	}
 	no_python
+}
+
+/// 이 PC 에서 파이썬을 부를 후보를 먼저 볼 순서대로 준다. 실행 파일과 앞에 붙일 인자다.
+pub fn python_candidates() -> Vec<(PathBuf, Vec<&'static str>)> {
+	[("py", vec!["-3"]), ("python", vec![]), ("python3", vec![])].into_iter().filter_map(|(exe, pre)| which(exe).ok().map(|p| (p, pre))).collect()
 }
 
 /// PATH 에서 실행 파일을 찾는다. Windows 는 PATHEXT 를 붙여 본다.
@@ -1982,6 +2231,45 @@ fn kind_name(kind: RunKind) -> &'static str {
 	}
 }
 
+/// 슬래시 명령이면 앞뒤 빈칸을 뺀 글. 첫 낱말이 `/이름` 꼴이어야 한다 — `/src/a.ts` 같은 경로로 시작하는 질문은 명령이 아니다.
+pub fn slash_text(text: &str) -> Option<&str> {
+	let t = text.trim();
+	let head = t.split_whitespace().next()?;
+	let name = head.strip_prefix('/')?;
+	(!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))).then_some(t)
+}
+
+/// 승인 카드에 답한다. AskUserQuestion 은 updated_input 에 답(answers)을 담아 허락한다.
+/// remember 는 「이 대화 내내 허락」이다 — 이번 실행은 같은 규칙을 다시 묻지 않고, 다음 차례부터는 허용 목록에 더한다.
+pub fn chat_answer(app: &AppHandle, pid: &str, iid: &str, request_id: &str, allow: bool, updated_input: Option<Value>, remember: bool, message: &str) -> Result<IssueView> {
+	let store = app.state::<Store>();
+	let mut found: Option<PendingAsk> = None;
+	let view = store.update_issue(pid, iid, |i| {
+		let Some(r) = i.run.as_mut() else { return msg("실행이 끝나 답할 물음이 없습니다") };
+		let Some(at) = r.asks.iter().position(|a| a.request_id == request_id) else { return msg("이미 답한 물음입니다") };
+		let ask = r.asks.remove(at);
+		if allow && remember && ask.tool != "AskUserQuestion" {
+			for s in &ask.suggest {
+				if !i.chat_allow.contains(s) {
+					i.chat_allow.push(s.clone());
+				}
+			}
+		}
+		found = Some(ask);
+		Ok(())
+	})?;
+	let ask = found.unwrap_or_default();
+	let input = updated_input.unwrap_or_else(|| ask.input.clone());
+	let reason = if message.trim().is_empty() { "사용자가 거부했습니다. 다른 길로 우회하지 말고 무엇을 하려 했는지 말하고 다음 지시를 기다린다." } else { message.trim() };
+	let line = control_response(request_id, allow, input, reason);
+	let remembered: Vec<String> = if allow && remember { ask.suggest.clone() } else { Vec::new() };
+	if !app.state::<Runner>().answer(&issue_key(pid, iid), line, &remembered) {
+		return msg("실행이 끝나 답을 넘기지 못했습니다");
+	}
+	emit_issue(app, &view);
+	Ok(view)
+}
+
 fn record(run_id: &str, kind: RunKind, prompt: &str) -> RunRecord {
 	RunRecord { id: run_id.into(), kind: kind_name(kind).into(), started_at: now_ms(), status: "running".into(), prompt: prompt.into(), ..Default::default() }
 }
@@ -1994,6 +2282,8 @@ fn finish(rec: &mut RunRecord, o: &Outcome) {
 	rec.error = o.error.chars().take(2000).collect();
 	rec.commands = o.parser.commands.clone();
 	rec.denials = o.parser.denials.clone();
+	rec.context_tokens = o.parser.context_tokens;
+	rec.context_window = o.parser.context_window;
 	if let Some(r) = o.parser.result.as_ref() {
 		rec.cost_usd = r.get("total_cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0);
 		rec.tokens = Tokens::from_result(r);
@@ -2142,9 +2432,6 @@ async fn branch_out(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 /// 설계가 정해지면 승인 대기로, 파일을 고쳤으면 결과 확인으로 단계를 옮긴다.
 /// 실행 중이면 대기열에 넣고, 대기열이 남아 있으면 그 뒤에 붙여 함께 보낸다.
 pub fn chat(app: &AppHandle, pid: &str, iid: &str, text: String, mode: ChatMode, images: Vec<String>) -> Result<IssueView> {
-	if mode == ChatMode::Ask {
-		return msg("수동 승인은 아직 쓸 수 없습니다");
-	}
 	// 첨부 폴더 밖을 가리키지 못하게 이름만 받고, 지금 있는 파일만 넘긴다.
 	let have = app.state::<Store>().attachments(pid, iid);
 	let images: Vec<String> = images.into_iter().filter(|n| have.contains(n)).collect();
@@ -2164,11 +2451,14 @@ static DISPATCH: Mutex<()> = Mutex::new(());
 /// 대기열을 한 차례로 묶는다. 글은 넣은 차례대로 빈 줄을 두고 잇고, 첨부는 겹치는 이름을 한 번만 넣는다.
 /// 하나라도 고칠 수 있게 넣었으면 고칠 수 있는 쪽을 따른다. 읽기 전용으로 묶으면 그 질문이 바라던 고침을 못 한다.
 /// 권한 무시는 묶음 전부가 그럴 때만 쓴다. 읽기로 넣은 질문이 명령까지 열린 차례에 끌려가지 않게 자동 승인으로 낮춘다.
+/// 수동 승인은 묻고 고치는 쪽이라 읽기보다 넓고 자동 승인보다 좁다. 수동과 읽기만 섞였으면 수동으로 돈다.
 fn batch_mode(items: &[QueuedChat]) -> ChatMode {
 	if items.iter().all(|q| q.mode == ChatMode::Bypass) {
 		ChatMode::Bypass
-	} else if items.iter().any(|q| q.mode.can_edit()) {
+	} else if items.iter().any(|q| matches!(q.mode, ChatMode::Auto | ChatMode::Bypass)) {
 		ChatMode::Auto
+	} else if items.iter().any(|q| q.mode == ChatMode::Ask) {
+		ChatMode::Ask
 	} else {
 		ChatMode::Read
 	}
@@ -2296,7 +2586,7 @@ fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueV
 				}
 			}
 		}
-		i.run = Some(RunState { kind, phase: Phase::Queued, run_id: run_id.clone(), queued_at: now_ms(), wait_for: String::new() });
+		i.run = Some(RunState { kind, phase: Phase::Queued, run_id: run_id.clone(), queued_at: now_ms(), wait_for: String::new(), asks: Vec::new() });
 		i.error.clear();
 		Ok(())
 	})?;
@@ -2481,7 +2771,16 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 	let key = issue_key(pid, iid);
 	let claims = app.state::<Runner>().claims.clone();
 	// 워크트리에서 도는 이슈는 그 폴더에서 돌고, 본 작업트리의 잡기 장부와 상관없다.
-	let worktree = store.raw_issue(pid, iid)?.worktree;
+	let raw = store.raw_issue(pid, iid)?;
+	let worktree = raw.worktree;
+	// 수동 승인 카드에서 「이 대화 내내 허락」한 규칙은 이 대화의 허용 목록에 더한다. 인자 · 실행 기록이 같은 값을 쓴다.
+	if matches!(job, Job::Chat { .. }) {
+		for r in raw.chat_allow {
+			if !project.allowed_tools.contains(&r) {
+				project.allowed_tools.push(r);
+			}
+		}
+	}
 	let cwd = worktree.as_ref().map_or_else(|| project.path.clone(), |w| w.path.clone());
 	// 함께 도는 구현이 잡은 파일은 이번 실행이 고치지 못하게 막는다. 막을 목록에 더해 인자 · 실행 기록이 같은 값을 쓰게 한다.
 	// Edit · Write 도구만 막는다. 명령으로 쓰는 것은 막지 못해 「모두 허용」은 함께 돌리지 않는다(claim_files).
@@ -2536,6 +2835,18 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 		let q = crate::glossary::expand_query(&gl_list, &q);
 		kb_hits = crate::kb::find(app, &project, &settings, &q, "").await;
 	}
+	// 기억은 어휘 사전처럼 되돌리기에는 붙이지 않는다. 앱 대화는 프로젝트가 아니라 기억이 없다.
+	let memory_list = if project.memory.enabled && kind != RunKind::Revert && pid != GLOBAL_PID {
+		let q = match job {
+			Job::Chat { text, .. } => text.clone(),
+			Job::Plan { feedback } => format!("{}\n{}", view.note, feedback.as_deref().unwrap_or("")),
+			Job::Rework { feedback, .. } => format!("{}\n{feedback}", view.note),
+			_ => view.note.clone(),
+		};
+		crate::memory::select(&store.memory(pid), &q)
+	} else {
+		Vec::new()
+	};
 
 	// 첫 계획만 새 세션으로 연다. 그 뒤로는 같은 세션을 이어 Claude 가 읽은 코드와 계획을 기억하게 한다.
 	let first_plan = matches!(job, Job::Plan { feedback: None });
@@ -2605,6 +2916,33 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 			}) {
 			emit_issue(app, &v);
 		}
+		// 어휘 사전과 달리 이어 붙인 세션에도 아직 보내지 않은 항목은 붙인다. 세션을 잇는 동안 승인한 지침이 다음 차례부터 지켜져야 한다.
+		let memory_now = if resumed { crate::memory::unsent(&memory_list, &view.issue.runs, &view.issue.session_id) } else { memory_list.clone() };
+		let (memory_block, memory_used) = crate::memory::prompt_block(&memory_now);
+		if !memory_block.is_empty() {
+			prompt.push('\n');
+			prompt.push_str(&memory_block);
+		}
+		if !memory_list.is_empty()
+			&& let Ok(v) = store.update_issue(pid, iid, |i| {
+				if let Some(rec) = i.runs.iter_mut().find(|r| r.id == run_id) {
+					rec.memory_items = memory_used.clone();
+				}
+				Ok(())
+			}) {
+			emit_issue(app, &v);
+		}
+		// 슬래시 명령은 글 맨 앞에 있어야 CLI 가 명령(스킬 · /compact …)으로 읽는다. 사용자가 친 그대로 보내고,
+		// 새 세션이면 앱이 감싸던 안내(저장소 규칙 · 메모 남기는 법 …)를 시스템 프롬프트 뒤에 붙인다. 이어 붙인 세션은 이미 안다.
+		if let Job::Chat { text, .. } = job
+			&& let Some(cmd) = slash_text(text)
+		{
+			if !resumed {
+				let ctx = prompt.replacen(cmd, "(사용자가 슬래시 명령을 보냈다. 그 명령의 지시를 따른다.)", 1);
+				args.extend(["--append-system-prompt".into(), ctx]);
+			}
+			prompt = cmd.to_string();
+		}
 		let spec = Spec {
 			exe: exe.clone(),
 			cwd: PathBuf::from(&cwd),
@@ -2616,11 +2954,31 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 			project: pid.to_string(),
 			kind: kind_name(job.kind()),
 		};
-		let o = exec(spec, ctl, |ev, parser| {
+		let interactive = match job {
+			Job::Chat { mode, .. } => Some(*mode),
+			_ => None,
+		};
+		let o = exec_with(spec, interactive, ctl, |ev, parser| {
 			let _ = app.emit(
 				"docket://run",
 				Envelope { project_id: pid, target: "issue", target_id: iid, run_id, event: ev },
 			);
+			// 슬래시 명령 목록은 프로젝트마다 마지막 실행의 것을 둔다. 입력칸 자동완성이 쓴다.
+			if let RunEvent::Init { .. } = ev
+				&& !parser.slash_commands.is_empty() {
+					app.state::<Runner>().slash.lock().unwrap().insert(pid.to_string(), parser.slash_commands.clone());
+				}
+			// 허락 · 답을 기다리는 물음은 이슈에 올린다. 화면은 이슈를 보고 카드를 그리므로 상세 창을 닫았다 열어도 남는다.
+			if let RunEvent::Ask { request_id, tool, summary, input, suggest } = ev
+				&& let Ok(v) = store.update_issue(pid, iid, |i| {
+					if let Some(r) = i.run.as_mut().filter(|r| r.run_id == run_id) {
+						r.asks.push(PendingAsk { request_id: request_id.clone(), tool: tool.clone(), input: input.clone(), summary: summary.clone(), suggest: suggest.clone(), at: now_ms() });
+					}
+					Ok(())
+				}) {
+					emit_issue(app, &v);
+					attention(app);
+				}
 			if worktree.is_none()
 				&& let RunEvent::Change { rel, .. } = ev
 				&& let Some(who) = claims.touch(pid, &key, rel)
@@ -2764,7 +3122,7 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 fn register_memos(app: &AppHandle, pid: &str, tid: &str, memos: &[MemoBlock], auto_plan: bool) -> Result<()> {
 	let store = app.state::<Store>();
 	let mode = new_title_mode(&store.settings()?);
-	let projects = if pid == GLOBAL_PID { store.projects()? } else { Vec::new() };
+	let projects = if pid == GLOBAL_PID { store.active_projects()? } else { Vec::new() };
 	let mut logs = Vec::new();
 	for (project, title, body) in memos {
 		let (target, tag) = if pid == GLOBAL_PID {
@@ -2827,11 +3185,26 @@ pub fn document(app: &AppHandle, pid: &str, did: Option<String>, request: String
 
 /// issue_id 는 이슈를 완료해 자동 갱신으로 시작했을 때 그 이슈다. 끝난 결과를 그 이슈의 흐름에 남긴다.
 pub fn document_from(app: &AppHandle, pid: &str, did: Option<String>, request: String, issue_id: &str) -> Result<DeliverableView> {
-	document_job(app, pid, did, request, issue_id, Vec::new())
+	document_job(app, pid, did, request, JobOrigin { issue_id: issue_id.to_string(), ..Default::default() })
+}
+
+/// 새 판을 쓰게 한 변경. 모두 비면 사람이 손으로 시킨 작성이다.
+#[derive(Debug, Clone, Default)]
+pub struct JobOrigin {
+	/// 이슈를 완료해 자동 갱신으로 시작했으면 그 이슈
+	pub issue_id: String,
+	/// 「밀린 변경 반영」이 한꺼번에 반영하는 이슈들
+	pub catch_up: Vec<String>,
+	/// 함께 반영하는 DB 변경
+	pub db: Vec<DbMark>,
+	/// db 가 「밀린 변경 반영」으로 넘어왔다. 아니면 자동 갱신이다.
+	pub db_catch_up: bool,
 }
 
 /// catch_up 은 「밀린 변경 반영」이 한꺼번에 반영하는 이슈들이다. 새 판이 나오면 자동 관리 기록에 남기고 검토 표지를 단다.
-pub fn document_job(app: &AppHandle, pid: &str, did: Option<String>, request: String, issue_id: &str, catch_up: Vec<String>) -> Result<DeliverableView> {
+pub fn document_job(app: &AppHandle, pid: &str, did: Option<String>, request: String, origin: JobOrigin) -> Result<DeliverableView> {
+	let JobOrigin { issue_id, catch_up, db, db_catch_up } = origin;
+	let issue_id = issue_id.as_str();
 	if pid == GLOBAL_PID {
 		return msg("앱 대화에는 산출물이 없습니다");
 	}
@@ -2852,7 +3225,7 @@ pub fn document_job(app: &AppHandle, pid: &str, did: Option<String>, request: St
 		if d.job.is_some() {
 			return msg("이미 작성 중입니다");
 		}
-		d.job = Some(DocJob { run_id: run_id.clone(), phase: Phase::Queued, request: request.clone(), queued_at: now_ms(), issue_id: issue_id.to_string(), catch_up: catch_up.clone() });
+		d.job = Some(DocJob { run_id: run_id.clone(), phase: Phase::Queued, request: request.clone(), queued_at: now_ms(), issue_id: issue_id.to_string(), catch_up: catch_up.clone(), db: db.clone(), db_catch_up });
 		d.error.clear();
 		Ok(())
 	})?;
@@ -2895,10 +3268,12 @@ pub fn document_job(app: &AppHandle, pid: &str, did: Option<String>, request: St
 /// 문서 작성 인자. 결과 폴더(out)를 열고 편집 · 명령을 허용하되 저장소 안 편집은 권한 규칙으로 막는다.
 /// plugin 은 앱에 실은 문서 스킬 플러그인 폴더다(plugin_dir). 산출물 실행에만 건다 — 다른 실행에까지 실으면 스킬 목록이 실행마다 붙는다.
 /// 2026.10.29 : 읽기 도구만 열고 앱이 .md 로 저장하던 「마크다운으로 받기」 갈래를 없앴다. 마크다운도 형식의 하나로 파일로 만든다.
-fn doc_args(s: &Settings, p: &Project, data_dir: &Path, out: &Path, plugin: Option<&Path>) -> Vec<String> {
+/// read_only 는 읽기로만 열 폴더(DB 자료의 스냅숏 폴더)다. 함께 여는 폴더와 같이 편집을 거부 규칙으로 막는다.
+fn doc_args(s: &Settings, p: &Project, data_dir: &Path, out: &Path, plugin: Option<&Path>, read_only: &[PathBuf]) -> Vec<String> {
 	// 플러그인 폴더도 연다. 프롬프트가 문장 다듬기 기준(anti-slop 의 references)을 Read 로 읽게 한다.
 	// 함께 여는 폴더는 읽기만 연다. 산출물 실행은 결과 폴더에 파일을 만드는 일이라, 저장소처럼 그 폴더의 편집도 거부 규칙으로 막는다.
-	let extra = extra_dirs(p);
+	let mut extra = extra_dirs(p);
+	extra.extend(read_only.iter().cloned());
 	let mut dirs = vec![data_dir, out];
 	dirs.extend(plugin);
 	dirs.extend(extra.iter().map(PathBuf::as_path));
@@ -2953,7 +3328,13 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		.and_then(|p| std::fs::read_to_string(p).ok());
 	let origin = view.deliverable.job.as_ref().map(|j| j.issue_id.clone()).unwrap_or_default();
 	let catch_up = view.deliverable.job.as_ref().map(|j| j.catch_up.clone()).unwrap_or_default();
+	let db_marks = view.deliverable.job.as_ref().map(|j| j.db.clone()).unwrap_or_default();
+	let db_catch_up = view.deliverable.job.as_ref().map(|j| j.db_catch_up).unwrap_or(false);
 	let mut material = doc_material(&view, request, current.as_deref());
+	let db_block = db_material(&store, &project, &view.deliverable);
+	if !db_block.is_empty() {
+		material.push_str(&format!("\n{db_block}"));
+	}
 	// 지식베이스에서 이 산출물과 가까운 자료를 붙인다. 자기 자신(이 산출물의 판)은 근거로 붙이지 않는다.
 	let d = &view.deliverable;
 	let query: String = format!("{} {} {} {}", d.title, d.note, d.guide, request).chars().take(4000).collect();
@@ -2968,6 +3349,20 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 			Ok(())
 		}) {
 			emit_deliverable(app, &v);
+		}
+	}
+	if project.memory.enabled {
+		let (memory_block, memory_used) = crate::memory::prompt_block(&crate::memory::select(&store.memory(pid), &query));
+		if !memory_block.is_empty() {
+			material.push_str(&format!("\n{memory_block}"));
+			if let Ok(v) = store.update_deliverable(pid, did, |d| {
+				if let Some(rec) = d.runs.iter_mut().find(|r| r.id == run_id) {
+					rec.memory_items = memory_used.clone();
+				}
+				Ok(())
+			}) {
+				emit_deliverable(app, &v);
+			}
 		}
 	}
 	let hits = crate::kb::find(app, &project, &settings, &crate::glossary::expand_query(&gl_list, &query), did).await;
@@ -2994,7 +3389,9 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		eprintln!("문서 스킬 플러그인 폴더가 없다 — 계정 문서 스킬도 막혀 있어 파일 산출물이 실패할 수 있다");
 	}
 	let prompt = doc_file_prompt(&material, &dir, &base, &view.deliverable.format, plugin.as_deref(), &check_dir, settings.hancom_check);
-	let mut args = doc_args(&settings, &project, &data_dir, &dir, plugin.as_deref());
+	// 트리거로 고른 DB 자료의 스냅숏 폴더는 읽기로만 연다.
+	let db_dirs: Vec<PathBuf> = view.deliverable.db_triggers().iter().map(|sid| crate::dbsrc::source_dir(&store, pid, sid)).filter(|d| d.is_dir()).collect();
+	let mut args = doc_args(&settings, &project, &data_dir, &dir, plugin.as_deref(), &db_dirs);
 	if project.kb.enabled {
 		kb_add_dir(&mut args, &store, pid);
 	}
@@ -3026,9 +3423,21 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 	let mut note: String = if request.trim().is_empty() { "작성 지침대로".into() } else { request.chars().take(200).collect() };
 	// 자동 갱신은 요청이 길다(변경분까지 싣는다). 판 메모에는 어느 이슈를 반영했는지만 남긴다.
 	let origin_number = if origin.is_empty() { None } else { store.raw_issue(pid, &origin).ok().map(|i| i.number) };
-	if let Some(n) = origin_number {
-		note = format!("이슈 #{n} 의 코드 변경 반영");
+	let db_names: Vec<String> = db_marks.iter().map(|m| format!("DB 「{}」", m.name)).collect();
+	// DB 변경이 자동 갱신으로 왔으면(밀린 변경 반영이 아니면) 이슈와 같이 자동 갱신 결과를 남긴다.
+	let db_auto = !db_marks.is_empty() && !db_catch_up;
+	match (origin_number, db_auto) {
+		(Some(n), false) => note = format!("이슈 #{n} 의 코드 변경 반영"),
+		(Some(n), true) => note = format!("이슈 #{n} 의 코드 변경과 {} 구조 변경 반영", db_names.join(" · ")),
+		(None, true) => note = format!("{} 구조 변경 반영", db_names.join(" · ")),
+		_ => {}
 	}
+	// 자동 갱신 결과에 붙일 이름. 이슈면 #번호, DB 만이면 자료 이름이다.
+	let auto_label: Option<String> = match (origin_number, db_auto) {
+		(Some(n), _) => Some(format!("#{n}")),
+		(None, true) => Some(db_names.join(" · ")),
+		_ => None,
+	};
 	// 자동 갱신이 「반영할 것이 없다」고 답했으면 새 판을 만들지 않는다.
 	let skipped = (outcome.ok && out.as_ref().and_then(|d| d.get("skip")).and_then(|x| x.as_bool()) == Some(true)).then(|| field("reason"));
 	let before_n = view.deliverable.versions.len();
@@ -3069,7 +3478,7 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 	}
 
 	// 자동 갱신의 결과 한 줄. 산출물 목록과 시작한 이슈의 흐름에 같은 말로 남긴다.
-	let auto_line = origin_number.map(|n| {
+	let auto_line = auto_label.map(|n| {
 		let what = if outcome.stopped {
 			"중지".to_string()
 		} else if let Some(r) = &skipped {
@@ -3110,22 +3519,38 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		let made = d.versions.len() > before_n;
 		let at = now_ms();
 		let version = if made { d.versions.last().map(|v| v.n).unwrap_or(0) } else { 0 };
-		if let Some((n, what)) = &auto_line {
-			d.auto_last = format!("#{n} · {what}");
-			d.push_auto(AutoEntry { at, issue_id: origin.clone(), number: *n, verdict: verdict.into(), reason: reason.clone(), version });
+		if let Some((label, what)) = &auto_line {
+			d.auto_last = format!("{label} · {what}");
+			if let Some(n) = origin_number {
+				d.push_auto(AutoEntry { at, issue_id: origin.clone(), number: n, verdict: verdict.into(), reason: reason.clone(), version, ..Default::default() });
+			}
+			if db_auto {
+				for m in &db_marks {
+					d.push_auto(AutoEntry { at, verdict: verdict.into(), reason: reason.clone(), version, source: format!("{TRIGGER_DB}{}", m.source), snapshot: m.snapshot.clone(), ..Default::default() });
+				}
+			}
 		}
 		// 「반영할 것이 없다」는 답도 반영이 끝난 것으로 남긴다. 남기지 않으면 그 이슈들이 반영 대기에서 빠지지 않는다.
-		if !catch_issues.is_empty() && (made || skipped.is_some()) {
+		let catch_db = db_catch_up && !db_marks.is_empty();
+		if (!catch_issues.is_empty() || catch_db) && (made || skipped.is_some()) {
 			let (what, why) = if made { ("catchup", String::new()) } else { ("skipped", reason.clone()) };
 			for i in &catch_issues {
-				d.push_auto(AutoEntry { at, issue_id: i.id.clone(), number: i.number, verdict: what.into(), reason: why.clone(), version });
+				d.push_auto(AutoEntry { at, issue_id: i.id.clone(), number: i.number, verdict: what.into(), reason: why.clone(), version, ..Default::default() });
 			}
-			let nums: Vec<String> = catch_issues.iter().map(|i| format!("#{}", i.number)).collect();
-			d.auto_last = if made { format!("{} · v{version} 반영", nums.join(" ")) } else { format!("{} · 건너뜀", nums.join(" ")) };
+			if catch_db {
+				for m in &db_marks {
+					d.push_auto(AutoEntry { at, verdict: what.into(), reason: why.clone(), version, source: format!("{TRIGGER_DB}{}", m.source), snapshot: m.snapshot.clone(), ..Default::default() });
+				}
+			}
+			let mut names: Vec<String> = catch_issues.iter().map(|i| format!("#{}", i.number)).collect();
+			if catch_db {
+				names.extend(db_names.iter().cloned());
+			}
+			d.auto_last = if made { format!("{} · v{version} 반영", names.join(" ")) } else { format!("{} · 건너뜀", names.join(" ")) };
 		}
 		// 자동으로 쓴 판은 사람이 한 번 보도록 표지를 단다.
 		if made
-			&& (auto_line.is_some() || !catch_issues.is_empty())
+			&& (auto_line.is_some() || !catch_issues.is_empty() || catch_db)
 			&& let Some(last) = d.versions.last_mut()
 		{
 			last.review = true;
@@ -3133,7 +3558,9 @@ async fn run_doc_job(app: &AppHandle, pid: &str, did: &str, request: &str, run_i
 		Ok(())
 	})?;
 	emit_deliverable(app, &v);
-	if let Some((_, what)) = &auto_line {
+	if let Some((_, what)) = &auto_line
+		&& origin_number.is_some()
+	{
 		crate::kb::log_issue(app, pid, &origin, format!("{} · {what}", v.deliverable.title));
 	}
 	if v.deliverable.versions.len() > before_n {
@@ -3336,7 +3763,7 @@ pub fn spawn_titler(app: AppHandle) {
 				continue;
 			}
 			let delay = settings.title_delay_sec as i64 * 1000;
-			let Ok(projects) = store.projects() else { continue };
+			let Ok(projects) = store.active_projects() else { continue };
 			let now = now_ms();
 			let runner = app.state::<Runner>();
 			// 앱 대화도 프로젝트 대화처럼 첫 답 뒤에 제목을 짓는다. 앱 대화 폴더에는 보드 이슈가 없다.
@@ -3388,7 +3815,7 @@ pub fn spawn_auto_planner(app: AppHandle) {
 			let store = app.state::<Store>();
 			let Ok(settings) = store.settings() else { continue };
 			let delay = settings.auto_plan_delay_sec as i64 * 1000;
-			let Ok(projects) = store.projects() else { continue };
+			let Ok(projects) = store.active_projects() else { continue };
 			let now = now_ms();
 			for p in projects {
 				let Ok(list) = store.list_issues(&p.id) else { continue };
@@ -3444,6 +3871,61 @@ mod tests {
 		assert_eq!(mode, ChatMode::Bypass);
 		let Some(Job::Chat { mode, .. }) = batch_job(&[q("가", ChatMode::Read, &[]), q("나", ChatMode::Bypass, &[])], &have) else { panic!() };
 		assert_eq!(mode, ChatMode::Auto);
+		// 수동 승인은 읽기보다 넓고 자동 승인보다 좁다.
+		let Some(Job::Chat { mode, .. }) = batch_job(&[q("가", ChatMode::Read, &[]), q("나", ChatMode::Ask, &[])], &have) else { panic!() };
+		assert_eq!(mode, ChatMode::Ask);
+		let Some(Job::Chat { mode, .. }) = batch_job(&[q("가", ChatMode::Ask, &[]), q("나", ChatMode::Auto, &[])], &have) else { panic!() };
+		assert_eq!(mode, ChatMode::Auto);
+	}
+
+	/// 슬래시 명령은 첫 낱말이 `/이름` 일 때만이다. 경로로 시작하는 질문은 명령이 아니다.
+	#[test]
+	fn slash_text_only_for_commands() {
+		assert_eq!(slash_text("  /compact "), Some("/compact"));
+		assert_eq!(slash_text("/mhms-review 변경분 봐줘"), Some("/mhms-review 변경분 봐줘"));
+		assert_eq!(slash_text("/plugin:skill"), Some("/plugin:skill"));
+		assert_eq!(slash_text("/src/App.tsx 가 왜 이래"), None);
+		assert_eq!(slash_text("/ 띄어 씀"), None);
+		assert_eq!(slash_text("그냥 질문 /compact"), None);
+	}
+
+	/// 승인 요청의 답 줄: 허락은 입력을 그대로(또는 고친 입력으로), 거부는 까닭을 싣는다. 묻는 범위는 모드가 정한다.
+	#[test]
+	fn control_response_shapes() {
+		let allow: Value = serde_json::from_str(&control_response("r1", true, serde_json::json!({"command": "ls"}), "")).unwrap();
+		assert_eq!(allow["type"], "control_response");
+		assert_eq!(allow["response"]["request_id"], "r1");
+		assert_eq!(allow["response"]["response"]["behavior"], "allow");
+		assert_eq!(allow["response"]["response"]["updatedInput"]["command"], "ls");
+		let deny: Value = serde_json::from_str(&control_response("r2", false, Value::Null, "싫다")).unwrap();
+		assert_eq!(deny["response"]["response"]["behavior"], "deny");
+		assert_eq!(deny["response"]["response"]["message"], "싫다");
+		assert!(ask_user(ChatMode::Ask, "Bash") && ask_user(ChatMode::Auto, "AskUserQuestion"));
+		assert!(!ask_user(ChatMode::Auto, "Bash") && !ask_user(ChatMode::Bypass, "WebFetch"));
+		let line: Value = serde_json::from_str(&user_line("안녕")).unwrap();
+		assert_eq!(line["message"]["content"], "안녕");
+	}
+
+	/// 흘러 오는 글 조각 · 생각 · 도구 출력 · 컨텍스트 크기 · 슬래시 목록을 읽는다. 하위 에이전트의 조각은 접는다.
+	#[test]
+	fn parser_reads_stream_extras() {
+		let mut p = Parser::new("D:\\r", "x");
+		p.feed(&serde_json::json!({"type":"system","subtype":"init","session_id":"s","model":"m","slash_commands":["compact","/mhms-review"]}));
+		assert_eq!(p.slash_commands, vec!["compact", "mhms-review"]);
+		let d = p.feed(&serde_json::json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"안"}}}));
+		assert!(matches!(d.as_slice(), [RunEvent::Delta { text }] if text == "안"));
+		assert!(p.feed(&serde_json::json!({"type":"stream_event","parent_tool_use_id":"t","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}})).is_empty());
+		let a = p.feed(&serde_json::json!({"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":1000,"cache_creation_input_tokens":5,"output_tokens":20},"content":[{"type":"thinking","thinking":"음"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}));
+		assert_eq!(p.context_tokens, 1035);
+		assert!(matches!(&a[0], RunEvent::Thinking { text } if text == "음"));
+		let r = p.feed(&serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"a.txt"}]}]}}));
+		assert!(matches!(&r[0], RunEvent::ToolDone { output, ok: true, .. } if output == "a.txt"));
+		p.feed(&serde_json::json!({"type":"result","subtype":"success","modelUsage":{"m":{"contextWindow":200000}}}));
+		assert_eq!(p.context_window, 200000);
+		// 앱이 거부로 답한 호출을 CLI 가 다시 알려 와도 한 번만 남긴다.
+		assert!(p.deny_asked("t9", "Bash", &serde_json::json!({"command":"rm x"})).is_some());
+		assert!(p.feed(&serde_json::json!({"type":"system","subtype":"permission_denied","tool_use_id":"t9","tool_name":"Bash"})).is_empty());
+		assert_eq!(p.denials.len(), 1);
 	}
 
 	/// 모드가 생기기 전에 저장한 대기열은 edit 로 읽는다.
@@ -3470,10 +3952,25 @@ mod tests {
 		assert_eq!(at(&read, "--permission-mode").as_deref(), Some("default"));
 		assert!(at(&read, "--tools").unwrap().starts_with("Read,Grep,Glob"));
 		assert!(!settings(&read).contains("issue.json"));
-		// 수동 승인은 물을 곳이 없는 동안 읽기만 연다.
-		assert_eq!(at(&args(ChatMode::Ask), "--tools"), at(&read, "--tools"));
+		// 읽기 전용은 물을 것이 없다 — 묻지 않고 막는다. 프롬프트는 stream-json 으로 넣고 답 글은 조각으로 받는다.
+		assert_eq!(at(&read, "--permission-prompts").as_deref(), Some("none"));
+		assert_eq!(at(&read, "--input-format").as_deref(), Some("stream-json"));
+		assert!(read.iter().any(|x| x == "--include-partial-messages"));
+		// 수동 승인: 모든 도구를 열고 default 모드로 돌며, 물음은 표준 입출력으로 화면에 온다. 프로젝트 허용 목록은 묻지 않는다.
+		let ask = args(ChatMode::Ask);
+		assert!(at(&ask, "--tools").is_none(), "수동 승인이 도구를 묶었다");
+		assert_eq!(at(&ask, "--permission-mode").as_deref(), Some("default"));
+		assert_eq!(at(&ask, "--permission-prompts").as_deref(), Some("host"));
+		assert_eq!(at(&ask, "--permission-prompt-tool").as_deref(), Some("stdio"));
+		assert!(ask.iter().any(|x| x == "Bash(npm test:*)"));
+		assert!(settings(&ask).contains("issue.json"), "수동 승인이 권한 근거를 고칠 수 있다");
+		// 계획 · 구현은 예전처럼 묻지 않는다.
+		let plan = job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None);
+		assert_eq!(at(&plan, "--permission-prompts").as_deref(), Some("none"));
+		assert!(!plan.iter().any(|x| x == "--input-format"));
 
 		let auto = args(ChatMode::Auto);
+		assert_eq!(at(&auto, "--permission-prompts").as_deref(), Some("host"), "자동 승인이 되묻기를 받지 못한다");
 		assert_eq!(at(&auto, "--permission-mode").as_deref(), Some("acceptEdits"));
 		assert!(auto.iter().any(|x| x == "Bash(npm test:*)") && !auto.iter().any(|x| x == "Bash"), "자동 승인이 명령을 다 열었다");
 		assert!(settings(&auto).contains("Edit(//d/data/issues/i1/issue.json)") && settings(&auto).contains("Write(./.claude/settings*.json)"));
@@ -3643,7 +4140,7 @@ mod tests {
 			job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None),
 			job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None),
 			job_args(&Job::Chat { text: "물음".into(), mode: ChatMode::Auto, images: vec![] }, &s, &p, &i, dir, None),
-			doc_args(&s, &p, dir, dir, None),
+			doc_args(&s, &p, dir, dir, None, &[]),
 		];
 		for a in &all {
 			assert_eq!(a.iter().filter(|x| *x == "--settings").count(), 1, "--settings 가 하나가 아니다: {a:?}");
@@ -3653,7 +4150,7 @@ mod tests {
 			assert!(ex.iter().any(|e| e.as_str().unwrap().ends_with("/CLAUDE.md") && !e.as_str().unwrap().contains('\\')), "전역 CLAUDE.md 를 / 경로로 빼지 않았다: {ex:?}");
 			assert!(!a.iter().any(|x| x == "--setting-sources" || x == "--safe-mode"), "사용자 설정 · 저장소 지침까지 빼는 플래그를 썼다");
 		}
-		let file = doc_args(&s, &Project::default(), dir, dir, None);
+		let file = doc_args(&s, &Project::default(), dir, dir, None, &[]);
 		let v: Value = serde_json::from_str(&file[file.iter().position(|x| x == "--settings").unwrap() + 1]).unwrap();
 		let deny = v["permissions"]["deny"].as_array().unwrap();
 		assert!(deny.iter().any(|d| d == "Edit(./**)"), "산출물의 저장소 편집 막기가 빠졌다");
@@ -3666,7 +4163,7 @@ mod tests {
 	fn plugin_dir_only_for_deliverables() {
 		let (s, p, dir, pd) = (Settings::default(), Project::default(), Path::new("x"), Path::new("plug"));
 		let at = |a: &[String]| a.iter().position(|x| x == "--plugin-dir").map(|i| a[i + 1].clone());
-		let file = doc_args(&s, &p, dir, dir, Some(pd));
+		let file = doc_args(&s, &p, dir, dir, Some(pd), &[]);
 		assert_eq!(at(&file).as_deref(), Some("plug"));
 		let add = file.iter().position(|x| x == "--add-dir").unwrap();
 		assert!(file[add + 1..].iter().take_while(|x| !x.starts_with("--")).any(|x| x == "plug"), "플러그인 폴더를 Read 로 열지 않았다");
@@ -3674,7 +4171,7 @@ mod tests {
 		assert!(prompt.contains("render.py") && prompt.contains("chk") && prompt.contains("writing-profile.md"), "쪽 그림 · 다듬기 안내가 빠졌다");
 		assert!(prompt.contains("\"hancom\": \"off\"") && !prompt.contains("--engine hancom"), "한컴을 껐는데 한컴을 쓰라고 했다");
 		assert!(doc_file_prompt("", dir, "b", "hwpx", Some(pd), Path::new("chk"), true).contains("--engine hancom"), "한컴을 켰는데 안내가 없다");
-		assert_eq!(at(&doc_args(&s, &p, dir, dir, None)), None);
+		assert_eq!(at(&doc_args(&s, &p, dir, dir, None, &[])), None);
 		assert_eq!(at(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &Issue::default(), dir, None)), None);
 	}
 
@@ -3697,7 +4194,7 @@ mod tests {
 		] {
 			assert_eq!(opened(&a), vec!["issue".to_string(), e.clone()], "이슈 폴더 뒤에 함께 여는 폴더가 실리지 않았다: {a:?}");
 		}
-		let file = doc_args(&s, &p, dir, Path::new("out"), None);
+		let file = doc_args(&s, &p, dir, Path::new("out"), None, &[]);
 		assert!(opened(&file).contains(&e), "산출물 실행에 함께 여는 폴더가 없다");
 		let glob = abs_rule_glob(&extra);
 		assert!(glob.starts_with("//") && glob.ends_with("/**") && !glob.contains('\\') && !glob.contains(':'), "절대 경로 규칙 꼴이 아니다: {glob}");
@@ -3738,7 +4235,7 @@ mod tests {
 		assert_eq!(model(&job_args(&chat, &s, &p, &i, dir, None)).as_deref(), Some("haiku"));
 		let memo = Issue { model: " fable ".into(), ..Default::default() };
 		assert_eq!(model(&job_args(&chat, &s, &p, &memo, dir, None)).as_deref(), Some("fable"), "메모 모델이 앞서지 않았다");
-		assert_eq!(model(&doc_args(&s, &p, dir, dir, None)).as_deref(), Some("sonnet"));
+		assert_eq!(model(&doc_args(&s, &p, dir, dir, None, &[])).as_deref(), Some("sonnet"));
 	}
 
 	/// effort: 모델과 같은 순서로 고르되 따로 고른다. 모두 비면 --effort 를 넘기지 않는다.
@@ -3749,7 +4246,7 @@ mod tests {
 		let effort = |a: &[String]| a.iter().position(|x| x == "--effort").map(|i| a[i + 1].clone());
 		let i = Issue::default();
 		assert_eq!(effort(&job_args(&Job::Plan { feedback: None }, &Settings::default(), &p, &i, dir, None)), None);
-		assert_eq!(effort(&doc_args(&Settings::default(), &p, dir, dir, None)), None);
+		assert_eq!(effort(&doc_args(&Settings::default(), &p, dir, dir, None, &[])), None);
 
 		let s = Settings { plan_effort: "high".into(), impl_effort: "medium".into(), chat_effort: "low".into(), ..Default::default() };
 		let chat = Job::Chat { text: "물음".into(), mode: ChatMode::Read, images: vec![] };
@@ -3757,7 +4254,7 @@ mod tests {
 		assert_eq!(effort(&job_args(&Job::Implement { instruction: None, allow_all: false }, &s, &p, &i, dir, None)).as_deref(), Some("medium"));
 		assert_eq!(effort(&job_args(&Job::Revert, &s, &p, &i, dir, None)).as_deref(), Some("medium"));
 		assert_eq!(effort(&job_args(&chat, &s, &p, &i, dir, None)).as_deref(), Some("low"));
-		assert_eq!(effort(&doc_args(&s, &p, dir, dir, None)).as_deref(), Some("medium"),"산출물이 구현 effort 를 따르지 않았다");
+		assert_eq!(effort(&doc_args(&s, &p, dir, dir, None, &[])).as_deref(), Some("medium"),"산출물이 구현 effort 를 따르지 않았다");
 
 		let memo = Issue { effort: " max ".into(), ..Default::default() };
 		assert_eq!(effort(&job_args(&chat, &s, &p, &memo, dir, None)).as_deref(), Some("max"), "메모 effort 가 앞서지 않았다");
@@ -4038,7 +4535,7 @@ mod doc_tests {
 		let spec = Spec {
 			exe,
 			cwd: PathBuf::from(&root),
-			args: doc_args(&settings, &project, &data, &out, None),
+			args: doc_args(&settings, &project, &data, &out, None, &[]),
 			prompt: doc_file_prompt(&doc_material(&view, "", None), &out, "함수_목록_v1", "", None, &base.join("check"), false),
 			log: base.join("run.jsonl"),
 			root: root.clone(),
@@ -4153,6 +4650,112 @@ mod perm_tests {
 		assert_eq!(std::fs::read_to_string(&repo_settings).unwrap(), "{}", "저장소 설정을 고쳤다");
 		// 대조: 같은 폴더의 다른 파일은 고쳐져야 막힌 까닭이 거부 규칙이다.
 		assert_eq!(std::fs::read_to_string(&other).unwrap(), "x", "다른 파일까지 막혔다");
+		let _ = std::fs::remove_dir_all(&root);
+	}
+
+	/// 실제 claude 를 부른다. 대화 실행(exec_with)의 수동 승인 · 되묻기 · 흘려 받기를 앱과 같은 인자로 끝까지 돌린다.
+	/// 되묻기(AskUserQuestion)에 「파랑」으로 답하고, 이어지는 명령을 허락하면 그 답이 파일에 남아야 한다.
+	/// `cargo test chat_interactive_real -- --ignored --nocapture`
+	#[tokio::test]
+	#[ignore]
+	async fn chat_interactive_real() {
+		let exe = resolve_claude("").expect("claude 실행 파일");
+		let root = std::env::temp_dir().join(format!("docket-chat-{}", short_id()));
+		let idir = root.join("issue");
+		std::fs::create_dir_all(&idir).unwrap();
+		let p = Project { path: root.to_string_lossy().to_string(), ..Default::default() };
+		let s = Settings { chat_model: "haiku".into(), ..Default::default() };
+		let prompt = "AskUserQuestion 도구로 사용자에게 좋아하는 색을 물어봐. 선택지는 빨강 · 파랑 둘이다. 답을 받으면 Bash 로 `echo <고른 색> > probe.txt` 를 한 번 실행하고, 끝나면 고른 색만 한 낱말로 답해.";
+		let job = Job::Chat { text: prompt.into(), mode: ChatMode::Ask, images: vec![] };
+		let args = job_args(&job, &s, &p, &Issue::default(), &idir, None);
+		let spec = Spec {
+			exe,
+			cwd: root.clone(),
+			args,
+			prompt: prompt.into(),
+			log: idir.join("run.jsonl"),
+			root: root.to_string_lossy().to_string(),
+			run_id: "t".into(),
+			project: "test".into(),
+			kind: "chat",
+		};
+		let ctl = RunCtl::new();
+		let mut asked: Vec<String> = Vec::new();
+		let mut deltas = 0;
+		let o = tokio::time::timeout(
+			Duration::from_secs(240),
+			exec_with(spec, Some(ChatMode::Ask), &ctl, |ev, _| match ev {
+				RunEvent::Ask { request_id, tool, input, .. } => {
+					println!("물음: {tool} {input}");
+					asked.push(tool.clone());
+					let updated = if tool == "AskUserQuestion" {
+						let q = input["questions"][0]["question"].as_str().unwrap_or("").to_string();
+						let mut v = input.clone();
+						v["answers"] = serde_json::json!({ q: "파랑" });
+						v
+					} else {
+						input.clone()
+					};
+					ctl.answer(control_response(request_id, true, updated, ""), &[]);
+				}
+				RunEvent::Delta { .. } => deltas += 1,
+				RunEvent::Text { text } => println!("답: {text}"),
+				_ => {}
+			}),
+		)
+		.await
+		.expect("시간 안에 끝나지 않았다");
+		println!("결과: ok={} 오류={} 컨텍스트={} 창={} 슬래시={:?}", o.ok, o.error, o.parser.context_tokens, o.parser.context_window, o.parser.slash_commands.iter().take(8).collect::<Vec<_>>());
+		assert!(o.ok, "실패: {}", o.error);
+		assert!(asked.iter().any(|t| t == "AskUserQuestion"), "되묻기가 오지 않았다: {asked:?}");
+		assert!(asked.iter().any(|t| t == "Bash"), "명령 허락을 묻지 않았다: {asked:?}");
+		let written = std::fs::read_to_string(root.join("probe.txt")).unwrap_or_default();
+		assert!(written.contains("파랑"), "답이 반영되지 않았다: {written:?}");
+		assert!(deltas > 0, "답 글을 흘려 받지 못했다");
+		assert!(o.parser.context_tokens > 0, "컨텍스트 크기를 읽지 못했다");
+		let log = std::fs::read_to_string(idir.join("run.jsonl")).unwrap();
+		assert!(!log.contains("\"stream_event\""), "글 조각을 기록에 남겼다");
+		let _ = std::fs::remove_dir_all(&root);
+	}
+
+	/// 실제 claude 를 부른다. 자동 승인에서 목록 밖 명령은 앱이 거부로 답해 막힌 것으로 남고, 이어 붙인 세션에 /compact 를 그대로 보내면 명령으로 돈다.
+	/// `cargo test chat_slash_and_auto_real -- --ignored --nocapture`
+	#[tokio::test]
+	#[ignore]
+	async fn chat_slash_and_auto_real() {
+		let exe = resolve_claude("").expect("claude 실행 파일");
+		let root = std::env::temp_dir().join(format!("docket-slash-{}", short_id()));
+		let idir = root.join("issue");
+		std::fs::create_dir_all(&idir).unwrap();
+		let p = Project { path: root.to_string_lossy().to_string(), ..Default::default() };
+		let s = Settings { chat_model: "haiku".into(), ..Default::default() };
+		let spec = |args: Vec<String>, prompt: &str, n: &str| Spec {
+			exe: exe.clone(),
+			cwd: root.clone(),
+			args,
+			prompt: prompt.into(),
+			log: idir.join(format!("{n}.jsonl")),
+			root: root.to_string_lossy().to_string(),
+			run_id: n.into(),
+			project: "test".into(),
+			kind: "chat",
+		};
+		// touch · mkdir 은 acceptEdits 에서 CLI 가 편집으로 보고 묻지 않는다. 무엇이든 돌릴 수 있는 node 로 본다.
+		let first = "Bash 로 `node -e \"require('fs').writeFileSync('blocked.txt','x')\"` 를 한 번만 실행해 봐. 막히면 다른 방법은 쓰지 말고 막혔다고만 답해.";
+		let job = Job::Chat { text: first.into(), mode: ChatMode::Auto, images: vec![] };
+		let ctl = RunCtl::new();
+		let o = exec_with(spec(job_args(&job, &s, &p, &Issue::default(), &idir, None), first, "a"), Some(ChatMode::Auto), &ctl, |_, _| {}).await;
+		println!("첫 차례: ok={} 막힘={:?}", o.ok, o.parser.denials.iter().map(|d| &d.target).collect::<Vec<_>>());
+		assert!(o.ok, "실패: {}", o.error);
+		assert!(o.parser.denials.iter().any(|d| d.target.contains("node") && d.reason == "ask"), "목록 밖 명령을 막힌 것으로 남기지 않았다");
+		assert!(!root.join("blocked.txt").exists(), "목록 밖 명령이 돌았다");
+		let sid = o.parser.session_id.clone();
+		let job = Job::Chat { text: "/compact".into(), mode: ChatMode::Auto, images: vec![] };
+		let o2 = exec_with(spec(job_args(&job, &s, &p, &Issue::default(), &idir, Some(&sid)), "/compact", "b"), Some(ChatMode::Auto), &RunCtl::new(), |_, _| {}).await;
+		let log = std::fs::read_to_string(idir.join("b.jsonl")).unwrap();
+		println!("/compact: ok={} 오류={} 줄={}", o2.ok, o2.error, log.lines().filter(|l| l.contains("compact")).take(3).collect::<Vec<_>>().join(" | ").chars().take(600).collect::<String>());
+		assert!(o2.ok, "/compact 실패: {}", o2.error);
+		assert!(log.contains("compact_boundary") || log.contains("\"compact"), "/compact 가 명령으로 돌지 않았다");
 		let _ = std::fs::remove_dir_all(&root);
 	}
 

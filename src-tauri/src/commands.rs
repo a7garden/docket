@@ -14,9 +14,9 @@ use crate::claude_files::{self, Resource, TextFile};
 use crate::error::{Error, Result, msg};
 use crate::model::*;
 use crate::plugin_host::{self, api::Target};
-use crate::{glossary, kb, perf, recipe, usage};
+use crate::{dbsrc, glossary, kb, memory, perf, quick, recipe, usage};
 use crate::runner::{self, RunEvent, emit_deliverable, emit_issue};
-use crate::store::{Store, settle, title_of};
+use crate::store::{FoundImport, Store, settle, title_of};
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -106,10 +106,26 @@ pub fn settings_get(store: State<Store>) -> Result<Settings> {
 }
 
 #[tauri::command]
-pub fn settings_save(store: State<Store>, settings: Settings) -> Result<Settings> {
+pub fn settings_save(app: AppHandle, store: State<Store>, settings: Settings) -> Result<Settings> {
+	// 단축키를 먼저 단다. 다른 프로그램이 잡은 조합이면 저장하지 않고 오류를 돌려준다 — 설정과 실제로 듣는 키가 어긋나지 않게.
+	let old = store.settings().unwrap_or_default();
+	quick::change_key(&app, &old.quick_capture_key, &settings.quick_capture_key)?;
 	let saved = store.save_settings(&settings)?;
 	runner::note_settings(&saved);
 	Ok(saved)
+}
+
+/// 시작할 때 빠른 메모 단축키를 등록하지 못한 까닭. 비어 있으면 듣고 있다(또는 꺼 두었다).
+#[tauri::command]
+pub fn quick_key_error() -> String {
+	quick::key_error()
+}
+
+/// 앱을 끝낸다. 트레이의 「끝내기」와 닫기 동작이 「끝내기」일 때의 닫기가 여기로 온다.
+/// 주 창만 닫으면 숨은 빠른 창 · 트레이 때문에 프로세스가 남는다. 띄운 claude 는 끝날 때 작업 개체가 끈다.
+#[tauri::command]
+pub fn app_quit(app: AppHandle) {
+	app.exit(0);
 }
 
 #[tauri::command]
@@ -191,12 +207,33 @@ pub fn naming_preview(store: State<Store>, project_id: String, pattern: String, 
 
 #[tauri::command]
 pub fn project_remove(store: State<Store>, id: String, delete_data: bool) -> Result<()> {
-	let busy = store.list_issues(&id)?.iter().chain(store.list_talks(&id)?.iter()).any(|v| v.issue.run.is_some())
-		|| store.list_deliverables(&id)?.iter().any(|v| v.deliverable.job.is_some());
-	if busy {
+	if project_busy(&store, &id)? {
 		return msg("실행 중인 작업이 있어 뺄 수 없습니다. 먼저 중지하세요.");
 	}
 	store.remove_project(&id, delete_data)
+}
+
+/// 도는 실행 · 줄 선 실행 · 산출물 작성 · 작성법 뽑기가 하나라도 있는지.
+fn project_busy(store: &Store, id: &str) -> Result<bool> {
+	Ok(store.list_issues(id)?.iter().chain(store.list_talks(id)?.iter()).any(|v| v.issue.run.is_some())
+		|| store.list_deliverables(id)?.iter().any(|v| v.deliverable.job.is_some() || v.deliverable.learn.is_some()))
+}
+
+/// 보관 · 되살리기. 도는 작업이 있으면 보관하지 않는다 — 실행 목록과 창 닫기 경고에서 사라져 멈출 길이 없어진다.
+#[tauri::command]
+pub fn project_archive(app: AppHandle, id: String, archived: bool) -> Result<Project> {
+	let store = app.state::<Store>();
+	if archived && project_busy(&store, &id)? {
+		return msg("실행 중인 작업이 있어 보관할 수 없습니다. 먼저 중지하세요.");
+	}
+	let p = store.set_project_archived(&id, archived)?;
+	if archived {
+		app.state::<crate::kb::Kb>().stop(&id);
+		app.state::<memory::Memory>().stop(&id);
+	} else {
+		crate::kb::touch(&app, &id);
+	}
+	Ok(p)
 }
 
 /// 실행 기록의 「허용 목록에 추가」.
@@ -402,6 +439,158 @@ pub async fn issue_merge(app: AppHandle, project_id: String, issue_id: String) -
 #[tauri::command]
 pub fn issue_chat(app: AppHandle, project_id: String, issue_id: String, text: String, mode: ChatMode, images: Option<Vec<String>>) -> Result<IssueView> {
 	runner::chat(&app, &project_id, &issue_id, text, mode, images.unwrap_or_default())
+}
+
+/// 대화가 기다리는 승인 · 되묻기에 답한다. updated_input 은 AskUserQuestion 의 답(answers)을 담은 입력이다.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn issue_chat_answer(
+	app: AppHandle,
+	project_id: String,
+	issue_id: String,
+	request_id: String,
+	allow: bool,
+	updated_input: Option<serde_json::Value>,
+	remember: Option<bool>,
+	message: Option<String>,
+) -> Result<IssueView> {
+	runner::chat_answer(&app, &project_id, &issue_id, &request_id, allow, updated_input, remember.unwrap_or(false), message.as_deref().unwrap_or(""))
+}
+
+/// 입력칸 `/` 자동완성 한 줄. source: cli(그 프로젝트의 실행이 알려 준 것) · skill · command(Claude 설정에서 찾은 것) · app(앱이 받아 처리)
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashItem {
+	name: String,
+	description: String,
+	source: &'static str,
+}
+
+/// CLI 기본 명령 중 `-p` 에서도 뜻이 있는 것의 풀이. 목록에는 실행이 알려 준 것만 오르고, 여기에는 풀이만 둔다.
+const SLASH_NOTES: &[(&str, &str)] = &[
+	("compact", "지난 대화를 요약해 컨텍스트를 줄입니다"),
+	("context", "컨텍스트를 무엇이 차지하는지 보입니다"),
+	("cost", "이 세션이 쓴 토큰 · 비용"),
+	("init", "저장소를 읽고 CLAUDE.md 를 만듭니다"),
+	("review", "변경을 검토합니다"),
+	("security-review", "변경의 보안 검토"),
+	("pr-comments", "PR 댓글을 가져옵니다"),
+];
+
+/// 슬래시 명령 후보. 그 프로젝트에서 마지막으로 돈 실행의 init 목록이 앞서고(실제로 쓸 수 있는 것), 아직 돌린 적이 없으면
+/// Claude 설정에서 찾은 스킬 · 명령을 보인다. /clear · /model 은 -p 에서 뜻이 없어 앱이 받아 처리한다.
+#[tauri::command(async)]
+pub fn slash_commands(app: AppHandle, project_id: String) -> Result<Vec<SlashItem>> {
+	let store = app.state::<Store>();
+	let root = store.project(&project_id).ok().map(|p| PathBuf::from(p.path)).filter(|p| p.is_dir() && project_id != GLOBAL_PID);
+	let resources: Vec<Resource> = claude_files::list(root.as_deref(), &[]).into_iter().filter(|r| r.kind == "skill" || r.kind == "command").collect();
+	let note = |name: &str| -> String {
+		SLASH_NOTES.iter().find(|(n, _)| *n == name).map(|(_, d)| d.to_string()).or_else(|| resources.iter().find(|r| r.name == name).map(|r| r.description.clone())).unwrap_or_default()
+	};
+	let mut out = vec![
+		SlashItem { name: "clear".into(), description: "새 대화를 엽니다".into(), source: "app" },
+		SlashItem { name: "model".into(), description: "이 대화의 모델 · effort 를 고릅니다".into(), source: "app" },
+	];
+	let cli = app.state::<runner::Runner>().slash_commands(&project_id);
+	for name in &cli {
+		if !out.iter().any(|x| x.name == *name) {
+			out.push(SlashItem { name: name.clone(), description: note(name), source: "cli" });
+		}
+	}
+	if cli.is_empty() {
+		out.push(SlashItem { name: "compact".into(), description: note("compact"), source: "cli" });
+	}
+	for r in &resources {
+		if !out.iter().any(|x| x.name == r.name) {
+			out.push(SlashItem { name: r.name.clone(), description: r.description.clone(), source: if r.kind == "skill" { "skill" } else { "command" } });
+		}
+	}
+	Ok(out)
+}
+
+/// `@` 자동완성의 파일 목록. git 저장소면 .gitignore 를 따르는 `git ls-files` 를, 아니면 흔한 빌드 폴더를 건너뛰며 훑는다.
+/// 치는 글자마다 부르므로 프로젝트마다 30초 동안 목록을 들고 있는다.
+#[tauri::command(async)]
+pub fn project_files(store: State<Store>, project_id: String, query: String) -> Result<Vec<String>> {
+	use std::sync::Mutex;
+	use std::time::{Duration, Instant};
+	static CACHE: Mutex<Option<std::collections::HashMap<String, (Instant, Vec<String>)>>> = Mutex::new(None);
+	let project = store.project(&project_id)?;
+	let root = PathBuf::from(&project.path);
+	if !root.is_dir() {
+		return Ok(Vec::new());
+	}
+	let files = {
+		let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+		let map = c.get_or_insert_with(Default::default);
+		match map.get(&project_id).filter(|(at, _)| at.elapsed() < Duration::from_secs(30)) {
+			Some((_, f)) => f.clone(),
+			None => {
+				let f = list_files(&root);
+				map.insert(project_id.clone(), (Instant::now(), f.clone()));
+				f
+			}
+		}
+	};
+	let q = query.trim().to_lowercase().replace('\\', "/");
+	let mut hits: Vec<(u8, &String)> = files
+		.iter()
+		.filter_map(|f| {
+			let lower = f.to_lowercase();
+			let name = lower.rsplit('/').next().unwrap_or(&lower);
+			let score = if q.is_empty() || name.starts_with(&q) {
+				0
+			} else if name.contains(&q) {
+				1
+			} else if lower.contains(&q) {
+				2
+			} else {
+				return None;
+			};
+			Some((score, f))
+		})
+		.collect();
+	hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.len().cmp(&b.1.len())));
+	Ok(hits.into_iter().take(30).map(|(_, f)| f.clone()).collect())
+}
+
+fn list_files(root: &Path) -> Vec<String> {
+	const MAX: usize = 20_000;
+	if root.join(".git").exists() {
+		let mut cmd = std::process::Command::new("git");
+		cmd.arg("-C").arg(root).args(["ls-files", "--cached", "--others", "--exclude-standard"]);
+		#[cfg(windows)]
+		{
+			use std::os::windows::process::CommandExt;
+			cmd.creation_flags(0x0800_0000);
+		}
+		if let Ok(o) = cmd.output()
+			&& o.status.success()
+		{
+			return String::from_utf8_lossy(&o.stdout).lines().filter(|l| !l.is_empty()).take(MAX).map(String::from).collect();
+		}
+	}
+	let mut out = Vec::new();
+	let mut stack = vec![root.to_path_buf()];
+	while let Some(dir) = stack.pop() {
+		let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+		for e in rd.filter_map(|e| e.ok()) {
+			let name = e.file_name().to_string_lossy().to_string();
+			if name.starts_with('.') || ["node_modules", "target", "dist", "build", "bin", "obj", "__pycache__"].contains(&name.as_str()) {
+				continue;
+			}
+			let p = e.path();
+			if p.is_dir() {
+				stack.push(p);
+			} else if let Ok(rel) = p.strip_prefix(root) {
+				out.push(rel.to_string_lossy().replace('\\', "/"));
+				if out.len() >= MAX {
+					return out;
+				}
+			}
+		}
+	}
+	out
 }
 
 /// 대기열에서 질문 하나를 뺀다. 고치려고 입력칸으로 되돌릴 때는 첨부를 남기고(keep_files), 그냥 뺄 때는 첨부 폴더에서도 치운다.
@@ -741,10 +930,147 @@ pub fn deliverable_import(app: AppHandle, project_id: String, paths: Vec<String>
 		out.push(recipe::after_files(&app, &project_id, &did, learn)?);
 	}
 	if out.is_empty() {
-		return msg("가져올 파일이 없습니다. 폴더는 가져오지 않습니다.");
+		return msg("가져올 파일이 없습니다.");
 	}
 	kb::touch(&app, &project_id);
 	Ok(out)
+}
+
+/// 폴더 가져오기 한 번에 받는 파일 수. 드라이브 전체를 놓은 실수로 수천 개를 복사하지 않게 한다.
+const FOLDER_IMPORT_MAX: usize = 500;
+
+/// 놓인 경로를 파일과 폴더로 나눈다. 화면은 경로가 무엇인지 알 수 없다.
+#[derive(Serialize)]
+pub struct PathKinds {
+	files: Vec<String>,
+	folders: Vec<String>,
+}
+
+#[tauri::command]
+pub fn paths_split(paths: Vec<String>) -> PathKinds {
+	let (folders, rest): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| Path::new(p).is_dir());
+	PathKinds { files: rest.into_iter().filter(|p| Path::new(p).is_file()).collect(), folders }
+}
+
+/// 폴더가 놓일 책장 칸. 산출물 폴더 안이면 그 안의 자리를 그대로 쓰고(산출물 폴더 자체면 맨 위), 밖이면 폴더 이름이 첫 칸이다.
+fn folder_cell(root: &Path, base: Option<&Path>) -> String {
+	match base.and_then(|b| root.strip_prefix(b).ok()) {
+		Some(rel) => rel.to_string_lossy().replace('\\', "/"),
+		None => root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+	}
+}
+
+/// 폴더를 훑어 (파일, 칸)을 낸다. 숨은 폴더 · 빌드 폴더 · 지난 판 폴더 · 키 파일 · 잠금 파일은 뺀다. max 를 넘으면 그 자리에서 멈춘다.
+fn scan_folder(root: &Path, cell: &str, archive: &str, max: usize) -> Vec<(PathBuf, String)> {
+	let mut out = Vec::new();
+	let mut stack = vec![(root.to_path_buf(), cell.to_string())];
+	while let Some((dir, cell)) = stack.pop() {
+		let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+		let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+		entries.sort_by_key(|e| e.file_name());
+		for e in entries {
+			let Ok(t) = e.file_type() else { continue };
+			let name = e.file_name().to_string_lossy().to_string();
+			if t.is_symlink() {
+				continue;
+			}
+			if t.is_dir() {
+				if !kb::skip_dir(&name) && name != archive {
+					let next = if cell.is_empty() { name } else { format!("{cell}/{name}") };
+					stack.push((e.path(), next));
+				}
+			} else if !name.starts_with('.') && !name.starts_with("~$") && !kb::secret_name(&name) {
+				out.push((e.path(), cell.clone()));
+				if out.len() > max {
+					return out;
+				}
+			}
+		}
+	}
+	out
+}
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderImport {
+	/// 새 산출물 · 기존 산출물의 새 판으로 들어온 파일 수
+	imported: usize,
+	/// 이미 있어 건너뛴 파일 수
+	skipped: usize,
+	failed: usize,
+	/// 실패한 것의 앞 몇 건. 알림에 보인다.
+	errors: Vec<String>,
+}
+
+/// 폴더를 하위 구조대로 책장에 들인다. 파일 하나가 산출물 하나고, 작성법은 뽑지 않는다 — 파일마다 Claude 를 부르면 비용이 크게 든다.
+/// 파일 하나가 실패해도 나머지를 계속한다.
+#[tauri::command(async)]
+pub fn deliverable_import_folder(app: AppHandle, project_id: String, paths: Vec<String>) -> Result<FolderImport> {
+	let store = app.state::<Store>();
+	let project = store.project(&project_id)?;
+	let base = Some(project.deliverables_dir.trim()).filter(|b| !b.is_empty()).map(PathBuf::from);
+	let archive = project.archive_dir.trim().trim_matches(['/', '\\']);
+	let mut found = Vec::new();
+	for root in paths.iter().map(PathBuf::from).filter(|p| p.is_dir()) {
+		found.extend(scan_folder(&root, &folder_cell(&root, base.as_deref()), archive, FOLDER_IMPORT_MAX));
+		if found.len() > FOLDER_IMPORT_MAX {
+			return msg(format!("파일이 {FOLDER_IMPORT_MAX}개를 넘어 가져오지 않았습니다. 더 작은 폴더로 나눠 가져오세요."));
+		}
+	}
+	if found.is_empty() {
+		return msg("가져올 파일이 없습니다.");
+	}
+	let mut known = store.deliverables_raw(&project_id)?;
+	let mut result = FolderImport::default();
+	for (file, cell) in found {
+		let name = file.file_name().unwrap_or_default().to_string_lossy().to_string();
+		let one = (|| -> Result<bool> {
+			let cell = crate::store::clean_subdir(&cell)?;
+			match store.import_found(&project_id, &mut known, &file, &cell)? {
+				FoundImport::Skipped => Ok(false),
+				FoundImport::Created(did) => {
+					// 파일 가져오기와 같이 오피스 파일은 견본을 한 부 둔다.
+					if recipe::is_template(&file.to_string_lossy()) {
+						store.import_refs(&project_id, &did, &[file.to_string_lossy().to_string()])?;
+					}
+					recipe::after_files(&app, &project_id, &did, false)?;
+					Ok(true)
+				}
+				FoundImport::Updated(did) => {
+					recipe::after_files(&app, &project_id, &did, false)?;
+					Ok(true)
+				}
+			}
+		})();
+		match one {
+			Ok(true) => result.imported += 1,
+			Ok(false) => result.skipped += 1,
+			Err(e) => {
+				result.failed += 1;
+				if result.errors.len() < 3 {
+					result.errors.push(format!("{name}: {e}"));
+				}
+			}
+		}
+	}
+	if result.imported > 0 {
+		kb::touch(&app, &project_id);
+	}
+	Ok(result)
+}
+
+/// 다른 책장 칸으로 옮긴다. 산출물 폴더를 정했으면 최신 판 파일도 옮긴다.
+#[tauri::command]
+pub fn deliverable_move_shelf(app: AppHandle, project_id: String, deliverable_id: String, subdir: String) -> Result<DeliverableView> {
+	let v = app.state::<Store>().move_shelf(&project_id, &deliverable_id, &subdir)?;
+	emit_deliverable(&app, &v);
+	kb::touch(&app, &project_id);
+	Ok(v)
+}
+
+#[tauri::command]
+pub async fn deliverable_thumb(app: AppHandle, project_id: String, deliverable_id: String, n: u32) -> Result<crate::thumb::Thumb> {
+	crate::thumb::thumb(&app, &project_id, &deliverable_id, n).await
 }
 
 #[tauri::command]
@@ -803,9 +1129,9 @@ pub struct DeliverablePatch {
 	guide: String,
 	naming: String,
 	subdir: String,
-	/// 이 칸이 생기기 전의 화면이 보낸 패치에는 없다. 그때는 지금 값을 그대로 둔다.
+	/// 무엇이 바뀌면 새 판을 쓸지(`code` · `db:<자료 id>`). 없으면 지금 값을 그대로 둔다.
 	#[serde(default)]
-	auto_update: Option<bool>,
+	triggers: Option<Vec<String>>,
 	/// 작성법 · 어휘 · 형식. 없으면 지금 값을 그대로 둔다 — 다른 칸만 고친 패치가 뽑아 둔 값을 지우지 않게.
 	#[serde(default)]
 	skill: Option<String>,
@@ -825,8 +1151,15 @@ pub fn deliverable_update(app: AppHandle, project_id: String, deliverable_id: St
 		d.guide = patch.guide.clone();
 		d.naming = patch.naming.trim().to_string();
 		d.subdir = patch.subdir.trim().trim_matches(['/', '\\']).to_string();
-		if let Some(on) = patch.auto_update {
-			d.auto_update = on;
+		if let Some(list) = &patch.triggers {
+			let mut out: Vec<String> = Vec::new();
+			for t in list.iter().map(|t| t.trim()) {
+				let ok = t == TRIGGER_CODE || t.strip_prefix(TRIGGER_DB).is_some_and(|s| !s.is_empty());
+				if ok && !out.iter().any(|o| o == t) {
+					out.push(t.to_string());
+				}
+			}
+			d.triggers = out;
 		}
 		if let Some(s) = &patch.skill {
 			d.skill = s.clone();
@@ -1005,10 +1338,44 @@ pub fn deliverable_stop(app: AppHandle, project_id: String, deliverable_id: Stri
 	Ok(())
 }
 
-/// 반영 대기 이슈 가운데 고른 것들을 한 번에 반영한 새 판을 쓴다(kb::catch_up).
+/// 반영 대기(이슈 · DB 변경) 가운데 고른 것들을 한 번에 반영한 새 판을 쓴다(kb::catch_up).
 #[tauri::command]
 pub fn deliverable_catch_up(app: AppHandle, project_id: String, deliverable_id: String, issue_ids: Vec<String>) -> Result<DeliverableView> {
 	kb::catch_up(&app, &project_id, &deliverable_id, &issue_ids)
+}
+
+/* ---------- DB 자료 ---------- */
+
+#[tauri::command]
+pub fn db_sources_list(store: State<Store>, project_id: String) -> Result<Vec<dbsrc::DbSourceView>> {
+	dbsrc::views(&store, &project_id)
+}
+
+/// 목록을 통째로 저장한다. 빠진 자료를 트리거로 고른 산출물은 그 트리거만 쓸모가 없어진다(반영 대기 · 판정에서 빠진다).
+#[tauri::command]
+pub fn db_sources_save(app: AppHandle, project_id: String, sources: Vec<DbSource>) -> Result<Vec<dbsrc::DbSourceView>> {
+	let store = app.state::<Store>();
+	store.save_db_sources(&project_id, dbsrc::clean(&sources)?)?;
+	dbsrc::emit_project(&app, &project_id);
+	dbsrc::views(&store, &project_id)
+}
+
+/// 자료 하나를 지금 받는다. 바뀌었으면 트리거로 고른 산출물을 판정한다(기다리지 않는다).
+#[tauri::command]
+pub async fn db_source_fetch(app: AppHandle, project_id: String, source_id: String) -> Result<dbsrc::FetchResult> {
+	let r = dbsrc::fetch(&app, &project_id, &source_id).await;
+	dbsrc::emit_project(&app, &project_id);
+	let r = r?;
+	if r.changed {
+		tauri::async_runtime::spawn(kb::after_db_change(app.clone(), project_id));
+	}
+	Ok(r)
+}
+
+/// 두 스냅숏의 변경 글
+#[tauri::command]
+pub fn db_snapshot_compare(store: State<Store>, project_id: String, source_id: String, from: String, to: String) -> Result<String> {
+	dbsrc::compare(&store, &project_id, &source_id, &from, &to)
 }
 
 /// 자동으로 쓴 판을 검토한다. keep 이면 검토 표지만 지우고, 아니면 그 판을 휴지통으로 옮긴다.
@@ -1163,6 +1530,64 @@ pub fn kb_cards(app: AppHandle, project_id: String, path: String) -> Result<Vec<
 /* ---------- 어휘 사전 ---------- */
 
 #[tauri::command(async)]
+pub fn memory_get(app: AppHandle, project_id: String) -> Result<memory::MemoryView> {
+	memory::view(&app, &project_id)
+}
+
+/// 끄면 소화 줄도 멈춘다.
+#[tauri::command]
+pub fn memory_save_settings(app: AppHandle, project_id: String, memory: ProjectMemory) -> Result<memory::MemoryView> {
+	let p = app.state::<Store>().save_memory_settings(&project_id, &memory)?;
+	if !p.memory.enabled {
+		app.state::<memory::Memory>().stop(&project_id);
+	}
+	memory::view(&app, &project_id)
+}
+
+/// 파일 · 폴더를 소화 줄에 세운다. 복사하지 않고 제자리에서 읽는다.
+#[tauri::command]
+pub fn memory_digest(app: AppHandle, project_id: String, paths: Vec<String>) -> Result<usize> {
+	memory::request(&app, &project_id, &paths)
+}
+
+#[tauri::command]
+pub fn memory_stop(app: AppHandle, project_id: String) -> bool {
+	app.state::<memory::Memory>().stop(&project_id)
+}
+
+#[tauri::command]
+pub fn memory_add(app: AppHandle, project_id: String, kind: String, text: String) -> Result<memory::MemoryView> {
+	memory::add(&app.state::<Store>(), &project_id, &kind, &text)?;
+	memory::view(&app, &project_id)
+}
+
+#[tauri::command]
+pub fn memory_edit(app: AppHandle, project_id: String, id: String, kind: String, text: String) -> Result<memory::MemoryView> {
+	memory::edit(&app.state::<Store>(), &project_id, &id, &kind, &text)?;
+	memory::view(&app, &project_id)
+}
+
+#[tauri::command]
+pub fn memory_delete(app: AppHandle, project_id: String, id: String) -> Result<memory::MemoryView> {
+	memory::remove(&app.state::<Store>(), &project_id, &id)?;
+	memory::view(&app, &project_id)
+}
+
+/// 승인 대기를 넣거나, 밀린 항목을 되돌린다.
+#[tauri::command]
+pub fn memory_approve(app: AppHandle, project_id: String, id: String) -> Result<memory::MemoryView> {
+	memory::approve_entry(&app.state::<Store>(), &project_id, &id)?;
+	memory::view(&app, &project_id)
+}
+
+/// 소화가 버린 내용을 되살린다.
+#[tauri::command]
+pub fn memory_restore(app: AppHandle, project_id: String, digest_id: String, index: usize) -> Result<memory::MemoryView> {
+	memory::restore(&app.state::<Store>(), &project_id, &digest_id, index)?;
+	memory::view(&app, &project_id)
+}
+
+#[tauri::command(async)]
 pub fn glossary_get(store: State<Store>, project_id: String) -> Result<glossary::GlossaryView> {
 	glossary::view(&store, &project_id)
 }
@@ -1191,6 +1616,20 @@ pub fn resources_list(store: State<Store>, project_id: Option<String>) -> Result
 	};
 	let root = project.as_ref().map(|p| PathBuf::from(&p.path));
 	Ok(claude_files::list(root.as_deref(), project.as_ref().map_or(&[][..], |p| &p.extra_dirs)))
+}
+
+/// 전역 지침(CLAUDE.md · rules 의 파일)을 docket 실행에 싣거나 뺀다. key 는 ~/.claude 기준 경로다.
+#[tauri::command]
+pub fn claude_run_include(store: State<Store>, key: String, include: bool) -> Result<Settings> {
+	let key = key.trim().replace('\\', "/");
+	if !(key == "CLAUDE.md" || key.starts_with("rules/")) || key.split('/').any(|s| s == "..") {
+		return msg("전역 CLAUDE.md 와 rules 만 싣고 뺄 수 있습니다");
+	}
+	let mut s = store.settings()?;
+	s.run_excludes = claude_files::with_included(&s.run_excludes, &key, include);
+	let saved = store.save_settings(&s)?;
+	runner::note_settings(&saved);
+	Ok(saved)
 }
 
 #[tauri::command]
@@ -1231,4 +1670,37 @@ pub fn resource_delete(store: State<Store>, path: String) -> Result<String> {
 	let target = claude_files::delete_target(&p, &bases)?;
 	let label = target.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
 	Ok(store.trash(&target, &label)?.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod shelf_tests {
+	use super::*;
+
+	/// 산출물 폴더 안이면 그 자리, 산출물 폴더 자체면 맨 위, 밖이면 폴더 이름이 칸이다.
+	#[test]
+	fn folder_cell_follows_where_it_is() {
+		let base = Path::new("D:\\out");
+		assert_eq!(folder_cell(Path::new("D:\\out"), Some(base)), "");
+		assert_eq!(folder_cell(Path::new("D:\\out\\요구\\중간"), Some(base)), "요구/중간");
+		assert_eq!(folder_cell(Path::new("D:\\받은\\자료"), Some(base)), "자료");
+		assert_eq!(folder_cell(Path::new("D:\\받은\\자료"), None), "자료");
+	}
+
+	/// 하위 폴더는 칸이 되고, 지난 판 폴더 · 숨은 폴더 · 키 파일 · 잠금 파일은 빠지며, 상한을 넘으면 멈춘다.
+	#[test]
+	fn scan_keeps_structure_and_skips_noise() {
+		let root = std::env::temp_dir().join(format!("docket-scan-{}", short_id()));
+		for dir in ["a/b", "이전판", ".git", "node_modules"] {
+			std::fs::create_dir_all(root.join(dir)).unwrap();
+		}
+		for file in ["맨위.md", "a/가.docx", "a/b/나.pdf", "이전판/옛.md", ".git/x", "node_modules/y", "server.pem", "~$잠금.docx"] {
+			std::fs::write(root.join(file), "x").unwrap();
+		}
+		let mut got: Vec<(String, String)> = scan_folder(&root, "칸", "이전판", 500).into_iter().map(|(p, c)| (p.file_name().unwrap().to_string_lossy().to_string(), c)).collect();
+		got.sort();
+		let want = [("가.docx", "칸/a"), ("나.pdf", "칸/a/b"), ("맨위.md", "칸")].map(|(a, b)| (a.to_string(), b.to_string()));
+		assert_eq!(got, want);
+		assert_eq!(scan_folder(&root, "", "이전판", 1).len(), 2);
+		let _ = std::fs::remove_dir_all(root);
+	}
 }

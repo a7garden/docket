@@ -67,6 +67,20 @@ pub struct Settings {
 	/// 계획 · 구현 · 대화 답 · 산출물 작성이 끝났는데 창이 앞에 없으면 Windows 알림으로도 알린다 (src/lib/events.ts).
 	/// 기본 켜짐이다. 칸이 없는 옛 설정도 serde(default) 로 켜진 채 읽혀, 업데이트한 사람도 따로 켜지 않고 받는다.
 	pub system_notify: bool,
+	/// 계획 · 구현 · 대화 · 산출물 실행에서 빼는 전역 지침(~/.claude 기준 glob · `x/**` 는 그 폴더 아래 전부).
+	/// claudeMdExcludes 로 넘긴다. 「Claude 설정」 화면에서 항목마다 「docket 실행에 싣기」로 고친다 — 화면과 실행이 이 값 하나를 읽는다.
+	/// 기본은 전역 CLAUDE.md · rules 를 뺀다. docket 이 시키는 일과 관계없는 개인 운영 규칙이 실행마다 7k 토큰쯤 들었다.
+	pub run_excludes: Vec<String>,
+	/// 어디서나 빠른 메모 창을 띄우는 전역 단축키(Ctrl+Shift+Space 꼴). 비우면 듣지 않는다 (quick.rs).
+	pub quick_capture_key: String,
+	/// 주 창의 닫기(✕ · Alt+F4)를 트레이로 숨기기로 받는다. 끄면 닫기가 앱을 끝낸다.
+	/// 기본 켜짐이다 — 숨어 있어야 단축키를 듣고 돌던 작업도 이어 간다.
+	pub close_to_tray: bool,
+}
+
+/// run_excludes 의 기본값. 칸이 없는 옛 설정도 이 값으로 읽힌다.
+pub fn default_run_excludes() -> Vec<String> {
+	vec!["CLAUDE.md".into(), "rules/**".into()]
 }
 
 impl Default for Settings {
@@ -94,6 +108,9 @@ impl Default for Settings {
 			auto_update_check: true,
 			hancom_check: false,
 			system_notify: true,
+			run_excludes: default_run_excludes(),
+			quick_capture_key: crate::quick::DEFAULT_KEY.into(),
+			close_to_tray: true,
 		}
 	}
 }
@@ -107,6 +124,8 @@ pub struct Project {
 	pub name: String,
 	pub path: String,
 	pub created_at: i64,
+	/// 보관한 시각. 0 이면 쓰는 중이다. 보관하면 목록 · 알림 · 자동 작업에서 빠지고 기록은 그대로 남는다.
+	pub archived_at: i64,
 	pub next_number: u32,
 	/// acceptEdits: 편집만 자동 승인하고 명령은 allowed_tools 에 있는 것만 · bypassPermissions: 명령 · 웹 · 스킬까지 모두 허용.
 	/// 이름은 옛 값 그대로지만 2026-10-28 부터 「모두 허용」도 --dangerously-skip-permissions 를 쓰지 않는다. 거부 목록이 늘 앞선다.
@@ -141,6 +160,34 @@ pub struct Project {
 	pub kb: ProjectKb,
 	/// 어휘 사전 설정. 용어 목록은 projects/<pid>/glossary.json 에 따로 둔다. save_project 는 kb 처럼 이 칸도 덮지 않는다.
 	pub glossary: ProjectGlossary,
+	/// 기억 켜기. 항목은 projects/<pid>/memory.json 에 따로 둔다. save_project 는 kb 처럼 이 칸도 덮지 않는다.
+	pub memory: ProjectMemory,
+	/// DB 자료. 앱이 조회 명령을 돌려 받은 구조를 스냅숏으로 두고, 산출물의 DB 트리거가 그 변경을 따른다 (dbsrc.rs).
+	/// save_project 는 이 칸을 덮지 않는다 — DB 자료 창이 save_db_sources 로만 바꾼다.
+	pub db_sources: Vec<DbSource>,
+}
+
+/// DB 자료 하나. 명령은 앱이 직접 돌리고 Claude 에 넘기지 않는다 — 접속 정보가 프롬프트 · 실행 기록에 남지 않게.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DbSource {
+	pub id: String,
+	pub name: String,
+	/// 표준 출력으로 탭으로 나눈 행을 내는 명령. cmd /C 로 돈다.
+	pub command: String,
+	/// 명령을 돌릴 폴더. 비우면 프로젝트 폴더다.
+	pub cwd: String,
+	/// 출력 칸의 이름. 비교 요약에 쓴다. 비우면 「칸 N」이다.
+	pub columns: Vec<String>,
+	/// 앞에서 몇 칸이 행의 열쇠인가. 구조 조회면 스키마 · 테이블 · 컬럼의 3이다.
+	pub key_cols: usize,
+	pub timeout_sec: u64,
+}
+
+impl Default for DbSource {
+	fn default() -> Self {
+		Self { id: String::new(), name: String::new(), command: String::new(), cwd: String::new(), columns: Vec::new(), key_cols: 3, timeout_sec: 60 }
+	}
 }
 
 /// 산출물 설정 창이 넘기는 값. 뜻은 Project 의 같은 이름 칸과 같다.
@@ -184,6 +231,77 @@ pub struct GlossaryEntry {
 pub struct GlossaryFile {
 	pub updated_at: i64,
 	pub entries: Vec<GlossaryEntry>,
+}
+
+/// 프로젝트 기억 설정. 끈 채로 시작한다 — 파일을 소화할 때 내용이 Claude 로 가고, 켜면 프롬프트가 길어진다.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ProjectMemory {
+	pub enabled: bool,
+}
+
+/// 기억 한 항목.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MemoryEntry {
+	pub id: String,
+	/// rule(지침) · fact(사실) · decision(결정) · reference(참조)
+	pub kind: String,
+	pub text: String,
+	/// active: 실행에 붙는다 · pending: 사람의 승인을 기다린다 · archived: 새 항목에 밀렸다
+	pub status: String,
+	/// 뽑아 낸 파일 이름. 사람이 직접 적었으면 비어 있다.
+	pub source: String,
+	/// 사람이 적었거나 고쳤다. 소화가 묻지 않고 밀어내지 못한다.
+	pub manual: bool,
+	pub created_at: i64,
+	/// 승인하면 밀어낼 항목의 id
+	pub replaces: String,
+}
+
+/// 소화가 저장하지 않기로 한 내용.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DroppedMemory {
+	pub text: String,
+	pub reason: String,
+}
+
+/// 파일 하나를 소화한 기록. 파일 자체는 남기지 않는다.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MemoryDigest {
+	pub id: String,
+	pub file: String,
+	/// 끝까지 소화한 글자의 해시. 같은 내용을 다시 소화하지 않으려고 둔다. 건너뛰었거나 일부만 읽었으면 비어 있다.
+	pub hash: String,
+	pub at: i64,
+	pub added: usize,
+	pub pending: usize,
+	pub terms: usize,
+	pub dropped: Vec<DroppedMemory>,
+	pub cost_usd: f64,
+	/// 건너뛴 까닭 · 일부만 읽은 분량 · 실패
+	pub note: String,
+}
+
+/// memory.json 의 모양.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MemoryFile {
+	pub updated_at: i64,
+	pub entries: Vec<MemoryEntry>,
+	/// 최근 것이 앞이다
+	pub digests: Vec<MemoryDigest>,
+}
+
+/// 실행 프롬프트에 붙인 기억. 나중에 고쳐도 그때 무엇을 줬는지 보이게 글까지 남긴다.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MemoryUsed {
+	pub id: String,
+	pub kind: String,
+	pub text: String,
 }
 
 /// 프로젝트 지식베이스 설정. 끈 채로 시작한다 — 카드를 만들 때 문서를 Claude 에 보내고 호출 비용이 들어서다.
@@ -238,6 +356,7 @@ impl Default for Project {
 			name: String::new(),
 			path: String::new(),
 			created_at: 0,
+			archived_at: 0,
 			next_number: 1,
 			impl_mode: "acceptEdits".into(),
 			allowed_tools: Vec::new(),
@@ -252,6 +371,8 @@ impl Default for Project {
 			archive_dir: String::new(),
 			kb: ProjectKb::default(),
 			glossary: ProjectGlossary::default(),
+			memory: ProjectMemory::default(),
+			db_sources: Vec::new(),
 		}
 	}
 }
@@ -327,6 +448,24 @@ pub struct RunState {
 	/// 줄에서 무엇을 기다리는지 (예: 「파일이 겹쳐 기다림 · #12 · src/App.tsx」). 비면 화면이 기본 문구를 보인다.
 	#[serde(default)]
 	pub wait_for: String,
+	/// Claude 가 허락 · 답을 기다리는 도구 호출(수동 승인 · AskUserQuestion). 답하면 빠진다. 실행이 끝나면 run 과 함께 사라진다.
+	#[serde(default)]
+	pub asks: Vec<PendingAsk>,
+}
+
+/// 대화 실행이 표준 입출력으로 받은 승인 요청(control_request · can_use_tool) 하나.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PendingAsk {
+	pub request_id: String,
+	pub tool: String,
+	/// 도구에 넘길 입력. AskUserQuestion 이면 questions 가 들어 있다.
+	pub input: serde_json::Value,
+	/// 화면에 보일 한 줄 (명령 · 경로)
+	pub summary: String,
+	/// 「이 대화 내내 허락」에 넣을 규칙 후보
+	pub suggest: Vec<String>,
+	pub at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -502,6 +641,12 @@ pub struct RunRecord {
 	pub session_id: String,
 	/// 어휘 사전에서 프롬프트에 붙인 용어 이름. 다른 프로젝트 것이면 `용어 · 프로젝트` 꼴이다.
 	pub glossary_terms: Vec<String>,
+	/// 프롬프트에 붙인 기억 항목. 이어 붙인 세션에 같은 항목을 다시 보내지 않으려는 데도 쓴다.
+	pub memory_items: Vec<MemoryUsed>,
+	/// 마지막 응답이 읽은 문맥 크기(입력 + 캐시 읽기 + 캐시 작성 + 출력). 대화 칸이 「컨텍스트 N%」로 보인다. 이 칸이 생기기 전의 기록은 0 이다.
+	pub context_tokens: u64,
+	/// 그 모델의 창 크기(result 줄의 modelUsage). 0 이면 화면이 기본값으로 어림한다.
+	pub context_window: u64,
 }
 
 /// claude 한 번 호출이 쓴 토큰. stream-json 끝의 result 줄 `usage` 에서 꺼낸다.
@@ -577,6 +722,8 @@ pub struct Issue {
 	pub talk: bool,
 	/// 실행 중에 보낸 질문. 실행이 끝나면 한 차례로 묶어 이어 보낸다. 사용자가 중지했으면 보내지 않고 남겨 둔다.
 	pub queue: Vec<QueuedChat>,
+	/// 수동 승인 카드에서 「이 대화 내내 허락」한 규칙. 이 대화의 다음 차례부터 허용 목록에 더한다. 프로젝트 허용 목록은 건드리지 않는다.
+	pub chat_allow: Vec<String>,
 	/// 이 이슈의 구현이 도는 워크트리. 있으면 수정 요청 · 대화도 그 안에서 돌고, 결과 확인 때 「반영」해야 본 작업트리에 들어간다.
 	pub worktree: Option<Worktree>,
 	/// 메모의 대화에서 갈라 낸 대화면 그 메모. 대화 머리에서 메모로 돌아가는 길이다.
@@ -614,7 +761,7 @@ pub enum ChatMode {
 	/// 읽기 도구만 연다.
 	#[default]
 	Read,
-	/// 허용 목록 밖의 도구를 실행 전에 화면에서 묻는다. 아직 승인 받을 곳이 없어 보낼 수 없다.
+	/// 허용 목록 밖의 도구를 실행 전에 화면에서 묻는다(--permission-prompt-tool stdio). 터미널 claude 의 기본 동작과 같다.
 	Ask,
 	/// 편집과 허용 목록만 묻지 않는다. 목록 밖의 명령은 막힌다.
 	Auto,
@@ -623,8 +770,9 @@ pub enum ChatMode {
 }
 
 impl ChatMode {
+	/// 고칠 수 있는 차례인가. 수동 승인은 허락받으면 고치므로 고칠 수 있는 쪽이다.
 	pub fn can_edit(self) -> bool {
-		matches!(self, ChatMode::Auto | ChatMode::Bypass)
+		matches!(self, ChatMode::Ask | ChatMode::Auto | ChatMode::Bypass)
 	}
 }
 
@@ -707,6 +855,21 @@ pub struct DocJob {
 	/// 「밀린 변경 반영」으로 시작했으면 반영하는 이슈들. 새 판이 나오면 이 이슈들을 자동 관리 기록에 catchup 으로 남긴다.
 	#[serde(default)]
 	pub catch_up: Vec<String>,
+	/// 이 실행이 반영하는 DB 변경(자료 id · 스냅숏 id). 끝나면 자동 관리 기록에 자료마다 한 줄씩 남긴다.
+	#[serde(default)]
+	pub db: Vec<DbMark>,
+	/// db 를 「밀린 변경 반영」으로 넘겼다. 판을 만들었거나 반영할 것이 없을 때만 기록한다.
+	#[serde(default)]
+	pub db_catch_up: bool,
+}
+
+/// 실행이 반영하는 DB 변경 하나.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DbMark {
+	pub source: String,
+	pub name: String,
+	pub snapshot: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -729,8 +892,12 @@ pub struct Deliverable {
 	pub naming: String,
 	/// 프로젝트 산출물 폴더 안의 하위 폴더
 	pub subdir: String,
-	/// 이슈를 완료하면 그 코드 변경과 관련 있는지 가려, 있으면 새 판을 쓴다.
-	pub auto_update: bool,
+	/// 무엇이 바뀌면 새 판을 쓸지. `code`(이슈 완료) · `db:<자료 id>`(DB 구조 변경). 비면 수동이다.
+	/// 변경이 생기면 관련 있는지 가려, 있으면 새 판을 쓴다.
+	pub triggers: Vec<String>,
+	/// 2026-11-04 전의 「코드가 바뀌면 자동 갱신」 스위치. 읽기만 하고 Deliverable::migrate 가 triggers 로 옮긴다.
+	#[serde(rename = "autoUpdate", skip_serializing)]
+	pub legacy_auto_update: bool,
 	/// 마지막 자동 갱신 결과 한 줄 (`#번호 · v판 갱신` · `#번호 · 건너뜀 · 까닭` …). 목록에 보인다.
 	pub auto_last: String,
 	/// 자동 관리 기록. 판정 · 작성 결과를 이슈마다 한 줄씩 오래된 것부터 쌓는다(최근 AUTO_LOG_MAX 건).
@@ -775,7 +942,15 @@ pub struct AutoEntry {
 	pub reason: String,
 	/// updated · catchup 이면 만든 판 번호
 	pub version: u32,
+	/// 비면 이슈의 코드 변경이다. DB 변경이면 `db:<자료 id>` 이고 issue_id 는 비어 있다.
+	pub source: String,
+	/// DB 변경이면 반영한 스냅숏 id
+	pub snapshot: String,
 }
+
+/// 산출물 트리거 값.
+pub const TRIGGER_CODE: &str = "code";
+pub const TRIGGER_DB: &str = "db:";
 
 impl AutoEntry {
 	/// 이 결과로 그 이슈의 반영이 끝났는가. 아니면 반영 대기에 남긴다.
@@ -785,6 +960,29 @@ impl AutoEntry {
 }
 
 impl Deliverable {
+	/// 옛 스위치를 트리거로 옮긴다. 읽을 때마다 부른다 — 옮긴 뒤 저장하면 옛 칸은 다시 쓰이지 않는다.
+	pub fn migrate(mut self) -> Self {
+		if self.legacy_auto_update && self.triggers.is_empty() {
+			self.triggers.push(TRIGGER_CODE.into());
+		}
+		self.legacy_auto_update = false;
+		self
+	}
+
+	/// 트리거가 하나라도 있으면 자동 관리다.
+	pub fn is_auto(&self) -> bool {
+		!self.triggers.is_empty()
+	}
+
+	pub fn on_code(&self) -> bool {
+		self.triggers.iter().any(|t| t == TRIGGER_CODE)
+	}
+
+	/// 트리거로 고른 DB 자료 id
+	pub fn db_triggers(&self) -> Vec<&str> {
+		self.triggers.iter().filter_map(|t| t.strip_prefix(TRIGGER_DB)).collect()
+	}
+
 	pub fn push_auto(&mut self, e: AutoEntry) {
 		self.auto_log.push(e);
 		let over = self.auto_log.len().saturating_sub(AUTO_LOG_MAX);
@@ -792,14 +990,21 @@ impl Deliverable {
 	}
 }
 
-/// 완료됐지만 아직 이 산출물에 반영되지 않은 이슈. 저장하지 않고 목록을 읽을 때 센다.
-#[derive(Debug, Clone, Serialize)]
+/// 아직 이 산출물에 반영되지 않은 변경. 저장하지 않고 목록을 읽을 때 센다.
+/// kind 가 issue 면 완료된 이슈(id 는 이슈 id), db 면 DB 자료의 구조 변경(id 는 `db:<자료 id>`)이다.
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingIssue {
 	pub id: String,
+	pub kind: String,
 	pub number: u32,
 	pub title: String,
+	/// 이슈는 완료 시각, DB 는 바뀐 스냅숏을 받은 시각
 	pub done_at: i64,
+	/// DB: 반영할 스냅숏과 비교의 바탕이 된 스냅숏, 바뀐 것 요약(추가 2 · 삭제 1 · 바뀜 3)
+	pub snapshot: String,
+	pub base: String,
+	pub summary: String,
 }
 
 /// 산출물에서 쓸 말 하나. avoid 는 같은 뜻이지만 쓰지 않을 말이다.
@@ -856,6 +1061,6 @@ pub struct DeliverableView {
 	pub output_dir: String,
 	/// 앱이 쓰는 마크다운 판(직접 쓴 글 · 이슈 정리)의 다음 파일 이름
 	pub next_name: String,
-	/// 반영 대기 이슈. 자동 갱신을 켜고 판이 있는 산출물만 센다 — 끈 산출물은 손으로 관리하는 문서라 숫자를 쌓지 않는다.
+	/// 반영 대기 변경(이슈 · DB). 트리거가 있고 판이 있는 산출물만 센다 — 수동 산출물은 손으로 관리하는 문서라 숫자를 쌓지 않는다.
 	pub pending: Vec<PendingIssue>,
 }

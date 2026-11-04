@@ -1,4 +1,4 @@
-import { type ClipboardEvent, type KeyboardEvent, memo, type RefObject, useLayoutEffect, useRef, useState } from "react";
+import { type ClipboardEvent, type KeyboardEvent, memo, type RefObject, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Clock, Copy, History, Image as ImageIcon, ImagePlus, MessagesSquare, Square, SquareTerminal, StickyNote, X } from "lucide-react";
@@ -19,6 +19,9 @@ import { RUN_KIND_LABEL } from "@/lib/status";
 import { useLive, useUi } from "@/lib/store";
 import type { ChatMode, HistoryEntry, Issue, QueuedChat, RunRecord, Turn } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { pressTwice } from "@/lib/keys";
+import { RunPicker } from "@/features/settings/RunPicker";
+import { AskCards, ContextMeter, useAssist } from "./ChatAssist";
 
 /** 쓰다 만 질문은 탭을 오가도 남는다. 그래서 상태를 상세 창이 들고 있다. */
 export interface Draft {
@@ -559,6 +562,12 @@ export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = fals
 	const { projectId: p, id } = issue;
 	const running = !!issue.run;
 	const waiting = issue.queue?.length ?? 0;
+	const box = useRef<HTMLTextAreaElement>(null);
+	const [picker, setPicker] = useState(false);
+	// 저장 전 대화는 디스크에 없어 모델을 적을 곳이 없다. 고른 값을 들고 있다가 첫 질문을 보낼 때 적는다.
+	const [unsavedRun, setUnsavedRun] = useState<{ model?: string; effort?: string }>({});
+	const runModel = unsavedRun.model ?? issue.model;
+	const runEffort = unsavedRun.effort ?? issue.effort;
 
 	const go = async (fn: () => Promise<unknown>) => {
 		setBusy(true);
@@ -570,16 +579,90 @@ export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = fals
 		setBusy(false);
 	};
 	const empty = !draft.text.trim() && draft.images.length === 0;
+	// -p 에서 뜻이 없는 명령은 앱이 받는다. /clear 는 새 대화, /model 은 모델 고르기다.
+	const local = (text: string) => {
+		const cmd = text.trim();
+		if (cmd === "/model") {
+			onDraft({ ...draft, text: "" });
+			setPicker(true);
+			return true;
+		}
+		if (cmd === "/clear") {
+			onDraft({ ...draft, text: "" });
+			const ui = useUi.getState();
+			ui.openNewTalk(p);
+			ui.setView("talks");
+			return true;
+		}
+		return false;
+	};
+	const save = async () => {
+		await beforeSend?.();
+		if (beforeSend && unsavedRun.model !== undefined) await api.issueSetModel(p, id, unsavedRun.model);
+		if (beforeSend && unsavedRun.effort !== undefined) await api.issueSetEffort(p, id, unsavedRun.effort);
+	};
 	// 실행 중이면 백엔드가 대기열에 넣는다. 실행 중인지는 백엔드가 판정한다 — 막 끝난 순간에 보낸 질문이 튕기지 않게 한다.
 	const send = () => {
-		if (busy || empty) return;
+		if (busy || empty || local(draft.text)) return;
 		void go(async () => {
-			await beforeSend?.();
+			await save();
 			await api.issueChat(p, id, draft.text, mode, draft.images);
 			setChatMode(id, mode);
 			onDraft({ ...draft, text: "", images: [] });
+			recall.current = null;
 			scrollChatToBottom(id);
 		});
+	};
+	// 지난 대화를 요약해 컨텍스트를 줄인다. 터미널의 /compact 와 같다.
+	const compactNow = () => void go(() => api.issueChat(p, id, "/compact", mode, []));
+	const onModel = (v: string) => (beforeSend ? setUnsavedRun((r) => ({ ...r, model: v })) : void api.issueSetModel(p, id, v).catch((e) => toast.error(errorText(e))));
+	const onEffort = (v: string) => (beforeSend ? setUnsavedRun((r) => ({ ...r, effort: v })) : void api.issueSetEffort(p, id, v).catch((e) => toast.error(errorText(e))));
+
+	// ↑ ↓ 로 이 대화의 지난 질문을 불러온다. 입력칸이 비었거나 불러온 글 그대로일 때만 — 쓰던 글은 건드리지 않는다.
+	const prompts = useMemo(() => issue.runs.filter((r) => r.kind === "chat" && r.prompt.trim()).map((r) => r.prompt), [issue.runs]);
+	const recall = useRef<{ at: number; text: string } | null>(null);
+	const browse = (dir: -1 | 1) => {
+		const cur = recall.current;
+		if (draft.text && cur?.text !== draft.text) return false;
+		const at = (cur?.at ?? prompts.length) + dir;
+		if (at < 0 || (dir === -1 && !prompts.length) || (dir === 1 && !cur)) return false;
+		if (at >= prompts.length) {
+			recall.current = null;
+			onDraft({ ...draft, text: "" });
+			return true;
+		}
+		recall.current = { at, text: prompts[at] };
+		onDraft({ ...draft, text: prompts[at] });
+		return true;
+	};
+
+	const setText = (text: string, caret: number) => {
+		onDraft({ ...latest.current, text });
+		requestAnimationFrame(() => {
+			const el = box.current;
+			if (!el) return;
+			el.focus();
+			el.setSelectionRange(caret, caret);
+		});
+	};
+	const assist = useAssist(issue, draft.text, setText);
+
+	const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+		if (assist.onKeyDown(e)) return;
+		if (sendKey.isSend(e)) {
+			send();
+			return;
+		}
+		if (e.nativeEvent.isComposing || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+		// 실행 중 Esc 를 두 번 누르면 멈춘다. 터미널의 Esc 와 같은 자리다. 상세 창은 이 칸의 Esc 로 닫히지 않는다(data-esc-own).
+		if (e.key === "Escape" && running) {
+			if (pressTwice(`chat-stop:${id}`, "중지합니다")) void go(() => api.issueStop(p, id));
+			return;
+		}
+		// 첫 줄에서 ↑, 끝 줄에서 ↓ 일 때만 불러온다. 여러 줄 글 안에서는 줄을 옮긴다.
+		const el = e.currentTarget;
+		if (e.key === "ArrowUp" && !el.value.slice(0, el.selectionStart).includes("\n") && browse(-1)) e.preventDefault();
+		else if (e.key === "ArrowDown" && !el.value.slice(el.selectionEnd).includes("\n") && browse(1)) e.preventDefault();
 	};
 	// 대기 중인 질문을 입력칸으로 되돌린다. 적던 글이 있으면 그 뒤에 잇는다.
 	const editQueued = (q: QueuedChat) =>
@@ -621,20 +704,27 @@ export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = fals
 	const keys = ` · ${sendKey.label}${sendKey.hint}`;
 	return (
 		<div ref={dropRef} className={cn("flex flex-col gap-2", hero ? "mx-auto w-full max-w-3xl" : cn("border-t border-border py-3", compact ? "px-4" : "px-6"))}>
+			<AskCards issue={issue} />
 			<QueueList issue={issue} onEdit={editQueued} disabled={busy} />
 			<div className="relative rounded-xl border border-border bg-card transition-colors focus-within:border-border-strong">
 				{over && <DropOverlay />}
+				{assist.popup}
 				{draft.images.length > 0 && <AttachmentThumbs className="px-3 pt-3" names={draft.images} pathOf={(n) => attachmentPath(issue, n)} onRemove={remove} />}
 				<Textarea
+					ref={box}
 					data-composer
+					// 이 칸이 Esc 를 쓰는 동안(실행 중 중지 · 자동완성 닫기) 상세 창이 Esc 로 입력칸을 빠져나가지 않는다.
+					data-esc-own={running || assist.open ? "" : undefined}
 					value={draft.text}
-					onChange={(e) => onDraft({ ...draft, text: e.target.value })}
-					onPaste={paste}
-					onKeyDown={(e) => {
-						if (sendKey.isSend(e)) send();
+					onChange={(e) => {
+						onDraft({ ...draft, text: e.target.value });
+						assist.track(e.target);
 					}}
+					onSelect={(e) => assist.track(e.currentTarget)}
+					onPaste={paste}
+					onKeyDown={onKeyDown}
 					placeholder={
-						(canEdit(mode) ? "묻거나 고칠 것" : "물을 것") + (running ? " · 답이 끝나면 대기 중인 질문과 묶어 보냅니다" : "")
+						(canEdit(mode) ? "묻거나 고칠 것" : "물을 것") + (running ? " · 답이 끝나면 대기 중인 질문과 묶어 보냅니다" : compact ? "" : " · / 명령 · @ 파일")
 					}
 					className="max-h-48 min-h-16 resize-none rounded-none border-0 bg-transparent px-3 pt-2.5 pb-1 text-[13.5px] leading-relaxed focus-visible:ring-0 dark:bg-transparent"
 				/>
@@ -653,8 +743,20 @@ export function ChatComposer({ issue, draft, onDraft, beforeSend, compact = fals
 						<ImagePlus />
 					</Button>
 					<ModeMenu mode={mode} onMode={(m) => setChatMode(id, m)} compact={compact} />
+					<RunPicker
+						model={runModel}
+						effort={runEffort}
+						onModel={onModel}
+						onEffort={onEffort}
+						followLabel={compact ? "모델" : "설정 따름"}
+						open={picker}
+						onOpenChange={setPicker}
+						className={cn("h-7 shrink-0 border-0 bg-transparent text-[12.5px] text-muted-foreground dark:bg-transparent", compact ? "max-w-24" : "max-w-40")}
+						title="이 대화의 모델 · effort. 다음 차례부터 쓰입니다 (/model)"
+					/>
+					{!running && <ContextMeter issue={issue} onCompact={compactNow} disabled={busy} />}
 					<span className="mx-1 min-w-0 flex-1 truncate text-right text-[12.5px] text-subtle">
-						{running && (issue.run?.phase === "queued" ? issue.run.waitFor || "앞선 작업을 기다리는 중" : activity)}
+						{running && (issue.run?.asks?.length ? "답을 기다리는 중" : issue.run?.phase === "queued" ? issue.run.waitFor || "앞선 작업을 기다리는 중" : activity)}
 					</span>
 					{/* 중지했거나 앱을 다시 켜서 남은 대기열. 저절로 보내지 않고 사용자가 이어 보낸다. */}
 					{!running && waiting > 0 && (

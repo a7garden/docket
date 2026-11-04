@@ -1,11 +1,22 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { perfMark } from "@/lib/api";
 import { useUi } from "@/lib/store";
+import { QuickCapture } from "@/features/quick/QuickCapture";
 import App from "./App";
 import "./index.css";
+
+// 같은 index.html 을 주 창과 빠른 메모 창(src-tauri/src/quick.rs)이 함께 띄운다. 창 이름으로 그릴 화면을 고른다.
+const quick = (() => {
+	try {
+		return getCurrentWindow().label === "quick";
+	} catch {
+		return false;
+	}
+})();
 
 // 개발 빌드에서만: ?view=claude&issue=<id> 처럼 주소로 첫 화면을 고른다. 화면을 하나씩 띄워 확인할 때 쓴다.
 if (import.meta.env.DEV) {
@@ -13,7 +24,7 @@ if (import.meta.env.DEV) {
 	const ui = useUi.getState();
 	const view = q.get("view");
 	if (q.get("project")) ui.setProject(q.get("project"));
-	if (view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary" || view === "claude" || view === "settings") ui.setView(view);
+	if (view === "board" || view === "deliverables" || view === "talks" || view === "knowledge" || view === "glossary" || view === "memory" || view === "claude" || view === "settings") ui.setView(view);
 	if (q.get("issue")) ui.openIssue(q.get("issue"));
 	if (q.get("talk")) ui.openTalk({ projectId: useUi.getState().projectId ?? "", id: q.get("talk")! });
 	if (q.get("deliverable")) ui.openDeliverable(q.get("deliverable"));
@@ -46,10 +57,10 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
 	<React.StrictMode>
 		<QueryClientProvider client={queryClient}>
 			<TooltipProvider delayDuration={400}>
-				<App />
+				{quick ? <QuickCapture /> : <App />}
 			</TooltipProvider>
 		</QueryClientProvider>
 	</React.StrictMode>,
 );
 // 첫 그림이 화면에 오른 때. 두 번 넘겨야 그 그림의 칠하기가 끝난 뒤다.
-requestAnimationFrame(() => requestAnimationFrame(() => perfMark("첫 화면")));
+if (!quick) requestAnimationFrame(() => requestAnimationFrame(() => perfMark("첫 화면")));

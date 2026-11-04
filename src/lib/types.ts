@@ -37,6 +37,12 @@ export interface Settings {
 	hancomCheck: boolean;
 	/** 실행이 끝났는데 창이 앞에 없으면 Windows 알림으로도 알린다. 기본 켜짐. */
 	systemNotify: boolean;
+	/** docket 실행에서 빼는 전역 지침(~/.claude 기준 glob). 「Claude 설정」에서 항목마다 싣고 뺀다. */
+	runExcludes: string[];
+	/** 어디서나 빠른 메모 창을 띄우는 전역 단축키(Ctrl+Shift+Space 꼴). 비우면 듣지 않는다. */
+	quickCaptureKey: string;
+	/** 주 창의 닫기를 트레이로 숨기기로 받는다. 끄면 닫기가 앱을 끝낸다. */
+	closeToTray: boolean;
 }
 
 /** 터미널 기여. 자리표시: {cwd} {claude} {session} {session_short} {title} · attach 둘째 단계부터 {out.경로} */
@@ -121,6 +127,8 @@ export interface PluginReply {
 	copy: string;
 	markdown: string;
 	title: string;
+	/** 그 프로젝트의 새 대화를 열고 보낼 글. 앱에 든 플러그인만 돌려준다. */
+	chat?: { text: string };
 }
 
 export interface AppInfo {
@@ -176,7 +184,7 @@ export interface Tokens {
 	cacheRead: number;
 }
 
-/** 사용량 장부의 묶음 하나. group 은 plan · implement(되돌리기 포함) · chat · document · quick(제목 · 색인 카드 · 판정 · 작성법) · total */
+/** 사용량 장부의 묶음 하나. group 은 plan · implement(되돌리기 포함) · chat · document · quick(제목 · 색인 카드 · 판정 · 작성법 · 기억 소화) · total */
 export interface SpendRow {
 	group: string;
 	calls: number;
@@ -196,6 +204,8 @@ export interface Project {
 	name: string;
 	path: string;
 	createdAt: number;
+	/** 보관한 시각. 0 또는 없음이면 쓰는 중이다. */
+	archivedAt?: number;
 	nextNumber: number;
 	implMode: "acceptEdits" | "bypassPermissions";
 	allowedTools: string[];
@@ -216,9 +226,107 @@ export interface Project {
 	kb: ProjectKb;
 	/** 어휘 사전 설정. 프로젝트 저장(projectSave)은 이 칸을 덮지 않는다 — glossarySaveSettings 로만 바꾼다. */
 	glossary: ProjectGlossary;
+	/** DB 자료. 프로젝트 저장(projectSave)은 이 칸을 덮지 않는다 — dbSourcesSave 로만 바꾼다. 예전 프로젝트에는 없을 수 있다. */
+	dbSources?: DbSource[];
+}
+
+/** DB 자료. 앱이 명령을 돌려 탭으로 나눈 행을 받고, 지난번과 견준 변경을 산출물의 DB 트리거가 따른다. */
+export interface DbSource {
+	id: string;
+	name: string;
+	/** 표준 출력으로 탭으로 나눈 행을 내는 명령. cmd 로 돈다. Claude 에는 넘기지 않는다. */
+	command: string;
+	/** 명령을 돌릴 폴더. 비우면 프로젝트 폴더 */
+	cwd: string;
+	/** 출력 칸 이름. 비교 요약에 쓴다 */
+	columns: string[];
+	/** 앞에서 몇 칸이 행의 열쇠인가(스키마 · 테이블 · 컬럼이면 3) */
+	keyCols: number;
+	timeoutSec: number;
+}
+
+export interface SnapMeta {
+	id: string;
+	at: number;
+	rows: number;
+	/** 바로 앞 스냅숏과 견준 수. 첫 스냅숏은 0 이다 */
+	added: number;
+	removed: number;
+	changed: number;
+}
+
+export interface DbSourceView extends DbSource {
+	dir: string;
+	checkedAt: number;
+	error: string;
+	/** 최근 것이 앞 */
+	snapshots: SnapMeta[];
+	busy: boolean;
+	/** 이 자료를 트리거로 고른 산출물 제목 */
+	usedBy: string[];
+}
+
+export interface DbFetchResult {
+	/** 앞 스냅숏과 달라 새 스냅숏을 남겼다. 첫 스냅숏은 바탕이라 false */
+	changed: boolean;
+	first: boolean;
+	rows: number;
+	summary: string;
+	snapshot: SnapMeta | null;
 }
 
 export type DeliverableSettings = Pick<Project, "deliverablesDir" | "naming" | "namingUnderscore" | "archiveDir">;
+
+export type MemoryKind = "rule" | "fact" | "decision" | "reference";
+
+export interface MemoryEntry {
+	id: string;
+	kind: MemoryKind;
+	text: string;
+	/** active: 실행에 붙는다 · pending: 승인을 기다린다 · archived: 새 항목에 밀렸다 */
+	status: "active" | "pending" | "archived";
+	/** 뽑아 낸 파일 이름. 직접 적었으면 비어 있다. */
+	source: string;
+	manual: boolean;
+	createdAt: number;
+	/** 승인하면 밀어낼 항목의 id */
+	replaces: string;
+}
+
+export interface MemoryDigest {
+	id: string;
+	file: string;
+	hash: string;
+	at: number;
+	added: number;
+	pending: number;
+	terms: number;
+	dropped: { text: string; reason: string }[];
+	costUsd: number;
+	note: string;
+}
+
+export interface MemoryProgress {
+	running: boolean;
+	file: string;
+	done: number;
+	total: number;
+	message: string;
+}
+
+export interface MemoryView {
+	enabled: boolean;
+	entries: MemoryEntry[];
+	digests: MemoryDigest[];
+	progress: MemoryProgress;
+	glossaryEnabled: boolean;
+}
+
+export interface MemoryUsed {
+	id: string;
+	kind: MemoryKind;
+	text: string;
+}
 
 export interface ProjectGlossary {
 	enabled: boolean;
@@ -328,6 +436,26 @@ export interface RunState {
 	queuedAt: number;
 	/** 줄에서 무엇을 기다리는지. 비면 기본 문구를 보인다. */
 	waitFor?: string;
+	/** Claude 가 허락 · 답을 기다리는 도구 호출(수동 승인 · AskUserQuestion). */
+	asks?: PendingAsk[];
+}
+
+/** 대화 실행이 기다리는 승인 요청 하나. AskUserQuestion 이면 input.questions 가 있다. */
+export interface PendingAsk {
+	requestId: string;
+	tool: string;
+	input: unknown;
+	summary: string;
+	/** 「이 대화 내내 허락」에 넣을 규칙 */
+	suggest: string[];
+	at: number;
+}
+
+/** 입력칸 `/` 자동완성 한 줄. app 은 앱이 받아 처리한다(/clear · /model). */
+export interface SlashItem {
+	name: string;
+	description: string;
+	source: "cli" | "skill" | "command" | "app";
 }
 
 export interface PlanStep {
@@ -428,6 +556,12 @@ export interface RunRecord {
 	sessionId?: string;
 	/** 어휘 사전에서 프롬프트에 붙인 용어. 다른 프로젝트 것은 「용어 · 프로젝트」 꼴이다. 옛 기록에는 없다. */
 	glossaryTerms?: string[];
+	/** 프롬프트에 붙인 기억 항목. 옛 기록에는 없다. */
+	memoryItems?: MemoryUsed[];
+	/** 마지막 응답이 읽은 문맥 크기. 옛 기록에는 없거나 0 이다. */
+	contextTokens?: number;
+	/** 그 모델의 창 크기. 0 이면 화면이 어림한다. */
+	contextWindow?: number;
 }
 
 /** 권한 때문에 막힌 도구 호출. rule: 거부 규칙에 걸림 · ask: 허용 목록에 없음 */
@@ -566,7 +700,7 @@ export interface RecipeDraft {
 }
 
 /**
- * 자동 관리 기록 한 줄. 이슈 하나가 이 산출물에 어떻게 반영됐는지다.
+ * 자동 관리 기록 한 줄. 이슈 하나(또는 DB 변경 하나)가 이 산출물에 어떻게 반영됐는지다.
  * updated · skipped · unrelated · catchup 은 반영이 끝난 것, busy · failed · stopped · discarded 는 반영 대기에 남는다.
  */
 export interface AutoEntry {
@@ -577,14 +711,27 @@ export interface AutoEntry {
 	reason: string;
 	/** updated · catchup 이면 만든 판 번호 */
 	version: number;
+	/** 비면 이슈. DB 변경이면 `db:<자료 id>` 이고 issueId 는 비어 있다 */
+	source?: string;
+	snapshot?: string;
 }
 
-/** 완료됐지만 아직 이 산출물에 반영되지 않은 이슈 */
+/** 무엇이 바뀌면 새 판을 쓸지. 비면 수동이다. */
+export const TRIGGER_CODE = "code";
+export const TRIGGER_DB = "db:";
+
+/** 아직 이 산출물에 반영되지 않은 변경. issue 면 완료된 이슈, db 면 DB 자료의 구조 변경(id 는 `db:<자료 id>`) */
 export interface PendingIssue {
 	id: string;
+	kind: "issue" | "db";
 	number: number;
 	title: string;
+	/** 이슈는 완료 시각, DB 는 바뀐 구조를 받은 시각 */
 	doneAt: number;
+	snapshot: string;
+	base: string;
+	/** DB: 추가 2 · 삭제 1 · 바뀜 3 */
+	summary: string;
 }
 
 export interface Deliverable {
@@ -597,19 +744,19 @@ export interface Deliverable {
 	updatedAt: number;
 	versions: Version[];
 	/** issueId: 이슈를 완료해 자동 갱신으로 시작했으면 그 이슈 */
-	job: { runId: string; phase: Phase; request: string; queuedAt: number; issueId?: string; catchUp?: string[] } | null;
+	job: { runId: string; phase: Phase; request: string; queuedAt: number; issueId?: string; catchUp?: string[]; db?: { source: string; name: string; snapshot: string }[]; dbCatchUp?: boolean } | null;
 	error: string;
 	runs: RunRecord[];
 	guide: string;
 	naming: string;
 	subdir: string;
-	/** 이슈를 완료하면 그 변경과 관련 있는지 가려 새 판을 쓴다 */
-	autoUpdate: boolean;
+	/** 무엇이 바뀌면 새 판을 쓸지 — `code`(이슈 완료) · `db:<자료 id>`(DB 구조 변경). 비면 수동이다 */
+	triggers: string[];
 	/** 마지막 자동 갱신 결과 한 줄 */
 	autoLast: string;
 	/** 자동 관리 기록. 오래된 것부터 최근 50건 */
 	autoLog: AutoEntry[];
-	/** 반영 대기 이슈. 자동 갱신을 켜고 판이 있는 산출물만 센다 */
+	/** 반영 대기(이슈 · DB 변경). 트리거가 있고 판이 있는 산출물만 센다 */
 	pending: PendingIssue[];
 	/** 작성법 — 템플릿 · 지난 판에서 뽑은 구성 · 문체 · 표기 규칙 (마크다운) */
 	skill: string;
@@ -632,7 +779,25 @@ export interface Deliverable {
 	nextName: string;
 }
 
-export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir" | "autoUpdate"> & Partial<Pick<Deliverable, "skill" | "vocab" | "format">>;
+/** 산출물 표지. none 이면 화면이 형식 이름을 그린 대체 표지를 보인다. */
+export type Thumb = { kind: "image"; path: string } | { kind: "text"; text: string } | { kind: "none" };
+
+export interface PathKinds {
+	files: string[];
+	folders: string[];
+}
+
+export interface FolderImport {
+	imported: number;
+	skipped: number;
+	failed: number;
+	errors: string[];
+}
+
+export type DeliverablePatch = Pick<Deliverable, "title" | "note" | "guide" | "naming" | "subdir"> & Partial<Pick<Deliverable, "triggers" | "skill" | "vocab" | "format">>;
+
+/** 이 산출물이 자동 관리인가(트리거가 하나라도 있다) */
+export const isAuto = (d: Pick<Deliverable, "triggers">) => (d.triggers ?? []).length > 0;
 
 /** settings 는 settings.json(읽기 전용으로 보인다), folder 는 함께 여는 폴더 한 줄이다. */
 export type ResourceKind = "instructions" | "skill" | "agent" | "command" | "rule" | "settings" | "folder";
@@ -648,8 +813,10 @@ export interface Resource {
 	exists: boolean;
 	files: string[];
 	modified: number;
-	/** docket 실행에서는 실리지 않는다 (전역 CLAUDE.md · 전역 rules) */
+	/** docket 실행에서는 실리지 않는다 (설정의 runExcludes) */
 	excluded?: boolean;
+	/** 「docket 실행에 싣기」로 켜고 끌 수 있으면 ~/.claude 기준 경로. 전역 CLAUDE.md · rules 만 있다. */
+	runKey?: string;
 	/** settings 일 때 그 파일의 권한 규칙 · 훅 */
 	rules?: RuleSet | null;
 }
@@ -666,8 +833,12 @@ export interface TextFile {
 export type RunEvent =
 	| { t: "init"; model: string; sessionId: string }
 	| { t: "text"; text: string }
+	/** 흘러 들어오는 답 글 조각. 실시간 칸에서만 오고, 완성된 text 가 오면 그것으로 바뀐다. */
+	| { t: "delta"; text: string }
+	| { t: "thinking"; text: string }
 	| { t: "tool"; id: string; name: string; summary: string }
-	| { t: "toolDone"; id: string; ok: boolean }
+	| { t: "toolDone"; id: string; ok: boolean; output?: string }
+	| { t: "ask"; requestId: string; tool: string; summary: string; input: unknown; suggest: string[] }
 	| { t: "change"; rel: string; kind: string; added: number; removed: number }
 	| ({ t: "denied"; id: string } & Denial)
 	| { t: "done"; ok: boolean; costUsd: number; durationMs: number; numTurns: number; error: string };

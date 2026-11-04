@@ -96,7 +96,7 @@ const GROUP_LABEL: Record<string, string> = {
 	implement: "구현 · 되돌리기",
 	chat: "대화",
 	document: "산출물",
-	quick: "제목 · 카드 · 판정",
+	quick: "제목 · 카드 · 판정 · 기억",
 	total: "합계",
 };
 

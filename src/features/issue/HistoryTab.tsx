@@ -63,6 +63,32 @@ export function GlossaryTerms({ run }: { run: RunRecord }) {
 	);
 }
 
+const MEMORY_KIND: Record<string, string> = { rule: "지침", fact: "사실", decision: "결정", reference: "참조" };
+
+/** 이 실행의 프롬프트에 붙인 기억 항목. */
+export function MemoryItems({ run }: { run: RunRecord }) {
+	const [open, setOpen] = useState(false);
+	const items = run.memoryItems ?? [];
+	if (items.length === 0) return null;
+	return (
+		<div className="mb-2 border-b border-border pb-2 text-[12px]">
+			<button type="button" onClick={() => setOpen((v) => !v)} className="flex items-center gap-1.5 text-subtle hover:text-foreground">
+				<ChevronRight className={cn("size-3 transition-transform", open && "rotate-90")} />
+				기억 {items.length}
+			</button>
+			{open && (
+				<ul className="mt-1.5 flex flex-col gap-1 pl-4.5 leading-relaxed text-muted-foreground selectable">
+					{items.map((m) => (
+						<li key={m.id}>
+							<span className="text-subtle">{MEMORY_KIND[m.kind] ?? m.kind}</span> {m.text}
+						</li>
+					))}
+				</ul>
+			)}
+		</div>
+	);
+}
+
 /** 이 실행의 프롬프트에 지식베이스가 붙인 구획. 무엇을 근거로 줬는지 나중에 확인한다. */
 export function KbHits({ run }: { run: RunRecord }) {
 	const [open, setOpen] = useState(false);
@@ -149,6 +175,7 @@ function RunRow({ issue, run, defaultOpen }: { issue: Issue; run: RunRecord; def
 				<div className="border-t border-border px-3 py-2">
 					{run.mode && <RunPerms run={run} />}
 					<GlossaryTerms run={run} />
+					<MemoryItems run={run} />
 					<KbHits run={run} />
 					<RunEvents projectId={issue.projectId} target="issue" targetId={issue.id} runId={run.id} live={live} />
 				</div>

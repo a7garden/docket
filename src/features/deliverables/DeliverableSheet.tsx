@@ -11,7 +11,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, ExternalLink, Eye, FolderOpen, GitCompare, Loader2, MoreHorizontal, PenLine, Trash2, Upload, Wand2, X } from "lucide-react";
+import { Check, ExternalLink, Eye, FolderInput, FolderOpen, GitCompare, Loader2, MoreHorizontal, PenLine, Trash2, Upload, Wand2, X } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, ContextActions, DropdownActions, fileActions } from "@/components/ActionMenu";
 import { Chip, SectionTitle } from "@/components/bits";
@@ -40,10 +40,11 @@ import { lastEnded, useMarkSeen } from "@/lib/notices";
 import { useSheetBesideDock } from "@/features/talk/DockPane";
 import { useDeliverables } from "@/lib/queries";
 import { useUi } from "@/lib/store";
-import type { Deliverable, Project, Version } from "@/lib/types";
+import { type Deliverable, isAuto, type Project, type Version } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { FileIcon, GenerateDialog, SOURCE_LABEL } from "./Deliverables";
 import { AutoTab } from "./AutoTab";
+import { MoveShelfDialog } from "./Bookshelf";
 import { RecipeTab } from "./RecipeTab";
 
 export function DeliverableSheet({ project }: { project: Project }) {
@@ -109,7 +110,7 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 
 	const saveMeta = () => {
 		if (title === d.title && note === d.note) return;
-		api.deliverableUpdate(project.id, d.id, { title, note, guide: d.guide, naming: d.naming, subdir: d.subdir, autoUpdate: d.autoUpdate }).catch((e) => toast.error(errorText(e)));
+		api.deliverableUpdate(project.id, d.id, { title, note, guide: d.guide, naming: d.naming, subdir: d.subdir }).catch((e) => toast.error(errorText(e)));
 	};
 
 	return (
@@ -155,7 +156,7 @@ function Detail({ project, d, onClose }: { project: Project; d: Deliverable; onC
 						</TabsTrigger>
 						<TabsTrigger value="auto" className="px-0">
 							자동 관리
-							{d.pending.length > 0 ? <span className="tabular text-brand-text">{d.pending.length}</span> : !d.autoUpdate && <span className="text-subtle">꺼짐</span>}
+							{d.pending.length > 0 ? <span className="tabular text-brand-text">{d.pending.length}</span> : !isAuto(d) && <span className="text-subtle">수동</span>}
 						</TabsTrigger>
 					</TabsList>
 				</div>
@@ -480,7 +481,9 @@ function DiffView({ before, after, from, to }: { before?: string; after?: string
 /** 새 판 올리기 · 저장 폴더 · 지우기와 그 확인 창. 상세 창의 「더 보기」와 목록 줄의 우클릭이 같이 쓴다. */
 export function useDeliverableActions(project: Project, d: Deliverable): { items: ActionList; dialogs: ReactNode } {
 	const [confirm, setConfirm] = useState(false);
+	const [moving, setMoving] = useState(false);
 	const items: ActionList = [
+		{ label: "책장 옮기기", icon: <FolderInput />, disabled: !!d.job || !!d.learn, onSelect: () => setMoving(true) },
 		{
 			label: "새 판 파일 올리기",
 			icon: <Upload />,
@@ -494,6 +497,8 @@ export function useDeliverableActions(project: Project, d: Deliverable): { items
 		{ label: "지우기", icon: <Trash2 />, destructive: true, disabled: !!d.job || !!d.learn, onSelect: () => setConfirm(true) },
 	];
 	const dialogs = (
+		<>
+		<MoveShelfDialog project={project} d={d} open={moving} onOpenChange={setMoving} />
 		<AlertDialog open={confirm} onOpenChange={setConfirm}>
 			<AlertDialogContent className="pop">
 				<AlertDialogHeader>
@@ -523,6 +528,7 @@ export function useDeliverableActions(project: Project, d: Deliverable): { items
 				</AlertDialogFooter>
 			</AlertDialogContent>
 		</AlertDialog>
+		</>
 	);
 	return { items, dialogs };
 }

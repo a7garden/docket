@@ -5,10 +5,14 @@ import { type ActionList, attempt, copy } from "@/components/ActionMenu";
 import { Markdown } from "@/components/Markdown";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
+import { newChatMode } from "@/lib/chatMode";
+import { newId } from "@/lib/format";
+import { useUi } from "@/lib/store";
 import type { PluginMenu } from "@/lib/types";
 
 /**
- * 플러그인이 더한 메뉴 항목과 그 결과. 플러그인 코드는 화면에서 돌지 않는다 — 돌려준 값(알림 · 열기 · 복사 · 마크다운)을 앱이 그린다.
+ * 플러그인이 더한 메뉴 항목과 그 결과. 플러그인 코드는 화면에서 돌지 않는다 — 돌려준 값(알림 · 열기 · 복사 · 마크다운 · 대화 열기)을 앱이 그린다.
+ * 대화 열기는 앱에 든 플러그인만 돌려준다(백엔드 api::reply 가 커뮤니티 것을 거절한다).
  * 마크다운은 앱의 Markdown 으로 그리므로 원시 HTML · 스크립트는 그려지지 않는다.
  */
 
@@ -38,6 +42,19 @@ export async function runPluginMenu(m: PluginMenuItem, ctx: Context) {
 	if (r.open) await api.open(r.open);
 	if (r.markdown) useShown.getState().set({ title: r.title || m.label, markdown: r.markdown, plugin: m.pluginName });
 	if (r.toast) toast(r.toast, { description: m.pluginName });
+	if (r.chat?.text) await startChat(ctx.projectId, r.chat.text);
+}
+
+/**
+ * 그 프로젝트의 새 대화를 만들어 글을 바로 보내고 대화 화면에서 연다. 권한 모드는 다른 새 대화와 같다(newChatMode).
+ * 보낸 뒤에 열어야 빈 대화 시작 화면이 잠깐 비치지 않는다. 대화 목록은 만들기 · 보내기가 내는 사건(docket://issue)이 채운다.
+ */
+async function startChat(projectId: string, text: string) {
+	const talk = await api.talkCreate(projectId, newId());
+	const mode = newChatMode(talk);
+	await api.issueChat(projectId, talk.id, text, mode);
+	useUi.getState().setChatMode(talk.id, mode);
+	useUi.getState().openTarget({ projectId, target: "issue", id: talk.id, talk: true });
 }
 
 /** 메뉴 목록에 끼울 항목. 조건(when)이 맞지 않으면 보이되 누르지 못하게 한다 — 사라지면 왜 없는지 모른다. */

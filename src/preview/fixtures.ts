@@ -1,5 +1,5 @@
 // 미리보기 전용 가짜 데이터. 배포 빌드에는 들어가지 않는다 (preview.html 은 vite build 입력이 아니다).
-import type { AppInfo, Deliverable, DocTools, GlossaryView, Issue, KbHit, KbSection, KbView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Spend, Tokens, Turn, Usage } from "@/lib/types";
+import type { AppInfo, DbSource, DbSourceView, Deliverable, DocTools, GlossaryView, Issue, KbHit, KbSection, KbView, MemoryView, PluginList, Project, Resource, RunEvent, SessionInfo, Settings, Spend, Tokens, Turn, Usage } from "@/lib/types";
 
 const now = Date.now();
 const min = 60_000;
@@ -61,7 +61,7 @@ export const spend: Spend = {
 	total: { group: "total", calls: 266, tokens: { input: 844, output: 262_800, cacheCreate: 1_573_000, cacheRead: 7_050_000 }, costUsd: 12.23 },
 };
 
-export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr", "change-summary", "slack-notify"], pluginGrants: { "change-summary": ["issue:read"], "slack-notify": ["issue:read", "http:hooks.slack.com"] }, kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true, autoUpdateCheck: true, hancomCheck: false, systemNotify: true };
+export const settings: Settings = { claudePath: "", planModel: "", implModel: "", chatModel: "", planEffort: "high", implEffort: "", chatEffort: "", autoPlan: true, autoPlanDelaySec: 60, titleModel: "haiku", titleDelaySec: 5, useMcp: false, theme: "dark", enabledPlugins: ["herdr", "release", "change-summary", "slack-notify"], pluginGrants: { "change-summary": ["issue:read"], "slack-notify": ["issue:read", "http:hooks.slack.com"] }, kbCardModel: "", sendKey: "ctrlEnter", recipeAuto: true, autoUpdateCheck: true, hancomCheck: false, systemNotify: true, runExcludes: ["CLAUDE.md", "rules/**"], quickCaptureKey: "Ctrl+Shift+Space", closeToTray: true };
 
 const KB_OFF = { enabled: false, folders: [], includeDeliverables: true, topK: 8, rerank: false, exclude: [], keep: [] };
 const GL_OFF = { enabled: false, include: [] };
@@ -100,6 +100,20 @@ export const plugins: PluginList = {
 			file: "",
 			dir: "",
 			exePath: "C:\\Users\\me\\.herdr\\bin\\herdr.exe",
+			log: "",
+		},
+		{
+			...pluginBase,
+			id: "release",
+			name: "릴리즈",
+			main: "",
+			core: true,
+			description:
+				"프로젝트 메뉴에 「릴리즈」를 더합니다. 누르면 그 프로젝트의 새 대화를 열어 Claude 가 릴리즈합니다. 처음에는 저장소를 읽어 릴리즈 절차를 .claude/skills/release/SKILL.md 로 적고 보여 준 뒤 실행하고, 다음부터는 /release 로 그 절차를 그대로 돕니다. 권한 모드는 다른 새 대화와 같습니다.",
+			permissions: [],
+			contributes: { ...noContrib, menus: [{ where: "project", command: "release", label: "릴리즈", when: "" }] },
+			file: "",
+			dir: "",
 			log: "",
 		},
 		{
@@ -151,10 +165,40 @@ export const pluginReply = {
 	markdown: ["| 파일 | 꼴 | 어디서 |", "| - | - | - |", "| calc.py | 고침 | 구현 |", "| test_calc.py | 만듦 | 구현 |", "", "2개 파일 · 마지막 구현 2026-10-29 14:20"].join("\n"),
 };
 
+/** DB 자료 하나. 명령은 견본 꼴이다. */
+const DB_SOURCE: DbSource = {
+	id: "dbsrc0001",
+	name: "운영 DB 구조",
+	command: "psql -X -q -A -t -h db.local -p 5432 -U reader -d calc -c \"SELECT concat_ws(E'\\t', c.table_schema, c.table_name, c.column_name, …) FROM information_schema.columns c …\"",
+	cwd: "",
+	columns: ["스키마", "테이블", "컬럼", "순서", "타입", "길이", "NULL 허용", "기본값", "컬럼 설명", "테이블 설명"],
+	keyCols: 3,
+	timeoutSec: 60,
+};
+
+export const dbSources: DbSourceView[] = [
+	{
+		...DB_SOURCE,
+		dir: `${DATA}\\projects\\${P}\\db\\dbsrc0001`,
+		checkedAt: now - 40 * min,
+		error: "",
+		snapshots: [
+			{ id: "2", at: now - 40 * min, rows: 214, added: 2, removed: 0, changed: 1 },
+			{ id: "1", at: now - 2 * 86400_000, rows: 212, added: 0, removed: 0, changed: 0 },
+		],
+		busy: false,
+		usedBy: ["테이블 정의서"],
+	},
+];
+
+export const dbCompare =
+	"## DB 자료 「운영 DB 구조」의 구조 변경\n추가 2 · 바뀜 1.\n\n### 추가된 행\n- public | calc_log | created_at | 5 | timestamp |  | NO | now() | 만든 때 | 계산 기록\n- public | calc_log | unit | 6 | varchar | 20 | YES |  | 단위 | 계산 기록\n\n### 바뀐 행\n- public.calc_log.result — 컬럼 설명: 결과 → 결과(소수 둘째 자리)\n";
+
 export const projects: Project[] = [
-	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, extraDirs: ["D:\\work\\calc-docs"], kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"], exclude: ["이전판"] }, glossary: { enabled: true, include: ["pdoc00000001"] } },
+	{ id: P, name: "calc", path: ROOT, createdAt: now - 3 * 86400_000, nextNumber: 12, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "D:\\work\\calc\\산출물", naming: "{제목}_v{판}_{날짜}", namingUnderscore: true, archiveDir: "이전판", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, extraDirs: ["D:\\work\\calc-docs"], kb: { ...KB_OFF, enabled: true, folders: ["D:\\work\\calc\\docs"], exclude: ["이전판"] }, glossary: { enabled: true, include: ["pdoc00000001"] }, dbSources: [DB_SOURCE] },
 	{ id: "pweb00000001", name: "shop-admin", path: "D:\\work\\shop-admin", createdAt: now - 86400_000, nextNumber: 4, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, kb: KB_OFF, glossary: GL_OFF },
 	{ id: "pdoc00000001", name: "위키 정리", path: "D:\\work\\wiki", createdAt: now - 86400_000, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: ["Bash(git push:*)", "Bash(git commit:*)", "Bash(rm -rf:*)", "Bash(svn commit:*)"], planVcsRead: true, parallelImpl: true, worktree: false, kb: KB_OFF, glossary: GL_OFF },
+	{ id: "parc00000001", name: "옛 관리 화면", path: "D:\\work\\old-admin", createdAt: now - 86400_000 * 90, archivedAt: now - 86400_000 * 13, nextNumber: 1, implMode: "acceptEdits", allowedTools: [], deliverablesDir: "", naming: "", namingUnderscore: true, archiveDir: "", deniedTools: [], planVcsRead: true, parallelImpl: true, worktree: false, kb: KB_OFF, glossary: GL_OFF },
 ];
 
 const base = (id: string, number: number, extra: Partial<Issue>): Issue => {
@@ -437,6 +481,36 @@ export const talks: Issue[] = [
 		dir: `${DATA}\\projects\\${P}\\issues\\t0000000002`,
 	}),
 	base("t0000000001", 0, { talk: true, title: "시험은 어떻게 돌리나요?", titledAt: 0, sessionId: "5c1f7e2a-talk-0001", runs: [talkRun("r-talk-0", now - 26 * 3600_000, "시험은 어떻게 돌리나요?")], updatedAt: now - 26 * 3600_000 }),
+	// 수동 승인으로 도는 대화. 명령 하나를 허락받으려고 기다린다. 지난 차례의 컨텍스트가 62% 찼다.
+	base("t0000000005", 0, {
+		talk: true,
+		title: "시험 돌리고 실패 고치기",
+		sessionId: "5c1f7e2a-talk-0005",
+		model: "sonnet",
+		effort: "high",
+		runs: [
+			{ ...talkRun("r-talk-5a", now - 9 * min, "calc 시험이 어디 있지?"), chatMode: "ask" as const, contextTokens: 124_000, contextWindow: 200_000 },
+			{ ...talkRun("r-talk-5b", now - 1 * min, "시험을 돌려 보고 실패하면 고쳐 줘"), status: "running" as const, endedAt: 0, chatMode: "ask" as const },
+		],
+		run: {
+			kind: "chat",
+			phase: "running",
+			runId: "r-talk-5b",
+			queuedAt: now - 1 * min,
+			asks: [
+				{
+					requestId: "req-1",
+					tool: "Bash",
+					input: { command: "python -m pytest tests/test_calc.py -q", description: "calc 시험 실행" },
+					summary: "calc 시험 실행",
+					suggest: ["Bash(python -m:*)"],
+					at: now - 20_000,
+				},
+			],
+		},
+		updatedAt: now - 1 * min,
+		dir: `${DATA}\\projects\\${P}\\issues\\t0000000005`,
+	}),
 	// 메모 #4 의 대화에서 갈라 낸 대화. 메모는 보드에 그대로 있다.
 	base("t0000000003", 0, {
 		talk: true,
@@ -472,6 +546,14 @@ export const appTalks: Issue[] = [
 export const appProject: Project = { ...projects[0], id: "global", name: "앱", path: DATA, allowedTools: ["Bash(npm run build:*)"], extraDirs: [], kb: KB_OFF, glossary: GL_OFF };
 
 export const liveEvents: Record<string, RunEvent[]> = {
+	t0000000005: [
+		{ t: "init", model: "claude-sonnet-5-5", sessionId: "5c1f7e2a-talk-0005" },
+		{ t: "thinking", text: "먼저 시험 파일을 찾고, pytest 로 돌려 실패를 본다." },
+		{ t: "tool", id: "a", name: "Glob", summary: "tests/**/*.py" },
+		{ t: "toolDone", id: "a", ok: true, output: "tests/test_calc.py\ntests/test_parse.py" },
+		{ t: "text", text: "시험은 `tests/` 아래 두 파일입니다. 돌려 보겠습니다." },
+		{ t: "ask", requestId: "req-1", tool: "Bash", summary: "calc 시험 실행", input: {}, suggest: ["Bash(python -m:*)"] },
+	],
 	i0000000008: [
 		{ t: "init", model: "claude-opus-5-5", sessionId: "s8" },
 		{ t: "tool", id: "a", name: "Glob", summary: "**/*.py" },
@@ -539,7 +621,7 @@ export const deliverables: Deliverable[] = [
 		guide: "다른 팀에 넘기는 API 명세서다. 템플릿 엑셀의 열(함수명 · 인자 · 반환값 · 설명)을 그대로 쓰고, 코드에 없는 함수는 넣지 않는다.",
 		naming: "CALC_{제목}_v{판}_{날짜}",
 		subdir: "API_명세서",
-		autoUpdate: false,
+		triggers: [],
 		autoLast: "",
 		...NO_AUTO,
 		...NO_RECIPE,
@@ -570,7 +652,7 @@ export const deliverables: Deliverable[] = [
 		guide: "",
 		naming: "",
 		subdir: "",
-		autoUpdate: false,
+		triggers: [],
 		autoLast: "",
 		...NO_AUTO,
 		...NO_RECIPE,
@@ -597,8 +679,8 @@ export const deliverables: Deliverable[] = [
 		dir: `${DATA}\\projects\\${P}\\deliverables\\d0000000001`,
 		guide: "README 에 붙일 표. 함수마다 하는 일과 0 을 넣었을 때의 결과를 적는다. 확인하지 못한 것은 확인하지 못했다고 적는다.",
 		naming: "{제목}_{날짜}",
-		subdir: "",
-		autoUpdate: true,
+		subdir: "설계/함수",
+		triggers: ["code"],
 		autoLast: "#9 · v3 갱신",
 		autoLog: [
 			{ at: now - 5 * 3600_000, issueId: "i0000000005", number: 5, verdict: "unrelated", reason: "", version: 0 },
@@ -653,8 +735,8 @@ export const deliverables: Deliverable[] = [
 		dir: `${DATA}\\projects\\${P}\\deliverables\\d0000000003`,
 		guide: "",
 		naming: "",
-		subdir: "",
-		autoUpdate: false,
+		subdir: "화면",
+		triggers: [],
 		autoLast: "",
 		...NO_AUTO,
 		...NO_RECIPE,
@@ -677,17 +759,19 @@ export const deliverables: Deliverable[] = [
 		dir: `${DATA}\\projects\\${P}\\deliverables\\d0000000005`,
 		guide: "",
 		naming: "",
-		subdir: "",
-		autoUpdate: true,
-		autoLast: "#8 · 실패 · 판정 호출이 실패했습니다",
+		subdir: "설계",
+		triggers: ["code", "db:dbsrc0001"],
+		autoLast: "DB 「운영 DB 구조」 · 건너뜀 · 인덱스만 바뀌어 정의서 칸에는 없음",
 		autoLog: [
 			{ at: now - 26 * 3600_000, issueId: "i0000000006", number: 6, verdict: "unrelated", reason: "", version: 0 },
 			{ at: now - 8 * 3600_000, issueId: "i0000000008", number: 8, verdict: "failed", reason: "판정 실패 · 판정 호출이 실패했습니다", version: 0 },
+			{ at: now - 6 * 3600_000, issueId: "", number: 0, verdict: "skipped", reason: "인덱스만 바뀌어 정의서 칸에는 없음", version: 0, source: "db:dbsrc0001", snapshot: "1" },
 		],
 		pending: [
-			{ id: "i0000000008", number: 8, title: "결과 표에 단위 열 추가", doneAt: now - 8 * 3600_000 },
-			{ id: "i0000000010", number: 10, title: "나눗셈 결과를 소수 둘째 자리로", doneAt: now - 5 * 3600_000 },
-			{ id: "i0000000011", number: 11, title: "기록 테이블에 만든 때 열", doneAt: now - 2 * 3600_000 },
+			{ id: "i0000000008", kind: "issue", number: 8, title: "결과 표에 단위 열 추가", doneAt: now - 8 * 3600_000, snapshot: "", base: "", summary: "" },
+			{ id: "i0000000010", kind: "issue", number: 10, title: "나눗셈 결과를 소수 둘째 자리로", doneAt: now - 5 * 3600_000, snapshot: "", base: "", summary: "" },
+			{ id: "i0000000011", kind: "issue", number: 11, title: "기록 테이블에 만든 때 열", doneAt: now - 2 * 3600_000, snapshot: "", base: "", summary: "" },
+			{ id: "db:dbsrc0001", kind: "db", number: 0, title: "운영 DB 구조", doneAt: now - 40 * min, snapshot: "2", base: "1", summary: "추가 2 · 바뀜 1" },
 		],
 		...NO_RECIPE,
 		refs: [],
@@ -720,6 +804,24 @@ export const kb: KbView = {
 	truncated: false,
 	cardModel: "haiku",
 	progress: { running: true, stage: "cards", done: 3, total: 11, message: "" },
+};
+
+export const memory: MemoryView = {
+	enabled: true,
+	glossaryEnabled: false,
+	progress: { running: true, file: "요구사항_v3.docx", done: 1, total: 5, message: "" },
+	entries: [
+		{ id: "m1", kind: "rule", text: "회신 문서는 경어체로 쓴다", status: "pending", source: "요구사항_v3.docx", manual: false, createdAt: now - 5 * min, replaces: "" },
+		{ id: "m2", kind: "rule", text: "날짜는 2026.10.29 꼴로 적는다", status: "active", source: "", manual: true, createdAt: now - 3 * 86400_000, replaces: "" },
+		{ id: "m3", kind: "decision", text: "회신은 접수 후 7일 안에 보낸다", status: "active", source: "요구사항_v3.docx", manual: false, createdAt: now - 5 * min, replaces: "" },
+		{ id: "m4", kind: "fact", text: "0 으로 나누면 오류 대신 None 을 돌려준다", status: "active", source: "계산 규칙.md", manual: false, createdAt: now - 86400_000, replaces: "" },
+		{ id: "m5", kind: "reference", text: "판정 기준 원문은 발주처 공유 폴더에 있다", status: "active", source: "회의록.hwpx", manual: false, createdAt: now - 2 * 86400_000, replaces: "" },
+		{ id: "m6", kind: "decision", text: "회신은 접수 후 5일 안에 보낸다", status: "archived", source: "회의록.hwpx", manual: false, createdAt: now - 2 * 86400_000, replaces: "" },
+	],
+	digests: [
+		{ id: "d1", file: "요구사항_v3.docx", hash: "a", at: now - 5 * min, added: 8, pending: 1, terms: 2, dropped: [{ text: "회의 참석자 명단", reason: "이번 일과 무관" }], costUsd: 0.12, note: "" },
+		{ id: "d2", file: "옛 양식.hwp", hash: "", at: now - 86400_000, added: 0, pending: 0, terms: 0, dropped: [], costUsd: 0, note: "hwp 는 읽지 못합니다" },
+	],
 };
 
 export const kbHits: KbHit[] = [
@@ -756,7 +858,7 @@ export const docTextNext = docText.replace("| `div` | 두 수를 나눈다 | `No
 
 const H = info.claudeHome;
 export const resources: Resource[] = [
-	{ kind: "instructions", scope: "global", name: "CLAUDE.md", description: "", path: `${H}\\CLAUDE.md`, dir: "", exists: true, files: [], modified: now - 3600_000, excluded: true },
+	{ kind: "instructions", scope: "global", name: "CLAUDE.md", description: "", path: `${H}\\CLAUDE.md`, dir: "", exists: true, files: [], modified: now - 3600_000, excluded: true, runKey: "CLAUDE.md" },
 	{ kind: "skill", scope: "global", name: "changelog", description: "바뀐 것을 CHANGELOG 형식으로 정리한다. 「변경 기록 써줘」 요청 때 쓴다.", path: `${H}\\skills\\changelog\\SKILL.md`, dir: `${H}\\skills\\changelog`, exists: true, files: ["SKILL.md", "template.md", "scripts/collect.mjs"], modified: now - 86400_000 },
 	{ kind: "skill", scope: "global", name: "test-plan", description: "고친 코드에 맞춰 확인할 시험 목록을 만든다.", path: `${H}\\skills\\test-plan\\SKILL.md`, dir: `${H}\\skills\\test-plan`, exists: true, files: ["SKILL.md"], modified: now - 2 * 86400_000 },
 	{ kind: "skill", scope: "global", name: "hwpx", description: "한글 HWP/HWPX 파일의 변환 · 읽기 · 편집과 편집 가능한 .hwpx 문서 생성.", path: `${H}\\skills\\hwpx\\SKILL.md`, dir: `${H}\\skills\\hwpx`, exists: true, files: ["SKILL.md"], modified: now - 5 * 86400_000 },

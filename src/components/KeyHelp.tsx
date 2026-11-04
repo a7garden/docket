@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Kbd } from "@/components/ui/kbd";
-import { comboLabel, KEY_GROUPS, type KeyDef, useActiveKeys, useKey } from "@/lib/keys";
+import { COMPOSER_KEYS, comboLabel, KEY_GROUPS, type KeyDef, useActiveKeys, useKey } from "@/lib/keys";
 
 interface Row {
 	label: string;
@@ -64,6 +64,8 @@ export function KeyHelp() {
 				</DialogHeader>
 				{KEY_GROUPS.map((g) => {
 					const rows = rowsOf(defs.filter((d) => d.group === g));
+					// 대화 입력칸이 보이면 그 칸 안의 키를 함께 적는다. 입력칸은 키를 등록하지 않고 스스로 받는다.
+					if (g === "대화" && open && document.querySelector("[data-composer]")) rows.push(...COMPOSER_KEYS);
 					if (!rows.length) return null;
 					return (
 						<section key={g} className="flex flex-col gap-1">

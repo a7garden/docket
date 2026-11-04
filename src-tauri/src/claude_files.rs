@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::RwLock;
 
 use serde::Serialize;
 
@@ -20,17 +21,78 @@ pub fn claude_home() -> PathBuf {
 	}
 }
 
-/// docket 실행이 빼는 전역 자리(~/.claude 기준 glob). runner::run_settings 가 claudeMdExcludes 로 넘기고
-/// 설정 화면이 「docket 실행에서 빠짐」 표시에 쓴다. 한 곳에만 적는다 — 두 곳에 적으면 화면 표시가 실제 실행과 어긋난다.
-pub const RUN_EXCLUDES: &[&str] = &["CLAUDE.md", "rules/**"];
+/// docket 실행이 빼는 전역 자리(~/.claude 기준 glob). 설정의 run_excludes 를 켤 때와 저장할 때 여기 적어 둔다(runner::note_settings).
+/// runner::run_settings 가 claudeMdExcludes 로 넘기고 「Claude 설정」 화면이 「docket 실행에 싣기」 표시에 쓴다.
+/// 한 곳에서만 읽는다 — 두 곳에서 따로 정하면 화면 표시가 실제 실행과 어긋난다.
+static RUN_EXCLUDES: RwLock<Option<Vec<String>>> = RwLock::new(None);
 
-/// docket 실행에서 빠지는 전역 파일인지. RUN_EXCLUDES 의 `x/**` 는 그 폴더 아래 전부, 나머지는 그 파일 하나다.
-pub fn run_excluded(path: &Path) -> bool {
+pub fn set_run_excludes(v: &[String]) {
+	*RUN_EXCLUDES.write().unwrap_or_else(|e| e.into_inner()) = Some(v.to_vec());
+}
+
+pub fn run_excludes() -> Vec<String> {
+	RUN_EXCLUDES.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(crate::model::default_run_excludes)
+}
+
+fn excluded_by(list: &[String], path: &Path) -> bool {
 	let home = claude_home();
-	RUN_EXCLUDES.iter().any(|e| match e.strip_suffix("/**") {
+	list.iter().any(|e| match e.strip_suffix("/**") {
 		Some(dir) => under(path, &home.join(dir)) && norm(path) != norm(&home.join(dir)),
 		None => norm(path) == norm(&home.join(e)),
 	})
+}
+
+/// docket 실행에서 빠지는 전역 파일인지. 목록의 `x/**` 는 그 폴더 아래 전부, 나머지는 그 파일 하나다.
+pub fn run_excluded(path: &Path) -> bool {
+	excluded_by(&run_excludes(), path)
+}
+
+/// 싣고 뺄 수 있는 전역 지침이면 ~/.claude 기준 경로(`CLAUDE.md` · `rules/a.md`). 아니면 빈 글이다.
+/// claudeMdExcludes 가 거르는 것은 CLAUDE.md 와 rules 뿐이라 스킬 · 에이전트 · 명령에는 달지 않는다.
+fn run_key(path: &Path) -> String {
+	let home = claude_home();
+	if norm(path) == norm(&home.join("CLAUDE.md")) {
+		return "CLAUDE.md".into();
+	}
+	let rules = home.join("rules");
+	if under(path, &rules) && norm(path) != norm(&rules) {
+		return path.strip_prefix(&home).map(rel_name).unwrap_or_default();
+	}
+	String::new()
+}
+
+/// key(~/.claude 기준 경로)를 싣거나 빼도록 고친 목록. 폴더째 빼 둔 것(`rules/**`)에서 하나만 실으면
+/// 그 폴더 규칙을 지금 있는 다른 파일 하나하나로 풀어 적는다 — glob 으로는 「하나만 빼고 전부」를 적을 수 없다.
+pub fn with_included(list: &[String], key: &str, include: bool) -> Vec<String> {
+	let key = key.trim().replace('\\', "/");
+	let home = claude_home();
+	let path = home.join(&key);
+	if !include {
+		let mut out = list.to_vec();
+		if !excluded_by(list, &path) {
+			out.push(key);
+		}
+		return out;
+	}
+	let mut out: Vec<String> = Vec::new();
+	for e in list {
+		if *e == key {
+			continue;
+		}
+		match e.strip_suffix("/**") {
+			Some(dir) if under(&path, &home.join(dir)) => {
+				let mut files = Vec::new();
+				walk(&home.join(dir), &home, &mut files, 0);
+				for f in files.iter().map(|f| rel_name(f)).filter(|f| *f != key) {
+					if !out.contains(&f) {
+						out.push(f);
+					}
+				}
+			}
+			_ => out.push(e.clone()),
+		}
+	}
+	out
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,8 +111,10 @@ pub struct Resource {
 	/// 스킬 폴더 안의 다른 파일 (폴더 기준 상대 경로)
 	pub files: Vec<String>,
 	pub modified: i64,
-	/// docket 실행에서는 실리지 않는다(RUN_EXCLUDES)
+	/// docket 실행에서는 실리지 않는다(설정의 run_excludes)
 	pub excluded: bool,
+	/// 「docket 실행에 싣기」로 켜고 끌 수 있으면 ~/.claude 기준 경로. 전역 CLAUDE.md · rules 만 있다.
+	pub run_key: String,
 	/// settings 일 때 그 파일의 권한 규칙 · 훅
 	pub rules: Option<RuleSet>,
 }
@@ -68,6 +132,7 @@ impl Resource {
 			files: Vec::new(),
 			modified: mtime(path),
 			excluded: run_excluded(path),
+			run_key: run_key(path),
 			rules: None,
 		}
 	}
@@ -514,7 +579,30 @@ mod tests {
 		assert_eq!(parents.len(), 2);
 		assert!(!list.iter().any(|r| r.name.ends_with("AGENTS.md")), "AGENTS.md 를 지침으로 보였다");
 		assert!(list.iter().any(|r| r.kind == "folder" && r.scope == "extra"), "함께 여는 폴더가 보이지 않는다");
-		assert!(run_excluded(&claude_home().join("CLAUDE.md")) && run_excluded(&claude_home().join("rules").join("x.md")) && !run_excluded(&claude_home().join("skills").join("x").join("SKILL.md")));
+		let def = crate::model::default_run_excludes();
+		let home = claude_home();
+		assert!(excluded_by(&def, &home.join("CLAUDE.md")) && excluded_by(&def, &home.join("rules").join("x.md")) && !excluded_by(&def, &home.join("skills").join("x").join("SKILL.md")));
 		let _ = fs::remove_dir_all(&a);
+	}
+
+	/// 싣기 · 빼기: 파일 하나를 실으면 그것만 빠지고, 폴더째 빼 둔 규칙에서 하나를 실으면 그 하나만 실린다.
+	#[test]
+	fn include_and_exclude_keys() {
+		let home = claude_home();
+		let def = crate::model::default_run_excludes();
+		let on = with_included(&def, "CLAUDE.md", true);
+		assert!(!excluded_by(&on, &home.join("CLAUDE.md")));
+		assert!(excluded_by(&on, &home.join("rules").join("x.md")), "다른 것까지 실었다");
+		let off = with_included(&on, "CLAUDE.md", false);
+		assert!(excluded_by(&off, &home.join("CLAUDE.md")));
+		// 이미 빠진 것을 또 빼도 목록이 늘지 않는다.
+		assert_eq!(with_included(&off, "CLAUDE.md", false).len(), off.len());
+		let one = with_included(&def, "rules/__docket_probe__.md", true);
+		assert!(!excluded_by(&one, &home.join("rules").join("__docket_probe__.md")));
+		assert!(!one.contains(&"rules/**".to_string()), "폴더째 규칙이 남았다");
+		assert!(excluded_by(&one, &home.join("CLAUDE.md")));
+		assert_eq!(run_key(&home.join("CLAUDE.md")), "CLAUDE.md");
+		assert_eq!(run_key(&home.join("rules").join("a.md")), "rules/a.md");
+		assert_eq!(run_key(&home.join("skills").join("x").join("SKILL.md")), "");
 	}
 }

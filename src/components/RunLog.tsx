@@ -2,8 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
 	BookMarked,
+	Brain,
 	Check,
+	ChevronRight,
 	FilePen,
+	Hand,
 	FileText,
 	Globe,
 	ListChecks,
@@ -79,13 +82,21 @@ export function RunLog({
 	const box = useRef<HTMLOListElement>(null);
 	const stick = useRef(true);
 	const results = new Map<string, boolean>();
-	for (const e of events) if (e.t === "toolDone") results.set(e.id, e.ok);
+	const outputs = new Map<string, string>();
+	for (const e of events)
+		if (e.t === "toolDone") {
+			results.set(e.id, e.ok);
+			if (e.output) outputs.set(e.id, e.output);
+		}
+	// 흘러 오는 글은 길이만 바뀌고 사건 수는 그대로라, 따라 내려갈 때 그 길이도 본다.
+	const tail = events[events.length - 1];
+	const grow = tail?.t === "delta" ? tail.text.length : 0;
 
 	// 실행 중에는 새 줄을 따라 내려간다. 사용자가 위로 올려 읽고 있으면 붙잡지 않는다.
 	useLayoutEffect(() => {
 		const el = box.current?.closest("[data-scroll]") as HTMLElement | null;
 		if (follow && live && el && stick.current) el.scrollTop = el.scrollHeight;
-	}, [events.length, live, follow]);
+	}, [events.length, grow, live, follow]);
 	useEffect(() => {
 		const el = box.current?.closest("[data-scroll]") as HTMLElement | null;
 		if (!follow || !el) return;
@@ -115,16 +126,41 @@ export function RunLog({
 								<Markdown text={e.text} base={base} root={root} className="text-[13px] leading-relaxed text-muted-foreground" />
 							</li>
 						);
+					case "delta":
+						return (
+							<li key={i} className="py-1.5">
+								<Markdown text={e.text} base={base} root={root} className="text-[13px] leading-relaxed text-muted-foreground" />
+							</li>
+						);
+					case "thinking":
+						return (
+							<li key={i}>
+								<Fold label="생각" icon={<Brain className="size-3.5 shrink-0" />}>
+									<div className="text-[12.5px] leading-relaxed whitespace-pre-wrap text-subtle selectable">{e.text}</div>
+								</Fold>
+							</li>
+						);
+					case "ask":
+						return (
+							<li key={i} className="flex min-h-7 items-center gap-2 text-[12.5px] text-subtle">
+								<Hand className="size-3.5 shrink-0" />
+								<span className="shrink-0 font-medium">{e.tool === "AskUserQuestion" ? "되물음" : "허락을 물음"}</span>
+								<span className="mono min-w-0 flex-1 truncate text-[12px]" title={e.summary}>
+									{e.tool === "AskUserQuestion" ? "" : `${toolLabel(e.tool)} ${e.summary}`}
+								</span>
+							</li>
+						);
 					case "tool": {
 						const r = results.get(e.id);
 						const pending = r === undefined;
-						return (
-							<li key={i} className="flex min-h-7 items-center gap-2 text-[12.5px]">
+						const out = outputs.get(e.id);
+						const head = (
+							<>
 								<span className="text-subtle">
 									<ToolIcon name={e.name} />
 								</span>
 								<span className="shrink-0 font-medium text-muted-foreground">{toolLabel(e.name)}</span>
-								<span className="mono min-w-0 flex-1 truncate text-[12px] text-subtle" title={e.summary}>
+								<span className="mono min-w-0 flex-1 truncate text-left text-[12px] text-subtle" title={e.summary}>
 									{e.summary}
 								</span>
 								{pending ? (
@@ -136,6 +172,16 @@ export function RunLog({
 								) : (
 									<X className="size-3.5 text-danger" aria-label="실패" />
 								)}
+							</>
+						);
+						// 결과 글이 있으면 줄을 눌러 펼친다. 터미널처럼 명령 출력 · 읽은 내용을 볼 수 있게 한다.
+						return out ? (
+							<li key={i}>
+								<ToolOutput head={head} output={out} failed={r === false} />
+							</li>
+						) : (
+							<li key={i} className="flex min-h-7 items-center gap-2 text-[12.5px]">
+								{head}
 							</li>
 						);
 					}
@@ -166,6 +212,37 @@ export function RunLog({
 				}
 			})}
 		</ol>
+	);
+}
+
+/** 접힌 채 보이는 덩어리. 생각 블록처럼 길지만 늘 볼 필요는 없는 것을 담는다. */
+function Fold({ label, icon, children }: { label: string; icon: React.ReactNode; children: React.ReactNode }) {
+	const [open, setOpen] = useState(false);
+	return (
+		<div className="flex flex-col">
+			<button type="button" aria-expanded={open} onClick={() => setOpen(!open)} className="flex min-h-7 items-center gap-2 text-left text-[12.5px] text-subtle hover:text-foreground">
+				{icon}
+				<span className="font-medium">{label}</span>
+				<ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} />
+			</button>
+			{open && <div className="mb-1 ml-5.5 border-l border-border pl-3">{children}</div>}
+		</div>
+	);
+}
+
+function ToolOutput({ head, output, failed }: { head: React.ReactNode; output: string; failed: boolean }) {
+	const [open, setOpen] = useState(false);
+	return (
+		<div className="flex flex-col">
+			<button type="button" aria-expanded={open} title={open ? "결과 접기" : "결과 펼치기"} onClick={() => setOpen(!open)} className="flex min-h-7 w-full items-center gap-2 rounded text-[12.5px] hover:bg-hover">
+				{head}
+			</button>
+			{open && (
+				<pre className={cn("mono mb-1 ml-5.5 max-h-72 overflow-auto rounded-md border border-border bg-secondary/40 px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap selectable", failed ? "text-danger/90" : "text-muted-foreground")}>
+					{output}
+				</pre>
+			)}
+		</div>
 	);
 }
 

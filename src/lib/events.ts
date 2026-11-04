@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { qk, upsert } from "./queries";
 import { useLive, useUi } from "./store";
 import { notifyIfAway } from "./systemNotify";
-import { type Deliverable, GLOBAL_PID, type Issue, type KbProgress, type KbView, type RunEnvelope, type Settings, type Usage } from "./types";
+import { type Deliverable, GLOBAL_PID, type Issue, type KbProgress, type KbView, type RunEnvelope, type Settings, TRIGGER_DB, type Usage } from "./types";
 
 /**
  * Rust 가 보내는 사건을 받아 캐시를 고친다. 목록을 다시 불러오지 않고 바뀐 한 건만 끼운다.
@@ -37,8 +37,20 @@ export function useDocketEvents() {
 					? (ui.dock.open && ui.dock.talk?.id === payload.id) ||
 						(ui.view === "talks" && ui.talk?.id === payload.id)
 					: ui.issueId === payload.id;
-				if (!finished) return;
 				const name = payload.talk ? `${payload.projectId === GLOBAL_PID ? "앱 대화" : "대화"} · ${payload.title || "새 대화"}` : `#${payload.number} ${payload.title}`;
+				// Claude 가 허락 · 답을 기다리기 시작했다. 답할 때까지 실행이 멈춰 있으니, 보고 있지 않으면 알린다.
+				const asks = payload.run?.asks ?? [];
+				if (asks.length > (prev?.run?.asks?.length ?? 0)) {
+					const title = `${name} 허락을 기다립니다`;
+					const what = asks[asks.length - 1]?.summary;
+					notifyIfAway(qc.getQueryData<Settings>(qk.settings)?.systemNotify, title, what);
+					if (!open)
+						toast(title, {
+							description: what,
+							action: { label: "열기", onClick: () => useUi.getState().openTarget({ projectId: payload.projectId, target: "issue", id: payload.id, talk: payload.talk }) },
+						});
+				}
+				if (!finished) return;
 				// 계획 · 결과 단계의 이슈에 물은 답도 상태는 그대로라, 상태보다 실행 종류를 먼저 본다.
 				const n = payload.error
 					? { title: `${name} 실패`, description: payload.error.slice(0, 160), error: true }
@@ -72,6 +84,8 @@ export function useDocketEvents() {
 				const key = qk.deliverables(payload.projectId);
 				const prev = qc.getQueryData<Deliverable[]>(key)?.find((x) => x.id === payload.id);
 				qc.setQueryData<Deliverable[]>(key, (old) => upsert(old, payload));
+				// DB 트리거를 건 산출물이 다시 오면 DB 자료를 새로 받았을 수 있다. 연 창이 있을 때만 다시 읽는다.
+				if (payload.triggers?.some((t) => t.startsWith(TRIGGER_DB))) void qc.invalidateQueries({ queryKey: qk.dbSources(payload.projectId) });
 				if (!prev?.job || payload.job) return;
 				const title = payload.error ? `「${payload.title || "문서"}」 작성 실패` : `「${payload.title}」 작성이 끝났습니다`;
 				const description = payload.error ? payload.error.slice(0, 160) : undefined;
@@ -90,6 +104,13 @@ export function useDocketEvents() {
 		pending.push(listen<{ plugin: string; text: string }>("docket://plugin-notice", ({ payload }) => void toast(payload.text, { description: payload.plugin })));
 		pending.push(listen<RunEnvelope>("docket://run", ({ payload }) => useLive.getState().push(payload)));
 		pending.push(listen<Usage>("docket://usage", ({ payload }) => qc.setQueryData(qk.usage, payload)));
+		// 소화 진행은 묶음이 끝날 때 온다. 뽑은 항목 · 넘긴 용어도 함께 바뀌어 다시 읽는다.
+		pending.push(
+			listen<{ projectId: string }>("docket://memory", ({ payload }) => {
+				void qc.invalidateQueries({ queryKey: qk.memory(payload.projectId) });
+				void qc.invalidateQueries({ queryKey: qk.glossary(payload.projectId) });
+			}),
+		);
 		// 색인 진행은 자주 온다. 진행 칸만 바로 고치고, 한 단계가 끝날 때 목록을 다시 읽는다.
 		pending.push(
 			listen<{ projectId: string; progress: KbProgress }>("docket://kb", ({ payload }) => {

@@ -9,6 +9,7 @@
 //!   projects/<pid>/deliverables/<did>/ meta.json · v1/<파일> · runs/<rid>.jsonl
 //!   projects/<pid>/kb/                 지식베이스 · catalog.json · inbox/ · text/ (kb.rs)
 //!   projects/<pid>/glossary.json       어휘 사전 용어 목록 (glossary.rs)
+//!   projects/<pid>/memory.json         기억 항목 · 소화 기록 (memory.rs)
 //!   global/issues/<id>/                   앱 대화 (프로젝트 id 자리에 GLOBAL_PID · global_talk.rs)
 //!   global/project.json · work/ · backup/ 앱 대화의 권한 칸 · 작업 폴더 · 고칠 수 있게 보낸 차례 전의 설정 사본
 //!   trash/<시각>-<이름>/                  지운 것은 여기로 옮긴다
@@ -63,6 +64,11 @@ fn read_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
 }
 
 /// 임시 파일에 쓰고 바꿔 끼운다. 쓰다가 앱이 꺼져도 반쯤 쓴 JSON 이 남지 않는다.
+/// 산출물 meta.json. 옛 「자동 갱신」 스위치를 트리거로 옮겨 읽는다.
+fn read_deliverable(path: &Path) -> Result<Deliverable> {
+	read_json::<Deliverable>(path).map(Deliverable::migrate)
+}
+
 fn write_json<T: Serialize>(path: &Path, v: &T) -> Result<()> {
 	write_atomic(path, &serde_json::to_vec_pretty(v)?)
 }
@@ -114,6 +120,46 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// 같은 이름이 있으면 " (2)" 를 붙인다.
+/// 책장 칸 이름을 `a/b` 꼴로 맞춘다. 폴더 이름이 되므로 산출물 폴더 밖으로 나가거나 파일 이름에 못 쓰는 글자는 거부한다.
+pub fn clean_subdir(raw: &str) -> Result<String> {
+	let mut parts = Vec::new();
+	for c in raw.split(['/', '\\']).map(str::trim).filter(|c| !c.is_empty()) {
+		if safe_file_name(c, "") != c {
+			return msg(format!("폴더 이름으로 쓸 수 없습니다: {c}"));
+		}
+		parts.push(c);
+	}
+	Ok(parts.join("/"))
+}
+
+/// 옮긴다. 다른 드라이브면 복사한 뒤 원본을 지우고, 원본을 못 지우면 복사본을 지워 한 곳에만 남긴다.
+fn move_file(src: &Path, dest: &Path) -> std::io::Result<()> {
+	match fs::rename(src, dest) {
+		Err(e) if e.kind() == ErrorKind::CrossesDevices => {
+			fs::copy(src, dest)?;
+			fs::remove_file(src).inspect_err(|_| {
+				let _ = fs::remove_file(dest);
+			})
+		}
+		r => r,
+	}
+}
+
+fn same_content(a: &Path, b: &Path) -> bool {
+	let size = |p: &Path| fs::metadata(p).map(|m| m.len()).ok();
+	match (size(a), size(b)) {
+		(Some(x), Some(y)) if x == y => matches!((fs::read(a), fs::read(b)), (Ok(x), Ok(y)) if x == y),
+		_ => false,
+	}
+}
+
+/// 폴더 가져오기에서 파일 하나의 결과. 산출물 id 를 함께 준다.
+pub enum FoundImport {
+	Created(String),
+	Updated(String),
+	Skipped,
+}
+
 fn unique_path(dir: &Path, name: &str) -> PathBuf {
 	let first = dir.join(name);
 	if !first.exists() {
@@ -259,6 +305,22 @@ impl Store {
 		read_json(&self.projects_path())
 	}
 
+	/// 보관하지 않은 프로젝트. 자동 작업처럼 보관하면 멈춰야 하는 곳이 쓴다. 끊긴 실행 복구 · 파일 범위는 보관한 것도 다뤄야 해서 projects() 를 쓴다.
+	pub fn active_projects(&self) -> Result<Vec<Project>> {
+		Ok(self.projects()?.into_iter().filter(|p| p.archived_at == 0).collect())
+	}
+
+	/// 보관하거나 되살린다. 프로젝트 폴더와 앱 데이터는 옮기지 않는다.
+	pub fn set_project_archived(&self, id: &str, archived: bool) -> Result<Project> {
+		let _g = self.guard();
+		let mut list: Vec<Project> = read_json(&self.projects_path())?;
+		let p = list.iter_mut().find(|p| p.id == id).ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
+		p.archived_at = if archived { now_ms() } else { 0 };
+		let out = p.clone();
+		write_json(&self.projects_path(), &list)?;
+		Ok(out)
+	}
+
 	/// 앱 대화의 권한 칸(허용 · 막을 명령)만 저장한다. 이름 · 경로는 늘 정해져 있어 두지 않는다.
 	fn global_project_path(&self) -> PathBuf {
 		self.root.join("global").join("project.json")
@@ -304,8 +366,15 @@ impl Store {
 		}
 		let _g = self.guard();
 		let mut list: Vec<Project> = read_json(&self.projects_path())?;
-		if let Some(found) = list.iter().find(|p| same_path(&p.path, path)) {
-			return Ok(found.clone());
+		if let Some(found) = list.iter_mut().find(|p| same_path(&p.path, path)) {
+			// 보관한 폴더를 다시 고르면 되살린다. 그대로 돌려주면 숨은 프로젝트를 골라 화면이 첫 프로젝트로 튕긴다.
+			if found.archived_at == 0 {
+				return Ok(found.clone());
+			}
+			found.archived_at = 0;
+			let out = found.clone();
+			write_json(&self.projects_path(), &list)?;
+			return Ok(out);
 		}
 		let name = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
 		let p = Project { id: short_id(), name, path: path.to_string(), created_at: now_ms(), ..Default::default() };
@@ -365,6 +434,17 @@ impl Store {
 		p.extra_dirs = clean_extra_dirs(&input.extra_dirs, &p.path)?;
 		let out = p.clone();
 		write_json(&self.projects_path(), &list)?;
+		Ok(out)
+	}
+
+	/// DB 자료 목록만 바꾼다. DB 자료 창이 부른다. 빠진 자료의 스냅숏 폴더는 지우지 않는다 — 같은 id 로 되살릴 일은 없지만 기록으로 남긴다.
+	pub fn save_db_sources(&self, pid: &str, list: Vec<DbSource>) -> Result<Project> {
+		let _g = self.guard();
+		let mut all: Vec<Project> = read_json(&self.projects_path())?;
+		let p = all.iter_mut().find(|p| p.id == pid).ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
+		p.db_sources = list;
+		let out = p.clone();
+		write_json(&self.projects_path(), &all)?;
 		Ok(out)
 	}
 
@@ -439,6 +519,33 @@ impl Store {
 		p.glossary = ProjectGlossary { enabled: g.enabled, include };
 		let out = p.clone();
 		write_json(&self.projects_path(), &list)?;
+		Ok(out)
+	}
+
+	/// 기억 켜기만 바꾼다. 항목은 memory.json 에 있다.
+	pub fn save_memory_settings(&self, pid: &str, m: &ProjectMemory) -> Result<Project> {
+		let _g = self.guard();
+		let mut list: Vec<Project> = read_json(&self.projects_path())?;
+		let p = list.iter_mut().find(|p| p.id == pid).ok_or_else(|| Error::Msg("프로젝트를 찾을 수 없습니다".into()))?;
+		p.memory = m.clone();
+		let out = p.clone();
+		write_json(&self.projects_path(), &list)?;
+		Ok(out)
+	}
+
+	/// 기억. 파일이 없으면 비어 있다.
+	pub fn memory(&self, pid: &str) -> MemoryFile {
+		safe_id(pid).ok().and_then(|id| read_json(&self.project_dir(id).join("memory.json")).ok()).unwrap_or_default()
+	}
+
+	/// 소화 순회와 화면이 같은 파일을 고치므로 읽고-고치고-쓰기를 한 줄로 세운다. 오류를 내면 쓰지 않는다.
+	pub fn update_memory<T>(&self, pid: &str, f: impl FnOnce(&mut MemoryFile) -> Result<T>) -> Result<T> {
+		let path = self.project_dir(safe_id(pid)?).join("memory.json");
+		let _g = self.guard();
+		let mut file: MemoryFile = read_json(&path)?;
+		let out = f(&mut file)?;
+		file.updated_at = now_ms().max(file.updated_at + 1);
+		write_json(&path, &file)?;
 		Ok(out)
 	}
 
@@ -918,7 +1025,7 @@ impl Store {
 		if !path.exists() {
 			return msg("산출물을 찾을 수 없습니다");
 		}
-		read_json(&path)
+		read_deliverable(&path)
 	}
 
 	fn write_deliverable(&self, d: &Deliverable) -> Result<()> {
@@ -981,7 +1088,7 @@ impl Store {
 	}
 
 	pub fn dview(&self, d: Deliverable) -> DeliverableView {
-		let done = Self::counts_pending(&d).then(|| self.done_issues(&d.project_id));
+		let done = Self::counts_issues(&d).then(|| self.done_issues(&d.project_id));
 		self.dview_with(d, done.as_deref())
 	}
 
@@ -994,14 +1101,32 @@ impl Store {
 			refs: self.list_refs(&d.project_id, &d.id).into_iter().map(|r| RefFile { template: r.name == d.template, ..r }).collect(),
 			output_dir: self.output_dir(p.as_ref(), &d, n).to_string_lossy().to_string(),
 			next_name: Self::file_name_for(p.as_ref(), &d, n, "md"),
-			pending: done.filter(|_| Self::counts_pending(&d)).map(|done| Self::pending_of(&d, done)).unwrap_or_default(),
+			pending: self.pending_all(p.as_ref(), &d, done),
 			deliverable: d,
 		}
 	}
 
-	/// 자동 갱신을 켜고 판이 하나는 있어야 반영 대기를 센다. 자동 갱신이 도는 조건(kb::auto_update)과 같다.
-	fn counts_pending(d: &Deliverable) -> bool {
-		d.auto_update && !d.versions.is_empty()
+	/// 이슈 반영 대기와 DB 반영 대기를 함께 센다. 트리거로 고른 것만 센다.
+	fn pending_all(&self, p: Option<&Project>, d: &Deliverable, done: Option<&[PendingIssue]>) -> Vec<PendingIssue> {
+		if !d.is_auto() || d.versions.is_empty() {
+			return Vec::new();
+		}
+		let mut out = done.filter(|_| Self::counts_issues(d)).map(|done| Self::pending_of(d, done)).unwrap_or_default();
+		if let Some(p) = p {
+			for sid in d.db_triggers() {
+				if let Some(src) = p.db_sources.iter().find(|s| s.id == sid)
+					&& let Some(x) = crate::dbsrc::pending_for(&crate::dbsrc::source_dir(self, &d.project_id, sid), d, src)
+				{
+					out.push(x);
+				}
+			}
+		}
+		out
+	}
+
+	/// 코드 트리거를 고르고 판이 하나는 있어야 이슈 반영 대기를 센다. 자동 갱신이 도는 조건(kb::auto_update)과 같다.
+	fn counts_issues(d: &Deliverable) -> bool {
+		d.on_code() && !d.versions.is_empty()
 	}
 
 	/// 코드를 고치고 완료된 이슈. 완료 시각은 흐름의 마지막 done 기록이다 — 이슈에 완료 시각 칸이 따로 없다.
@@ -1013,7 +1138,7 @@ impl Store {
 			.filter(|i| !i.talk && i.status == Status::Done && !i.changes.is_empty())
 			.filter_map(|i| {
 				let done_at = i.history.iter().rev().find(|h| h.kind == "done")?.at;
-				Some(PendingIssue { id: i.id, number: i.number, title: i.title, done_at })
+				Some(PendingIssue { id: i.id, kind: "issue".into(), number: i.number, title: i.title, done_at, ..Default::default() })
 			})
 			.collect()
 	}
@@ -1025,7 +1150,7 @@ impl Store {
 		let mut out: Vec<PendingIssue> = done
 			.iter()
 			.filter(|p| {
-				let last = d.auto_log.iter().rev().find(|e| e.issue_id == p.id);
+				let last = d.auto_log.iter().rev().find(|e| e.source.is_empty() && e.issue_id == p.id);
 				match last {
 					Some(e) if e.settled() => false,
 					Some(_) => true,
@@ -1046,9 +1171,9 @@ impl Store {
 		let dir = self.project_dir(safe_id(pid)?).join("deliverables");
 		let mut out = Vec::new();
 		let Ok(rd) = fs::read_dir(&dir) else { return Ok(out) };
-		let list: Vec<Deliverable> = rd.filter_map(|e| e.ok()).filter_map(|e| read_json::<Deliverable>(&e.path().join("meta.json")).ok()).filter(|d| !d.id.is_empty()).collect();
+		let list: Vec<Deliverable> = rd.filter_map(|e| e.ok()).filter_map(|e| read_deliverable(&e.path().join("meta.json")).ok()).filter(|d| !d.id.is_empty()).collect();
 		// 완료 이슈는 셀 산출물이 있을 때만, 한 번만 읽는다.
-		let done = list.iter().any(Self::counts_pending).then(|| self.done_issues(pid));
+		let done = list.iter().any(Self::counts_issues).then(|| self.done_issues(pid));
 		for d in list {
 			out.push(self.dview_with(d, done.as_deref()));
 		}
@@ -1253,6 +1378,111 @@ impl Store {
 		Ok(self.resolve(&d, v))
 	}
 
+	/// 표지를 만들 때 쓴다. 판의 실제 경로와 그 판의 출처.
+	pub fn version_file(&self, pid: &str, did: &str, n: u32) -> Result<(PathBuf, String)> {
+		let d = self.load_deliverable(pid, did)?;
+		let v = d.versions.iter().find(|v| v.n == n).ok_or_else(|| Error::Msg("그 판이 없습니다".into()))?;
+		Ok((self.resolve(&d, v), v.source.clone()))
+	}
+
+	/// 산출물을 다른 책장 칸으로 옮긴다. 산출물 폴더를 정한 프로젝트면 최신 판 파일도 그 칸의 폴더로 옮긴다.
+	/// 지난 판은 그 자리에 둔다 — 경로가 판마다 저장되어 있어 그대로 열리고, 전부 옮기면 실패 지점만 는다.
+	/// 파일을 옮기지 못하거나 저장하지 못하면 칸도 파일도 그대로 둔다. 칸과 폴더가 어긋난 채 남지 않게 하려는 것이다.
+	pub fn move_shelf(&self, pid: &str, did: &str, subdir: &str) -> Result<DeliverableView> {
+		let sub = clean_subdir(subdir)?;
+		let p = self.project(pid).ok();
+		let d = {
+			let _g = self.guard();
+			let mut d = self.load_deliverable(pid, did)?;
+			if d.job.is_some() || d.learn.is_some() {
+				return msg("작성 · 뽑기 중인 산출물은 옮기지 않습니다. 끝난 뒤 옮기세요.");
+			}
+			if d.subdir == sub {
+				drop(_g);
+				return Ok(self.dview(d));
+			}
+			d.subdir = sub;
+			let base = p.as_ref().map(|p| p.deliverables_dir.trim()).filter(|b| !b.is_empty()).map(PathBuf::from);
+			let dest_dir = self.output_dir(p.as_ref(), &d, 0);
+			let mut moved: Option<(PathBuf, PathBuf)> = None;
+			if let (Some(base), Some(v)) = (base, d.versions.last_mut()) {
+				let cur = PathBuf::from(&v.path);
+				// 산출물 폴더 밖(옛 자리의 앱 데이터)에 있는 판은 옮기지 않는다. 칸은 다음 판부터 맞는다.
+				if !v.path.is_empty() && cur.is_file() && cur.starts_with(&base) && cur.parent() != Some(dest_dir.as_path()) {
+					let made_dir = !dest_dir.exists();
+					fs::create_dir_all(&dest_dir)?;
+					let dest = unique_path(&dest_dir, &v.file);
+					if let Err(e) = move_file(&cur, &dest) {
+						if made_dir {
+							let _ = fs::remove_dir(&dest_dir);
+						}
+						return msg(format!("「{}」 파일을 옮기지 못했습니다. 다른 프로그램에서 열어 두었다면 닫고 다시 하세요. ({e})", v.file));
+					}
+					v.file = dest.file_name().unwrap_or_default().to_string_lossy().to_string();
+					v.path = dest.to_string_lossy().to_string();
+					moved = Some((dest, cur));
+				}
+			}
+			d.updated_at = now_ms();
+			if let Err(e) = self.write_deliverable(&d) {
+				if let Some((dest, cur)) = moved {
+					let _ = move_file(&dest, &cur);
+				}
+				return Err(e);
+			}
+			d
+		};
+		Ok(self.dview(d))
+	}
+
+	/// 폴더 가져오기의 파일 하나. 같은 칸 · 같은 제목 · 같은 형식의 산출물이 있으면 그 판으로 다루고, 없으면 새로 만든다.
+	/// 이미 등록된 경로이거나 최신 판과 내용이 같으면 건너뛴다. 산출물 폴더의 제자리에 있는 파일은 복사하지 않는다.
+	pub fn import_found(&self, pid: &str, known: &mut Vec<Deliverable>, file: &Path, cell: &str) -> Result<FoundImport> {
+		let title = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+		let ext = file.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+		let same = known.iter().position(|d| {
+			d.subdir == cell && d.title == title && d.versions.last().is_some_and(|v| Path::new(&v.file).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default() == ext)
+		});
+		let (did, fresh) = match same {
+			Some(i) => {
+				let d = &known[i];
+				if d.job.is_some() {
+					return msg(format!("「{title}」 은 작성 중이라 건너뜁니다"));
+				}
+				let last = d.versions.last().map(|v| self.resolve(d, v));
+				if d.versions.iter().any(|v| Path::new(&v.path) == file) || last.is_some_and(|l| same_content(&l, file)) {
+					return Ok(FoundImport::Skipped);
+				}
+				(d.id.clone(), false)
+			}
+			None => {
+				let d = self.create_deliverable(pid, &title, "")?;
+				let id = d.id.clone();
+				self.update_deliverable(pid, &id, |d| {
+					d.subdir = cell.to_string();
+					Ok(())
+				})?;
+				(id, true)
+			}
+		};
+		let p = self.project(pid).ok();
+		let cur = self.load_deliverable(pid, &did)?;
+		let in_place = p.as_ref().is_some_and(|p| !p.deliverables_dir.trim().is_empty()) && file.parent() == Some(self.output_dir(p.as_ref(), &cur, 0).as_path());
+		let v = if in_place { self.add_version_existing(pid, &did, file, "import", "")? } else { self.add_version_file(pid, &did, file, "import", "")? };
+		match same {
+			Some(i) => known[i] = v.deliverable,
+			None => known.push(v.deliverable),
+		}
+		Ok(if fresh { FoundImport::Created(did) } else { FoundImport::Updated(did) })
+	}
+
+	/// 폴더 가져오기가 중복을 가리려고 프로젝트의 산출물을 한 번만 읽는다.
+	pub fn deliverables_raw(&self, pid: &str) -> Result<Vec<Deliverable>> {
+		let dir = self.project_dir(safe_id(pid)?).join("deliverables");
+		let Ok(rd) = fs::read_dir(&dir) else { return Ok(Vec::new()) };
+		Ok(rd.filter_map(|e| e.ok()).filter_map(|e| read_deliverable(&e.path().join("meta.json")).ok()).filter(|d| !d.id.is_empty()).collect())
+	}
+
 	/// 앱 데이터의 정보 · 템플릿만 휴지통으로 옮긴다. 산출물 폴더에 둔 판 파일은 사용자 파일이라 그대로 둔다.
 	pub fn delete_deliverable(&self, pid: &str, did: &str) -> Result<()> {
 		let d = self.load_deliverable(pid, did)?;
@@ -1364,8 +1594,101 @@ mod tests {
 		assert!(!is_blank_talk(&Issue { from_issue: Some(IssueRef::default()), ..blank() }, &[]));
 	}
 
+	/// 칸 이름은 `a/b` 로 맞추고, 폴더 밖으로 나가는 이름과 못 쓰는 글자는 거부한다.
+	#[test]
+	fn shelf_names_stay_inside() {
+		assert_eq!(clean_subdir(" 요구사항\\중간보고/ ").unwrap(), "요구사항/중간보고");
+		assert_eq!(clean_subdir("").unwrap(), "");
+		for bad in ["..", "a/../b", "C:", "a*b", "a/."] {
+			assert!(clean_subdir(bad).is_err(), "{bad}");
+		}
+	}
+
+	fn shelf_store(name: &str) -> (Store, PathBuf, Project) {
+		let root = std::env::temp_dir().join(format!("docket-shelf-{name}-{}", short_id()));
+		let base = root.join("out");
+		fs::create_dir_all(&base).unwrap();
+		let store = Store { root: root.join("data"), lock: Mutex::new(()), issues: Mutex::default() };
+		let p = Project { id: short_id(), deliverables_dir: base.to_string_lossy().to_string(), ..Default::default() };
+		write_json(&store.projects_path(), &vec![p.clone()]).unwrap();
+		(store, root, p)
+	}
+
+	/// 칸을 옮기면 최신 판만 그 폴더로 가고, 지난 판과 다음 판의 자리가 그에 맞는다.
+	#[test]
+	fn move_shelf_moves_only_the_latest() {
+		let (store, root, p) = shelf_store("move");
+		let d = store.create_deliverable(&p.id, "문서", "").unwrap();
+		let v1 = store.add_version_text(&p.id, &d.id, "하나", "editor", "").unwrap();
+		let v2 = store.add_version_text(&p.id, &d.id, "둘", "editor", "").unwrap();
+		let moved = store.move_shelf(&p.id, &d.id, "요구/중간").unwrap();
+		let vs = &moved.deliverable.versions;
+		assert_eq!(moved.deliverable.subdir, "요구/중간");
+		assert_eq!(vs[0].path, v1.deliverable.versions[0].path);
+		assert!(Path::new(&vs[0].path).is_file());
+		assert!(Path::new(&vs[1].path).starts_with(root.join("out").join("요구").join("중간")));
+		assert!(Path::new(&vs[1].path).is_file());
+		assert!(!Path::new(&v2.deliverable.versions[1].path).exists());
+		let _ = fs::remove_dir_all(root);
+	}
+
+	/// 파일을 옮기지 못하면 칸도 파일도 그대로다.
+	#[test]
+	fn move_shelf_failure_changes_nothing() {
+		let (store, root, p) = shelf_store("fail");
+		let d = store.create_deliverable(&p.id, "문서", "").unwrap();
+		let v = store.add_version_text(&p.id, &d.id, "하나", "editor", "").unwrap();
+		// 칸 자리에 같은 이름의 파일이 있어 폴더를 만들지 못한다.
+		fs::write(root.join("out").join("막힘"), "x").unwrap();
+		assert!(store.move_shelf(&p.id, &d.id, "막힘").is_err());
+		let after = store.get_deliverable(&p.id, &d.id).unwrap().deliverable;
+		assert_eq!(after.subdir, "");
+		assert_eq!(after.versions[0].path, v.deliverable.versions[0].path);
+		assert!(Path::new(&after.versions[0].path).is_file());
+		let _ = fs::remove_dir_all(root);
+	}
+
+	/// 다시 가져와도 늘지 않고, 내용이 바뀌면 새 판이 되며, 제자리 파일은 복사하지 않는다.
+	#[test]
+	fn import_found_dedupes() {
+		let (store, root, p) = shelf_store("import");
+		let src = root.join("받은").join("가.md");
+		fs::create_dir_all(src.parent().unwrap()).unwrap();
+		fs::write(&src, "하나").unwrap();
+		let mut known = Vec::new();
+		assert!(matches!(store.import_found(&p.id, &mut known, &src, "받은").unwrap(), FoundImport::Created(_)));
+		assert!(matches!(store.import_found(&p.id, &mut known, &src, "받은").unwrap(), FoundImport::Skipped));
+		fs::write(&src, "둘둘").unwrap();
+		assert!(matches!(store.import_found(&p.id, &mut known, &src, "받은").unwrap(), FoundImport::Updated(_)));
+		assert_eq!(known.len(), 1);
+		assert_eq!(known[0].versions.len(), 2);
+		assert!(Path::new(&known[0].versions[0].path).starts_with(root.join("out").join("받은")));
+
+		let here = root.join("out").join("칸").join("나.md");
+		fs::create_dir_all(here.parent().unwrap()).unwrap();
+		fs::write(&here, "그대로").unwrap();
+		store.import_found(&p.id, &mut known, &here, "칸").unwrap();
+		assert_eq!(Path::new(&known[1].versions[0].path), here.as_path());
+		assert!(matches!(store.import_found(&p.id, &mut known, &here, "칸").unwrap(), FoundImport::Skipped));
+		let _ = fs::remove_dir_all(root);
+	}
+
 	fn done(id: &str, number: u32, done_at: i64) -> PendingIssue {
-		PendingIssue { id: id.into(), number, title: String::new(), done_at }
+		PendingIssue { id: id.into(), kind: "issue".into(), number, done_at, ..Default::default() }
+	}
+
+	/// 옛 「자동 갱신」 스위치는 코드 트리거로 읽히고, 다시 쓸 때 옛 칸은 남지 않는다. 끈 것은 수동이다.
+	#[test]
+	fn legacy_auto_update_becomes_code_trigger() {
+		let d = serde_json::from_str::<Deliverable>(r#"{"id":"a","autoUpdate":true}"#).unwrap().migrate();
+		assert_eq!(d.triggers, ["code"]);
+		let out = serde_json::to_value(&d).unwrap();
+		assert!(out.get("autoUpdate").is_none(), "옛 칸이 다시 저장됐다: {out}");
+		let d = serde_json::from_str::<Deliverable>(r#"{"id":"a","autoUpdate":false}"#).unwrap().migrate();
+		assert!(!d.is_auto());
+		// 이미 트리거를 정했으면 옛 칸으로 덮지 않는다.
+		let d = serde_json::from_str::<Deliverable>(r#"{"id":"a","autoUpdate":true,"triggers":["db:x"]}"#).unwrap().migrate();
+		assert_eq!(d.triggers, ["db:x"]);
 	}
 
 	fn entry(id: &str, verdict: &str) -> AutoEntry {
@@ -1375,7 +1698,7 @@ mod tests {
 	/// 판 뒤에 끝난 이슈만 반영 대기이고, 반영이 끝난 기록이 있으면 빠지며, 반영하지 못한 기록은 판보다 앞서도 남는다.
 	#[test]
 	fn pending_follows_versions_and_log() {
-		let mut d = Deliverable { auto_update: true, versions: vec![Version { n: 1, added_at: 100, ..Default::default() }], ..Default::default() };
+		let mut d = Deliverable { triggers: vec!["code".into()], versions: vec![Version { n: 1, added_at: 100, ..Default::default() }], ..Default::default() };
 		let all = [done("a", 1, 50), done("b", 2, 150), done("c", 3, 160), done("e", 4, 40)];
 		d.auto_log = vec![entry("c", "unrelated"), entry("e", "busy")];
 		let ids: Vec<String> = Store::pending_of(&d, &all).into_iter().map(|p| p.id).collect();
@@ -1408,6 +1731,39 @@ mod tests {
 
 		let s = migrate_settings(serde_json::from_str(r#"{"model":"opus","implModel":"sonnet"}"#).unwrap());
 		assert_eq!((s.plan_model.as_str(), s.impl_model.as_str()), ("", "sonnet"), "새 칸을 정했는데 옛 값으로 덮었다");
+	}
+
+	/// 보관하면 활성 목록에서만 빠지고 기록과 설정은 남는다. 저장 창이 든 옛 사본이나 옛 JSON 이 상태를 바꾸면 안 되고, 같은 폴더를 다시 고르면 되살아난다.
+	#[test]
+	fn archive_keeps_project_and_comes_back() {
+		let base = std::env::temp_dir().join(format!("docket-store-{}", short_id()));
+		let (home, proj) = (base.join("home"), base.join("proj"));
+		for d in [home.join("projects"), home.join("trash"), proj.clone()] {
+			fs::create_dir_all(d).unwrap();
+		}
+		let store = Store { root: home, lock: Mutex::new(()), issues: Mutex::default() };
+		let p = store.add_project(&proj.to_string_lossy()).unwrap();
+		store.create_issue(&p.id, None, "메모", false, TitleMode::FirstLine, "", "", None).unwrap();
+
+		assert!(store.set_project_archived(&p.id, true).unwrap().archived_at > 0);
+		assert!(store.active_projects().unwrap().is_empty());
+		assert_eq!(store.projects().unwrap().len(), 1);
+		assert_eq!(store.list_issues(&p.id).unwrap().len(), 1, "보관이 기록을 건드렸다");
+
+		// 보관 전에 연 설정 창의 사본(archived_at 0)으로 저장해도 보관이 풀리면 안 된다.
+		assert!(store.save_project(&p).unwrap().archived_at > 0);
+
+		assert_eq!(store.set_project_archived(&p.id, false).unwrap().archived_at, 0);
+		assert_eq!(store.active_projects().unwrap().len(), 1);
+
+		store.set_project_archived(&p.id, true).unwrap();
+		let again = store.add_project(&proj.to_string_lossy()).unwrap();
+		assert_eq!((again.id.as_str(), again.archived_at), (p.id.as_str(), 0));
+		assert_eq!(store.active_projects().unwrap().len(), 1);
+
+		let old: Project = serde_json::from_str(r#"{"id":"옛것","name":"옛 프로젝트"}"#).unwrap();
+		assert_eq!(old.archived_at, 0);
+		let _ = fs::remove_dir_all(base);
 	}
 
 	/// 산출물 폴더 · 이름 규칙 · 지난 판 옮기기 · 템플릿 넣기를 한 번에 본다. 프로젝트 폴더에는 아무것도 생기면 안 된다.

@@ -1,6 +1,5 @@
-import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { FolderPlus } from "lucide-react";
 import { CommandPalette } from "@/components/CommandPalette";
 import { KeyBadges } from "@/components/KeyBadges";
@@ -22,9 +21,11 @@ import { useDocketEvents } from "@/lib/events";
 import { useKey } from "@/lib/keys";
 import { useDockLayout } from "@/lib/layout";
 import { focusInput, stepRegion } from "@/lib/regions";
+import { useTheme } from "@/lib/theme";
 import { useUpdater } from "@/lib/updater";
 import { useAppInfo, useProjects, useSettings } from "@/lib/queries";
-import { useUi, type View } from "@/lib/store";
+import { type TalkRef, useUi, type View } from "@/lib/store";
+import { GLOBAL_PID } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // 첫 화면(보드 · 대화) 밖의 화면은 따로 묶어 늦게 불러온다. 첫 화면이 그려진 뒤 한가할 때 미리 받아 두므로 처음 열 때도 거의 기다리지 않는다.
@@ -34,11 +35,13 @@ const screens = {
 	Deliverables: () => import("@/features/deliverables/Deliverables").then((m) => ({ default: m.Deliverables })),
 	Glossary: () => import("@/features/glossary/Glossary").then((m) => ({ default: m.Glossary })),
 	Knowledge: () => import("@/features/knowledge/Knowledge").then((m) => ({ default: m.Knowledge })),
+	Memory: () => import("@/features/memory/Memory").then((m) => ({ default: m.Memory })),
 };
 const ClaudeConfig = lazy(screens.ClaudeConfig);
 const Deliverables = lazy(screens.Deliverables);
 const Glossary = lazy(screens.Glossary);
 const Knowledge = lazy(screens.Knowledge);
+const Memory = lazy(screens.Memory);
 
 function preloadScreens() {
 	const go = () => Object.values(screens).forEach((load) => void load().catch(() => {}));
@@ -49,38 +52,6 @@ function preloadScreens() {
 /** 늦게 불러오는 화면 자리. 받는 동안은 비워 둔다 — 대개 한 순간이라 도는 표시가 더 거슬린다. */
 function Later({ children }: { children: ReactNode }) {
 	return <Suspense fallback={null}>{children}</Suspense>;
-}
-
-/** index.html 이 첫 화면 전에 읽는 키다. */
-const THEME_KEY = "docket.theme";
-/** --background 를 sRGB 로 옮긴 값. 창 크기를 바꿀 때 화면보다 먼저 드러나는 창 바탕이다. lib.rs 의 시작 색과 같다. */
-const WINDOW_BG = { dark: "#161616", light: "#f7f7f7" };
-
-/** 설정의 테마를 html 의 dark 클래스로 옮기고, 실제로 입힌 쪽을 돌려준다. 「시스템」이면 OS 설정이 바뀌는 대로 따라간다. */
-function useTheme(theme: string | undefined): "dark" | "light" {
-	const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
-	useEffect(() => {
-		// 설정이 오기 전에는 index.html 이 입힌 지난번 테마를 그대로 둔다.
-		if (theme === undefined) return;
-		try {
-			localStorage.setItem(THEME_KEY, theme);
-		} catch {
-			// 저장소를 못 쓰면 다음에 켤 때 한 번 번쩍일 뿐이다.
-		}
-		const mq = window.matchMedia("(prefers-color-scheme: dark)");
-		const apply = () => {
-			const d = theme === "dark" || (theme === "system" && mq.matches);
-			document.documentElement.classList.toggle("dark", d);
-			setDark(d);
-			getCurrentWindow()
-				.setBackgroundColor(d ? WINDOW_BG.dark : WINDOW_BG.light)
-				.catch(() => {});
-		};
-		apply();
-		mq.addEventListener("change", apply);
-		return () => mq.removeEventListener("change", apply);
-	}, [theme]);
-	return dark ? "dark" : "light";
 }
 
 /** 어디서나 쓰는 화면 전환 키. 입력칸 안에서도 받는다 — Ctrl 조합이라 글자를 먹지 않는다. */
@@ -133,7 +104,18 @@ export default function App() {
 		if (projects && !project && projects.length) setProject(projects[0].id);
 	}, [projects, project, setProject]);
 
-	const projectView = view === "board" || view === "deliverables" || view === "knowledge" || view === "glossary";
+	// 보관 · 제외로 목록에서 빠진 프로젝트의 대화를 닫는다. 옆 칸 대화는 저장돼 있어 다시 켤 때도 여기서 걸러진다.
+	const projectIds = projects?.map((p) => p.id).join(" ");
+	useEffect(() => {
+		if (projectIds === undefined) return;
+		const ids = new Set(projectIds.split(" "));
+		const gone = (t: TalkRef | null) => !!t && t.projectId !== GLOBAL_PID && !ids.has(t.projectId);
+		const ui = useUi.getState();
+		if (gone(ui.talk)) ui.openTalk(null);
+		if (gone(ui.dock.talk)) ui.setDock({ open: false, talk: null });
+	}, [projectIds]);
+
+	const projectView = view === "board" || view === "deliverables" || view === "knowledge" || view === "glossary" || view === "memory";
 	const dock = useUi((s) => s.dock.side);
 	const { rail } = useDockLayout();
 	return (
@@ -147,12 +129,14 @@ export default function App() {
 				<Sidebar rail={rail} />
 				{/* 사이드바는 늘 맨 왼쪽이다. 옆 칸 대화는 본문의 오른쪽 또는 왼쪽 칸이고, 좌우를 바꾸면 이 줄의 순서만 뒤집는다. */}
 				<div className={cn("flex min-w-0 flex-1", dock === "left" && "flex-row-reverse")}>
-					<main data-region="main" className="flex min-w-0 flex-1 flex-col gap-5 px-6 pt-5 pb-4">
+					{/* 대화 화면은 칸을 가장자리까지 채워 스스로 경계선을 긋는다. 나머지 화면은 같은 여백을 나눠 쓴다. */}
+					<main data-region="main" className={cn("flex min-w-0 flex-1 flex-col", view !== "talks" && "gap-3 px-6 pt-3 pb-4")}>
 						{view === "talks" ? (
 							<AllTalks />
 						) : view === "claude" ? (
 							<>
-								<h1 className="text-[18px] font-semibold tracking-[-0.02em]">Claude 설정</h1>
+								{/* 지금 화면은 사이드바 강조로 알 수 있다. 화면 이름은 스크린 리더에만 남긴다. */}
+								<h1 className="sr-only">Claude 설정</h1>
 								<Later>
 									<ClaudeConfig />
 								</Later>
@@ -173,6 +157,8 @@ export default function App() {
 											<Knowledge project={project} />
 										) : view === "glossary" ? (
 											<Glossary project={project} />
+										) : view === "memory" ? (
+											<Memory project={project} />
 										) : (
 											<Deliverables project={project} />
 										)}

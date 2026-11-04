@@ -1,0 +1,13 @@
+{
+	"$schema": "../gen/schemas/desktop-schema.json",
+	"identifier": "quick",
+	"description": "빠른 메모 창 권한. 메모를 적고 첨부를 고르고 창을 숨기는 데까지만 연다",
+	"windows": ["quick"],
+	"permissions": [
+		"core:default",
+		"core:window:allow-start-dragging",
+		"core:window:allow-hide",
+		"core:window:allow-set-background-color",
+		"dialog:default"
+	]
+}

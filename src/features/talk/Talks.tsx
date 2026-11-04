@@ -147,7 +147,7 @@ export function TalkPane({ talk, projectPath, compact = false }: { talk: Issue; 
 	return (
 		<>
 			{!compact && (
-				<header className="flex items-center gap-2 border-b border-border px-6 py-2.5">
+				<header className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-6">
 					<TalkTitle talk={talk} />
 					<TalkTag talk={talk} />
 					<FromIssue talk={talk} />

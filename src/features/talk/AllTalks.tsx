@@ -60,11 +60,15 @@ export function AllTalks() {
 
 	return (
 		<>
-			<h1 className="text-[18px] font-semibold tracking-[-0.02em]">대화</h1>
-			<div className="flex min-h-0 flex-1 gap-4">
-				<aside className="flex w-60 shrink-0 flex-col gap-2">
-					<NewTalk projects={projects} target={target} targetName={targetName} onCreate={create} />
-					<nav {...rove} className="-mr-1 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+			{/* 지금 화면은 사이드바 강조로 알 수 있다. 화면 이름은 스크린 리더에만 남긴다. */}
+			<h1 className="sr-only">대화</h1>
+			<div className="flex min-h-0 flex-1">
+				<aside className="flex w-60 shrink-0 flex-col border-r border-border">
+					{/* 옆 칸 · 대화 머리와 같은 높이다. 가로선이 한 줄로 이어진다. */}
+					<div className="flex h-10 shrink-0 items-center border-b border-border px-2">
+						<NewTalk projects={projects} target={target} targetName={targetName} onCreate={create} />
+					</div>
+					<nav {...rove} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2">
 						<TalkGroup groupKey={GLOBAL_PID} label="앱" hint="어느 프로젝트에도 묶이지 않고 이 앱의 플러그인 · 설정 · 기록을 다루는 대화" talks={appTalks} sel={sel} />
 						{byProject
 							.filter((g) => g.talks.length > 0)
@@ -74,7 +78,7 @@ export function AllTalks() {
 					</nav>
 				</aside>
 
-				<section className="surface flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md">
+				<section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-card">
 					{talk && <TalkSlot key={talk.id} talk={talk} projectPath={pathOf(talk.projectId)} />}
 				</section>
 			</div>
@@ -85,14 +89,14 @@ export function AllTalks() {
 /** 본체는 지금 보는 대화와 같은 자리에 만들고, ▾ 에서 다른 자리를 고른다. 대화가 없는 프로젝트도 여기서 시작한다. */
 function NewTalk({ projects, target, targetName, onCreate }: { projects: Project[]; target: string; targetName: string; onCreate: (pid: string) => void }) {
 	return (
-		<div className="flex">
-			<Button variant="outline" title={`${targetName}에 새 대화 만들기`} className="min-w-0 flex-1 rounded-r-none" onClick={() => onCreate(target)}>
+		<div className="flex min-w-0 flex-1">
+			<Button size="sm" variant="outline" title={`${targetName}에 새 대화 만들기`} className="min-w-0 flex-1 rounded-r-none" onClick={() => onCreate(target)}>
 				<MessageSquarePlus />새 대화
 				<span className="min-w-0 truncate font-normal text-subtle">{targetName}</span>
 			</Button>
 			<DropdownMenu>
 				<DropdownMenuTrigger asChild>
-					<Button variant="outline" size="icon" aria-label="어디에 새 대화를 만들지 고르기" className="-ml-px rounded-l-none">
+					<Button variant="outline" size="icon-sm" aria-label="어디에 새 대화를 만들지 고르기" className="-ml-px rounded-l-none">
 						<ChevronDown />
 					</Button>
 				</DropdownMenuTrigger>

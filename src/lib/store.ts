@@ -4,7 +4,7 @@ import type { Draft } from "@/features/issue/ChatTab";
 import { newId } from "./format";
 import type { ChatMode, RunEnvelope, RunEvent } from "./types";
 
-export type View = "board" | "deliverables" | "talks" | "knowledge" | "glossary" | "claude" | "settings";
+export type View = "board" | "deliverables" | "talks" | "knowledge" | "glossary" | "memory" | "claude" | "settings";
 
 /** 대화 하나를 가리키는 칸. 앱 대화는 projectId 가 GLOBAL_PID 다. */
 export interface TalkRef {
@@ -32,6 +32,12 @@ interface Ui {
 	deliverableId: string | null;
 	/** 산출물을 열 때 먼저 보일 탭. 상세 창이 읽고 비운다. 실행 목록에서 작성법 뽑기를 누르면 「만드는 법」으로 연다. */
 	deliverableTab: "versions" | "recipe" | "auto" | null;
+	/** 산출물 화면의 보기. 앱을 다시 켜도 남는다. */
+	deliverableLayout: "shelf" | "list";
+	/** 접은 책장 칸. 키는 `프로젝트 id:칸 경로`. 앱을 다시 켜도 남는다. */
+	shelfFolded: Record<string, boolean>;
+	setDeliverableLayout: (l: "shelf" | "list") => void;
+	setShelfFold: (key: string, folded: boolean) => void;
 	/** 「대화」 화면에서 연 대화. 앱 대화 · 다른 프로젝트 대화를 열어도 사이드바의 현재 프로젝트는 그대로 둔다. */
 	talk: TalkRef | null;
 	/** 「대화」 화면에서 접고 편 묶음(앱 · 프로젝트 id). 값이 없으면 묶음마다 기본값을 따른다. 앱을 끌 때까지만 기억한다. */
@@ -98,6 +104,16 @@ export const useUi = create<Ui>()(
 			issueId: null,
 			deliverableId: null,
 			deliverableTab: null,
+			deliverableLayout: "shelf",
+			shelfFolded: {},
+			setDeliverableLayout: (deliverableLayout) => set({ deliverableLayout }),
+			setShelfFold: (key, folded) =>
+				set((s) => {
+					const shelfFolded = { ...s.shelfFolded };
+					if (folded) shelfFolded[key] = true;
+					else delete shelfFolded[key];
+					return { shelfFolded };
+				}),
 			talk: null,
 			talkFolded: {},
 			dock: { open: false, side: "right", width: DOCK_WIDTH.start, talk: null },
@@ -153,7 +169,7 @@ export const useUi = create<Ui>()(
 		// 옆 칸(열림 · 좌우 · 폭 · 띄운 대화)도 되살린다. 띄워 두고 쓰는 칸이라 다시 켤 때마다 다시 띄우게 하지 않는다.
 		{
 			name: "docket-ui",
-			partialize: (s) => ({ projectId: s.projectId, view: s.view, claudeProjectId: s.claudeProjectId, dock: s.dock, chatModes: s.chatModes, lastChatMode: s.lastChatMode }),
+			partialize: (s) => ({ projectId: s.projectId, view: s.view, claudeProjectId: s.claudeProjectId, dock: s.dock, chatModes: s.chatModes, lastChatMode: s.lastChatMode, deliverableLayout: s.deliverableLayout, shelfFolded: s.shelfFolded }),
 			// 0.2.7 전에는 「대화」 화면을 allTalks 로 저장했다.
 			merge: (saved, cur) => {
 				const s = saved as Partial<Ui> | undefined;
@@ -227,7 +243,17 @@ export const useLive = create<Live>()((set) => ({
 			let activity = cur.activity;
 			if (ev.t === "tool") activity = [toolLabel(ev.name), ev.summary].filter(Boolean).join("  ");
 			else if (ev.t === "text") activity = ev.text.split("\n")[0].slice(0, 120);
-			const events = cur.events.length > 800 ? cur.events.slice(-600) : cur.events;
+			else if (ev.t === "delta") activity = "답을 쓰는 중";
+			else if (ev.t === "thinking") activity = "생각하는 중";
+			else if (ev.t === "ask") activity = "허락을 기다리는 중";
+			let events = cur.events.length > 800 ? cur.events.slice(-600) : cur.events;
+			const last = events[events.length - 1];
+			// 흘러 오는 글은 마지막 조각 칸 하나에 이어 붙인다. 다른 사건이 오면 그 칸은 걷어 낸다 — 같은 글이 완성된 text 로 다시 온다.
+			if (ev.t === "delta") {
+				const next: RunEvent = last?.t === "delta" ? { t: "delta", text: last.text + ev.text } : ev;
+				return { byTarget: { ...s.byTarget, [k]: { runId: env.runId, events: last?.t === "delta" ? [...events.slice(0, -1), next] : [...events, next], activity } } };
+			}
+			if (last?.t === "delta") events = events.slice(0, -1);
 			return { byTarget: { ...s.byTarget, [k]: { runId: env.runId, events: [...events, ev], activity } } };
 		}),
 }));

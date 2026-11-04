@@ -121,9 +121,19 @@ pub struct Reply {
 	pub markdown: String,
 	/// 창의 제목
 	pub title: String,
+	/// 그 프로젝트의 새 대화를 열고 보낼 글. 코어 플러그인만 쓴다 — 아무 플러그인이나 Claude 에게 일을 시키면
+	/// 권한 판단이 앱 밖으로 샌다. 권한 모드는 싣지 않는다. 화면이 다른 새 대화와 같은 규칙으로 고른다.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub chat: Option<ChatReply>,
 }
 
-/// 플러그인이 낸 글을 Reply 로 읽는다. 빈 글이면 할 일이 없다는 뜻이다.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatReply {
+	pub text: String,
+}
+
+/// 플러그인이 낸 글을 Reply 로 읽는다. 빈 글이면 할 일이 없다는 뜻이다. wasm 플러그인(커뮤니티)이 낸 것만 여기를 지난다.
 pub fn reply(out: &str, grants: &[String]) -> Result<Reply, String> {
 	if out.trim().is_empty() {
 		return Ok(Reply::default());
@@ -131,6 +141,9 @@ pub fn reply(out: &str, grants: &[String]) -> Result<Reply, String> {
 	let r: Reply = serde_json::from_str(out).map_err(|e| format!("돌려준 값을 읽지 못했습니다: {e}"))?;
 	if !r.open.is_empty() && !grants.iter().any(|g| g == "open") {
 		return Err("열기(open) 권한 없이 open 을 돌려주었습니다".into());
+	}
+	if r.chat.is_some() {
+		return Err("대화 열기(chat) 는 앱에 든 플러그인만 돌려줄 수 있습니다".into());
 	}
 	Ok(r)
 }
@@ -315,5 +328,12 @@ mod tests {
 		assert!(reply(r#"{"open":"C:\\x"}"#, &[]).is_err());
 		assert_eq!(reply(r#"{"open":"C:\\x"}"#, &["open".to_string()]).unwrap().open, r"C:\x");
 		assert!(reply("not json", &[]).is_err());
+	}
+
+	#[test]
+	fn community_plugin_cannot_open_chat() {
+		let err = reply(r#"{"chat":{"text":"rm -rf"}}"#, &["open".to_string(), "issue:read".to_string()]).unwrap_err();
+		assert!(err.contains("chat"), "{err}");
+		assert!(reply(r#"{"toast":"x"}"#, &[]).unwrap().chat.is_none());
 	}
 }

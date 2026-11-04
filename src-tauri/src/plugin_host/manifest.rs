@@ -116,6 +116,15 @@ pub fn allows_process(perms: &[String], exe: &str) -> bool {
 
 /// 쓸 수 없게 하는 문제. 비면 쓸 수 있다. `has_main` 은 main 의 파일이 실제로 있는지(설치 전이면 꾸러미 안에 있는지)다.
 pub fn check(m: &Manifest, has_main: bool, terminal_exe_found: bool, seen: &mut HashSet<String>) -> String {
+	check_with(m, has_main, terminal_exe_found, seen, false)
+}
+
+/// 코어 플러그인의 검사. 메뉴를 앱이 직접 답하므로(core::command) 코드(main) 없이 메뉴를 둘 수 있다. 나머지 검사는 같다.
+pub fn check_core(m: &Manifest, terminal_exe_found: bool, seen: &mut HashSet<String>) -> String {
+	check_with(m, false, terminal_exe_found, seen, true)
+}
+
+fn check_with(m: &Manifest, has_main: bool, terminal_exe_found: bool, seen: &mut HashSet<String>, builtin: bool) -> String {
 	if safe_id(&m.id).is_err() {
 		return format!("id 는 영문 · 숫자 · - · _ 로 씁니다: {}", m.id);
 	}
@@ -164,7 +173,7 @@ pub fn check(m: &Manifest, has_main: bool, terminal_exe_found: bool, seen: &mut 
 	if !m.main.is_empty() && !plain_file_name(&m.main) {
 		return format!("main 은 플러그인 폴더 안의 파일 이름만 적습니다: {}", m.main);
 	}
-	if m.needs_code() && m.main.is_empty() {
+	if m.needs_code() && m.main.is_empty() && !builtin {
 		return "메뉴 · 사건을 쓰려면 main 에 .wasm 파일을 적습니다".into();
 	}
 	if !m.main.is_empty() && !has_main {
@@ -255,6 +264,11 @@ mod tests {
 		assert!(bad(&|m| m.contributes.events.push("tick".into())).contains("모르는 사건"));
 		assert!(bad(&|m| m.main = "..\\x.wasm".into()).contains("파일 이름만"));
 		assert!(bad(&|m| m.main.clear()).contains("main 에 .wasm"));
+		let mut no_code = menu_plugin();
+		no_code.main.clear();
+		assert_eq!(check_core(&no_code, false, &mut HashSet::new()), "", "코어는 코드 없이 메뉴를 둔다");
+		no_code.contributes.menus[0].place = "board".into();
+		assert!(check_core(&no_code, false, &mut HashSet::new()).contains("where"), "코어도 메뉴 검사는 받는다");
 		assert!(bad(&|m| m.contributes.menus.clear()).contains("기여하는 것이 없습니다"));
 	}
 

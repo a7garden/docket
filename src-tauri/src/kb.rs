@@ -52,7 +52,7 @@ use crate::store::{Store, same_path, write_atomic};
 /// 한 번에 훑는 파일 수. 넘으면 나머지는 넣지 않고 화면에 알린다. 큰 폴더(저장소 전체 등)를 잘못 골랐을 때 색인이 끝나지 않는 것을 막는다.
 const MAX_FILES: usize = 5000;
 /// 이보다 큰 파일은 넣지 않는다.
-const MAX_BYTES: u64 = 20 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 20 * 1024 * 1024;
 /// 구획 크기(바이트). 빈 줄에서 SOFT 를 넘으면 끊고, 빈 줄이 없어도 HARD 에서 끊는다. 한글은 한 글자가 3바이트다.
 const SECTION_SOFT: usize = 4_500;
 const SECTION_HARD: usize = 9_000;
@@ -130,18 +130,18 @@ fn save_catalog(dir: &Path, c: &Catalog) -> Result<()> {
 	write_atomic(&dir.join("catalog.json"), &serde_json::to_vec(c)?)
 }
 
-fn hash_of(s: &str) -> String {
+pub(crate) fn hash_of(s: &str) -> String {
 	let mut h = std::collections::hash_map::DefaultHasher::new();
 	s.hash(&mut h);
 	format!("{:016x}", h.finish())
 }
 
-fn file_name(path: &str) -> String {
+pub(crate) fn file_name(path: &str) -> String {
 	Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string())
 }
 
 /// 프롬프트에 넣을 앞부분. 글자 경계에서 자른다.
-fn clip_bytes(s: &str, max: usize) -> &str {
+pub(crate) fn clip_bytes(s: &str, max: usize) -> &str {
 	if s.len() <= max {
 		return s;
 	}
@@ -184,12 +184,12 @@ struct Found {
 }
 
 /// 버전 관리 · 빌드 산출 폴더는 문서가 아니다.
-fn skip_dir(name: &str) -> bool {
+pub fn skip_dir(name: &str) -> bool {
 	name.starts_with('.') || matches!(name, "node_modules" | "target" | "__pycache__")
 }
 
 /// 이름만 보고 비밀일 수 있는 파일을 뺀다. 카드를 만들 때 내용이 Claude 로 나가서다.
-fn secret_name(name: &str) -> bool {
+pub fn secret_name(name: &str) -> bool {
 	let n = name.to_lowercase();
 	n.starts_with(".env")
 		|| n.contains("secret")
@@ -225,6 +225,13 @@ fn walk(root: &Path, source: &'static str, out: &mut Vec<Found>) -> bool {
 		}
 	}
 	false
+}
+
+/// 폴더 아래 파일을 훑기와 같은 규칙으로 모은다. 기억에 폴더를 끌어 놓을 때 쓴다.
+pub(crate) fn files_under(root: &Path) -> Vec<PathBuf> {
+	let mut found = Vec::new();
+	walk(root, "inbox", &mut found);
+	found.into_iter().map(|f| f.path).collect()
 }
 
 /// 제외 목록에 걸리는지. 전체 경로는 그 파일이거나 그 아래, 이름 조각은 훑기 시작한 폴더 안쪽의 폴더 · 파일 이름에만 맞춘다 —
@@ -351,7 +358,7 @@ fn older_versions(paths: &[&Path]) -> HashMap<usize, String> {
 }
 
 /// 제목 줄(# …)에서 끊고, 길면 빈 줄에서, 그래도 길면 줄 머리에서 끊는다. 뽑은 엑셀 · 슬라이드는 「## 시트」 · 「## 슬라이드」가 제목 줄이다.
-fn split_sections(text: &str) -> Vec<(String, usize, usize)> {
+pub(crate) fn split_sections(text: &str) -> Vec<(String, usize, usize)> {
 	let mut out = Vec::new();
 	let (mut heading, mut start, mut pos) = (String::new(), 0usize, 0usize);
 	for line in text.split_inclusive('\n') {
@@ -814,7 +821,7 @@ pub fn touch(app: &AppHandle, pid: &str) {
 }
 
 fn enqueue_enabled(app: &AppHandle) {
-	for p in app.state::<Store>().projects().unwrap_or_default().into_iter().filter(|p| p.kb.enabled) {
+	for p in app.state::<Store>().active_projects().unwrap_or_default().into_iter().filter(|p| p.kb.enabled) {
 		app.state::<Kb>().request(&p.id);
 	}
 }
@@ -856,7 +863,8 @@ pub fn spawn_indexer(app: AppHandle) {
 async fn index_project(app: &AppHandle, pid: &str, stop: &AtomicBool) -> Result<()> {
 	let store = app.state::<Store>();
 	let project = store.project(pid)?;
-	if !project.kb.enabled {
+	// 줄에 남은 요청이 보관한 프로젝트에서 호출 비용을 쓰지 않게 여기서도 막는다.
+	if !project.kb.enabled || project.archived_at != 0 {
 		return Ok(());
 	}
 	set_progress(app, pid, Progress { running: true, stage: "scan".into(), ..Default::default() });
@@ -1000,7 +1008,7 @@ pub fn brief(hits: &[KbHit]) -> Vec<KbHit> {
 
 /* ---------- 7. 자동 갱신 ---------- */
 
-const JUDGE_SYSTEM: &str = "너는 코드 변경이 어느 문서에 반영되어야 하는지 가린다. 문서가 다루는 내용이 이 변경으로 틀리게 되거나 빠지게 될 때만 고른다. JSON 배열 하나만 답한다.";
+const JUDGE_SYSTEM: &str = "너는 코드 · DB 구조 변경이 어느 문서에 반영되어야 하는지 가린다. 문서가 다루는 내용이 이 변경으로 틀리게 되거나 빠지게 될 때만 고른다. JSON 배열 하나만 답한다.";
 
 /// 이슈 하나의 변경을 판정 · 갱신에 넘길 글로 묶는다. 변경분은 앞부분만 싣는다.
 fn change_brief(i: &Issue) -> String {
@@ -1079,27 +1087,132 @@ fn judge_prompt(brief: &str, cands: &[(&Deliverable, &String)]) -> String {
 		s.push_str(&format!("\n### id: {}\n{}\n", d.id, desc.trim()));
 	}
 	s.push_str(
-		"\n위 코드 변경 때문에 내용을 고쳐야 할 산출물만 골라 JSON 배열로만 답한다. \
+		"\n위 변경 때문에 내용을 고쳐야 할 산출물만 골라 JSON 배열로만 답한다. \
 		꼴: [{\"id\": \"산출물 id\", \"reason\": \"무엇이 왜 달라지는지 한 문장\"}]. 고칠 것이 없으면 [] 로 답한다.\n",
 	);
 	s
 }
 
-fn auto_request(i: &Issue, reason: &str, brief: &str, file_hint: Option<String>) -> String {
+/// head 는 무엇이 바뀌었는지 한 문장이다(이슈 완료 · DB 구조 변경).
+fn auto_request(head: &str, reason: &str, brief: &str, file_hint: Option<String>) -> String {
 	let hint = file_hint.map(|p| format!("- 지금 판 파일: {p} — 이 파일의 구성과 문구를 바탕으로 고친 새 판을 만든다. 이 파일은 고치지 않는다.\n")).unwrap_or_default();
 	format!(
-		"이슈 #{n} 의 코드 변경이 끝났다. 이 산출물에 반영해야 할 내용이 있으면 반영한 새 판을 낸다.\n\
+		"{head} 이 산출물에 반영해야 할 내용이 있으면 반영한 새 판을 낸다.\n\
 		- 고칠 곳은 이 변경과 관련된 부분으로 한정하고, 나머지는 지금 판의 문구 · 구성을 그대로 둔다.\n\
 		- 반영할 것이 없으면 skip 을 true 로 하고 reason 에 까닭을 적는다. 이때 새 판을 만들지 않는다.\n\
-		{hint}\n판정 까닭: {reason}\n\n{brief}",
-		n = i.number
+		{hint}\n판정 까닭: {reason}\n\n{brief}"
 	)
 }
 
+/// 글 판이 아니면(docx · hwpx …) 본문을 프롬프트에 실을 수 없어 지금 판 파일 경로를 준다.
+fn file_hint(store: &Store, pid: &str, d: &Deliverable) -> Option<String> {
+	let last = d.versions.last()?;
+	let lower = last.file.to_lowercase();
+	let text_like = [".md", ".markdown", ".txt"].iter().any(|e| lower.ends_with(e));
+	if text_like { None } else { store.version_path(pid, &d.id, last.n).ok().map(|p| p.to_string_lossy().to_string()) }
+}
+
+/// 판정 · 작성을 시킨 변경. 이슈 하나의 코드 변경이거나 DB 자료 하나의 구조 변경이다.
+struct Change {
+	/// 판정 · 작성에 넘기는 변경 글
+	brief: String,
+	/// 작성 요청 첫 문장
+	head: String,
+	issue: Option<Issue>,
+	/// DB 변경이면 그 자료와 반영할 스냅숏
+	db: Option<DbMark>,
+}
+
+impl Change {
+	fn of_issue(i: &Issue) -> Self {
+		Self { brief: change_brief(i), head: format!("이슈 #{} 의 코드 변경이 끝났다.", i.number), issue: Some(i.clone()), db: None }
+	}
+
+	fn entry(&self, verdict: &str, reason: &str) -> AutoEntry {
+		let mut e = AutoEntry { at: now_ms(), verdict: verdict.into(), reason: reason.into(), ..Default::default() };
+		if let Some(i) = &self.issue {
+			e.issue_id = i.id.clone();
+			e.number = i.number;
+		}
+		if let Some(m) = &self.db {
+			e.source = format!("{TRIGGER_DB}{}", m.source);
+			e.snapshot = m.snapshot.clone();
+		}
+		e
+	}
+
+	/// 이슈의 흐름에 남긴다. DB 변경은 흐름이 없어 산출물 기록에만 남는다.
+	fn log(&self, app: &AppHandle, pid: &str, text: String) {
+		if let Some(i) = &self.issue {
+			log_issue(app, pid, &i.id, text);
+		}
+	}
+}
+
+/// 산출물의 DB 반영 대기를 변경 글과 표시로 묶는다. 이슈로 새 판을 쓸 때 함께 반영해 판을 두 번 쓰지 않게 한다.
+fn db_pending(store: &Store, p: &Project, v: &DeliverableView) -> (String, Vec<DbMark>) {
+	let mut text = String::new();
+	let mut marks = Vec::new();
+	for x in v.pending.iter().filter(|x| x.kind == "db") {
+		let Some(sid) = x.id.strip_prefix(TRIGGER_DB) else { continue };
+		let Some(src) = p.db_sources.iter().find(|s| s.id == sid) else { continue };
+		if let Some(b) = crate::dbsrc::pending_brief(&crate::dbsrc::source_dir(store, &p.id, sid), src, x) {
+			text.push_str(&format!("\n{b}"));
+			marks.push(DbMark { source: sid.to_string(), name: src.name.clone(), snapshot: x.snapshot.clone() });
+		}
+	}
+	(text, marks)
+}
+
 /// 이슈를 완료한 뒤 부른다. 판정 · 갱신 결과는 그 이슈의 흐름에 deliverable 로 남는다.
+/// DB 트리거를 건 산출물이 있으면 그 자료를 먼저 받는다 — 코드와 함께 DB 구조가 바뀌는 일이 많아, 코드 판정에 같은 차례의 DB 변경을 함께 넘긴다.
 pub async fn after_complete(app: AppHandle, pid: String, iid: String) {
+	let changed = crate::dbsrc::fetch_used(&app, &pid).await;
 	if let Err(e) = auto_update(&app, &pid, &iid).await {
 		log_issue(&app, &pid, &iid, format!("판정 · 실패 · {e}"));
+	}
+	if !changed.is_empty() {
+		crate::dbsrc::emit_project(&app, &pid);
+		after_db_change(app, pid).await;
+	}
+}
+
+/// DB 구조가 바뀐 뒤 부른다. DB 트리거를 고른 산출물 가운데 반영 대기가 있는 것을 자료마다 판정한다.
+/// 작성 중인 산출물은 건너뛴다 — 기록을 남기지 않아 반영 대기에 그대로 남는다(이슈와 함께 쓰는 중일 수 있다).
+pub async fn after_db_change(app: AppHandle, pid: String) {
+	let store = app.state::<Store>();
+	let Ok(p) = store.project(&pid) else { return };
+	if p.archived_at != 0 {
+		return;
+	}
+	let list = store.list_deliverables(&pid).unwrap_or_default();
+	for src in &p.db_sources {
+		let tag = format!("{TRIGGER_DB}{}", src.id);
+		let dir = crate::dbsrc::source_dir(&store, &pid, &src.id);
+		// 바탕 스냅숏이 같은 것끼리 한 번에 판정한다. 대개 하나다.
+		let mut groups: Vec<(PendingIssue, Vec<Deliverable>)> = Vec::new();
+		for v in list.iter().filter(|v| v.deliverable.job.is_none() && v.deliverable.triggers.contains(&tag)) {
+			let Some(x) = v.pending.iter().find(|x| x.id == tag) else { continue };
+			match groups.iter_mut().find(|(g, _)| g.base == x.base && g.snapshot == x.snapshot) {
+				Some((_, ds)) => ds.push(v.deliverable.clone()),
+				None => groups.push((x.clone(), vec![v.deliverable.clone()])),
+			}
+		}
+		for (x, cands) in groups {
+			let Some(brief) = crate::dbsrc::pending_brief(&dir, src, &x) else { continue };
+			let change = Change {
+				brief,
+				head: format!("DB 자료 「{}」의 구조가 바뀌었다({}).", src.name, x.summary),
+				issue: None,
+				db: Some(DbMark { source: src.id.clone(), name: src.name.clone(), snapshot: x.snapshot.clone() }),
+			};
+			let ids: Vec<String> = cands.iter().map(|d| d.id.clone()).collect();
+			if let Err(e) = judge_and_write(&app, &pid, &change, cands).await {
+				for did in &ids {
+					log_deliverable(&app, &pid, did, &change, "failed", &format!("판정 실패 · {e}"));
+				}
+			}
+		}
 	}
 }
 
@@ -1113,8 +1226,8 @@ pub fn log_issue(app: &AppHandle, pid: &str, iid: &str, text: String) {
 }
 
 /// 산출물의 자동 관리 기록에 한 줄을 남긴다. 이슈 흐름의 기록(log_issue)과 짝이다.
-fn log_deliverable(app: &AppHandle, pid: &str, did: &str, i: &Issue, verdict: &str, reason: &str) {
-	let e = AutoEntry { at: now_ms(), issue_id: i.id.clone(), number: i.number, verdict: verdict.into(), reason: reason.into(), version: 0 };
+fn log_deliverable(app: &AppHandle, pid: &str, did: &str, c: &Change, verdict: &str, reason: &str) {
+	let e = c.entry(verdict, reason);
 	if let Ok(v) = app.state::<Store>().update_deliverable(pid, did, |d| {
 		d.push_auto(e);
 		Ok(())
@@ -1123,38 +1236,59 @@ fn log_deliverable(app: &AppHandle, pid: &str, did: &str, i: &Issue, verdict: &s
 	}
 }
 
-/// 밀린 변경을 한꺼번에 반영할 때 받는 이슈 수의 상한. 넘으면 요청이 너무 길어진다.
+/// 밀린 변경을 한꺼번에 반영할 때 받는 변경 수(이슈 · DB 자료)의 상한. 넘으면 요청이 너무 길어진다.
 pub const CATCH_UP_MAX: usize = 10;
 
-/// 「밀린 변경 반영」. 사용자가 고른 이슈들의 변경을 한 요청으로 묶어 새 판을 쓴다.
-/// 판정은 건너뛴다 — 반영할 이슈를 사람이 골랐다. 그래도 고칠 것이 없으면 Claude 가 skip 으로 답한다.
-pub fn catch_up(app: &AppHandle, pid: &str, did: &str, issue_ids: &[String]) -> Result<DeliverableView> {
-	if issue_ids.is_empty() {
-		return Err(Error::Msg("반영할 이슈를 고르세요".into()));
+/// 「밀린 변경 반영」. 사용자가 고른 이슈 · DB 변경을 한 요청으로 묶어 새 판을 쓴다.
+/// ids 는 이슈 id 와 `db:<자료 id>` 가 섞여 온다(반영 대기의 id).
+/// 판정은 건너뛴다 — 반영할 것을 사람이 골랐다. 그래도 고칠 것이 없으면 Claude 가 skip 으로 답한다.
+pub fn catch_up(app: &AppHandle, pid: &str, did: &str, ids: &[String]) -> Result<DeliverableView> {
+	if ids.is_empty() {
+		return Err(Error::Msg("반영할 변경을 고르세요".into()));
 	}
-	if issue_ids.len() > CATCH_UP_MAX {
+	if ids.len() > CATCH_UP_MAX {
 		return Err(Error::Msg(format!("한 번에 {CATCH_UP_MAX}건까지 반영합니다. 나눠서 반영하세요.")));
 	}
 	let store = app.state::<Store>();
-	let d = store.get_deliverable(pid, did)?.deliverable;
-	let last = d.versions.last().cloned().ok_or_else(|| Error::Msg("판이 하나는 있어야 반영합니다".into()))?;
+	let view = store.get_deliverable(pid, did)?;
+	let d = &view.deliverable;
+	if d.versions.is_empty() {
+		return Err(Error::Msg("판이 하나는 있어야 반영합니다".into()));
+	}
+	let (db_ids, issue_ids): (Vec<&String>, Vec<&String>) = ids.iter().partition(|id| id.starts_with(TRIGGER_DB));
 	let mut issues: Vec<Issue> = issue_ids.iter().map(|id| store.raw_issue(pid, id)).collect::<Result<_>>()?;
 	issues.sort_by_key(|i| i.number);
-	let briefs: Vec<String> = issues.iter().map(change_brief).collect();
-	let lower = last.file.to_lowercase();
-	let text_like = [".md", ".markdown", ".txt"].iter().any(|e| lower.ends_with(e));
-	let hint = if text_like { String::new() } else { store.version_path(pid, did, last.n).map(|p| format!("- 지금 판 파일: {} — 이 파일의 구성과 문구를 바탕으로 고친 새 판을 만든다. 이 파일은 고치지 않는다.\n", p.display())).unwrap_or_default() };
-	let nums: Vec<String> = issues.iter().map(|i| format!("#{}", i.number)).collect();
+	let mut briefs: Vec<String> = issues.iter().map(change_brief).collect();
+	let mut names: Vec<String> = issues.iter().map(|i| format!("이슈 #{}", i.number)).collect();
+	let p = store.project(pid)?;
+	let mut marks = Vec::new();
+	for id in db_ids {
+		let x = view.pending.iter().find(|x| &x.id == id).ok_or_else(|| Error::Msg("그 DB 변경은 이미 반영됐거나 더 이상 대기가 아닙니다. 목록을 새로 보세요.".into()))?;
+		let sid = &id[TRIGGER_DB.len()..];
+		let src = p.db_sources.iter().find(|s| s.id == sid).ok_or_else(|| Error::Msg("DB 자료를 찾을 수 없습니다".into()))?;
+		let b = crate::dbsrc::pending_brief(&crate::dbsrc::source_dir(&store, pid, sid), src, x).ok_or_else(|| Error::Msg("DB 스냅숏을 읽지 못했습니다".into()))?;
+		briefs.push(b);
+		names.push(format!("DB 「{}」", src.name));
+		marks.push(DbMark { source: sid.to_string(), name: src.name.clone(), snapshot: x.snapshot.clone() });
+	}
+	let hint = file_hint(&store, pid, d).map(|p| format!("- 지금 판 파일: {p} — 이 파일의 구성과 문구를 바탕으로 고친 새 판을 만든다. 이 파일은 고치지 않는다.\n")).unwrap_or_default();
 	let request = format!(
-		"이슈 {} 의 코드 변경이 이 산출물에 아직 반영되지 않았다. 아래 변경을 모두 반영한 새 판을 낸다.\n\
+		"{} 의 변경이 이 산출물에 아직 반영되지 않았다. 아래 변경을 모두 반영한 새 판을 낸다.\n\
 		- 고칠 곳은 이 변경들과 관련된 부분으로 한정하고, 나머지는 지금 판의 문구 · 구성을 그대로 둔다.\n\
-		- 변경끼리 어긋나면 번호가 큰(나중) 이슈를 따른다.\n\
+		- 변경끼리 어긋나면 나중 것(번호가 큰 이슈 · 지금 DB 구조)을 따른다.\n\
 		- 반영할 것이 하나도 없으면 skip 을 true 로 하고 reason 에 까닭을 적는다. 이때 새 판을 만들지 않는다.\n\
 		{hint}\n{}",
-		nums.join(" "),
+		names.join(" · "),
 		briefs.join("\n")
 	);
-	runner::document_job(app, pid, Some(did.to_string()), request, "", issues.iter().map(|i| i.id.clone()).collect())
+	let db_catch_up = !marks.is_empty();
+	runner::document_job(
+		app,
+		pid,
+		Some(did.to_string()),
+		request,
+		runner::JobOrigin { catch_up: issues.iter().map(|i| i.id.clone()).collect(), db: marks, db_catch_up, ..Default::default() },
+	)
 }
 
 async fn auto_update(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
@@ -1165,34 +1299,37 @@ async fn auto_update(app: &AppHandle, pid: &str, iid: &str) -> Result<()> {
 		return Ok(());
 	}
 	let all: Vec<Deliverable> =
-		store.list_deliverables(pid)?.into_iter().map(|v| v.deliverable).filter(|d| d.auto_update && !d.versions.is_empty()).collect();
+		store.list_deliverables(pid)?.into_iter().map(|v| v.deliverable).filter(|d| d.on_code() && !d.versions.is_empty()).collect();
 	if all.is_empty() {
 		return Ok(());
 	}
+	let change = Change::of_issue(&issue);
 	let (busy, cands): (Vec<Deliverable>, Vec<Deliverable>) = all.into_iter().partition(|d| d.job.is_some());
 	for d in &busy {
 		log_issue(app, pid, iid, format!("{} · 건너뜀 · 이미 작성 중", d.title));
-		log_deliverable(app, pid, &d.id, &issue, "busy", "이미 작성 중");
+		log_deliverable(app, pid, &d.id, &change, "busy", "이미 작성 중");
 	}
 	if cands.is_empty() {
 		return Ok(());
 	}
 	// 판정이 실패하면 후보 모두에 실패로 남긴다. 남기지 않으면 기록에는 아무 일도 없던 것처럼 보인다.
 	let ids: Vec<String> = cands.iter().map(|d| d.id.clone()).collect();
-	let res = judge_and_write(app, pid, iid, &issue, cands).await;
+	let res = judge_and_write(app, pid, &change, cands).await;
 	if let Err(e) = &res {
 		for did in &ids {
-			log_deliverable(app, pid, did, &issue, "failed", &format!("판정 실패 · {e}"));
+			log_deliverable(app, pid, did, &change, "failed", &format!("판정 실패 · {e}"));
 		}
 	}
 	res
 }
 
-async fn judge_and_write(app: &AppHandle, pid: &str, iid: &str, issue: &Issue, mut cands: Vec<Deliverable>) -> Result<()> {
+/// 변경 하나를 후보 산출물에 판정하고, 고칠 것으로 고른 산출물마다 새 판을 쓰게 한다.
+/// 이슈 변경으로 새 판을 쓸 때는 그 산출물의 DB 반영 대기도 함께 싣는다 — 같은 차례에 판을 두 번 쓰지 않게.
+async fn judge_and_write(app: &AppHandle, pid: &str, change: &Change, mut cands: Vec<Deliverable>) -> Result<()> {
 	let store = app.state::<Store>();
 	let settings = store.settings()?;
 	let exe = runner::resolve_claude(&settings.claude_path).ok_or_else(|| Error::Msg("claude 실행 파일을 찾지 못했습니다".into()))?;
-	let brief = change_brief(issue);
+	let brief = change.brief.clone();
 	let (a, p, list) = (app.clone(), pid.to_string(), cands.clone());
 	let mut descs = tokio::task::spawn_blocking(move || describe(&a, &p, &list)).await.map_err(|e| Error::Msg(e.to_string()))?;
 
@@ -1227,24 +1364,35 @@ async fn judge_and_write(app: &AppHandle, pid: &str, iid: &str, issue: &Issue, m
 	if !rest.is_empty() {
 		line.push_str(&format!(" · 관계없음: {}", rest.iter().map(|d| d.title.as_str()).collect::<Vec<_>>().join(", ")));
 	}
-	log_issue(app, pid, iid, line);
+	change.log(app, pid, line);
 	for d in &rest {
-		log_deliverable(app, pid, &d.id, issue, "unrelated", "");
+		log_deliverable(app, pid, &d.id, change, "unrelated", "");
 	}
 
+	let project = store.project(pid)?;
 	for (d, reason) in chosen {
-		// 글 판이 아니면(docx · hwpx …) 본문을 프롬프트에 실을 수 없어 파일 경로를 준다.
-		let last = d.versions.last().cloned().unwrap_or_default();
-		let lower = last.file.to_lowercase();
-		let text_like = [".md", ".markdown", ".txt"].iter().any(|e| lower.ends_with(e));
-		let hint = if text_like { None } else { store.version_path(pid, &d.id, last.n).ok().map(|p| p.to_string_lossy().to_string()) };
-		if let Err(e) = runner::document_from(app, pid, Some(d.id.clone()), auto_request(issue, &reason, &brief, hint), iid) {
-			log_issue(app, pid, iid, format!("{} · 실패 · {e}", d.title));
-			log_deliverable(app, pid, &d.id, issue, "failed", &e.to_string());
+		let hint = file_hint(&store, pid, &d);
+		let mut origin = runner::JobOrigin { issue_id: change.issue.as_ref().map(|i| i.id.clone()).unwrap_or_default(), ..Default::default() };
+		let mut brief = brief.clone();
+		match &change.db {
+			Some(m) => origin.db = vec![m.clone()],
+			None => {
+				// 이슈 변경: 이 산출물의 DB 반영 대기도 같은 판에 싣는다.
+				if let Ok(v) = store.get_deliverable(pid, &d.id) {
+					let (text, marks) = db_pending(&store, &project, &v);
+					brief.push_str(&text);
+					origin.db = marks;
+				}
+			}
+		}
+		if let Err(e) = runner::document_job(app, pid, Some(d.id.clone()), auto_request(&change.head, &reason, &brief, hint), origin) {
+			change.log(app, pid, format!("{} · 실패 · {e}", d.title));
+			log_deliverable(app, pid, &d.id, change, "failed", &e.to_string());
 		}
 	}
 	Ok(())
 }
+
 
 /* ---------- 8. 화면에 보내는 모양 ---------- */
 

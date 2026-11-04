@@ -31,7 +31,8 @@ pub fn context(store: &Store) -> String {
 	let root = store.root.display();
 	let mut projects = String::new();
 	for p in store.projects().unwrap_or_default() {
-		projects.push_str(&format!("- {} — 저장소 {} · 앱 데이터 projects/{}/\n", p.name, p.path, p.id));
+		let archived = if p.archived_at != 0 { " · 보관됨" } else { "" };
+		projects.push_str(&format!("- {} — 저장소 {} · 앱 데이터 projects/{}/{archived}\n", p.name, p.path, p.id));
 	}
 	if projects.is_empty() {
 		projects.push_str("- (등록한 프로젝트가 없다)\n");
@@ -42,7 +43,7 @@ pub fn context(store: &Store) -> String {
 settings.json · projects.json        앱 설정 · 등록한 프로젝트
 projects/<pid>/issues/<iid>/         메모(이슈) · 프로젝트 대화: issue.json · note.md · attachments/ · runs/<실행>.jsonl
 projects/<pid>/deliverables/<did>/   산출물
-projects/<pid>/kb/ · glossary.json   지식베이스 · 어휘 사전
+projects/<pid>/kb/ · glossary.json · memory.json   지식베이스 · 어휘 사전 · 기억
 global/issues/<id>/                  앱 대화 (지금 이 대화도 여기 있다)
 global/work/                         앱 대화의 작업 폴더 (빌드 · 시험용)
 global/backup/                       고칠 수 있게 보낸 차례 전에 앱이 남긴 설정 사본

@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { useUi } from "./store";
-import { GLOBAL_PID, type Issue, type PluginPlace, type Project } from "./types";
+import { GLOBAL_PID, type Issue, type PluginPlace, type Project, type Version } from "./types";
 
 export const qk = {
 	info: ["info"] as const,
@@ -18,6 +18,8 @@ export const qk = {
 	resources: (pid: string | null) => ["resources", pid ?? ""] as const,
 	kb: (pid: string) => ["kb", pid] as const,
 	glossary: (pid: string) => ["glossary", pid] as const,
+	memory: (pid: string) => ["memory", pid] as const,
+	dbSources: (pid: string) => ["dbSources", pid] as const,
 };
 
 /**
@@ -70,8 +72,20 @@ export function usePluginMenus(place: PluginPlace) {
 	);
 }
 
+const activeOnly = (list: Project[]) => list.filter((p) => !p.archivedAt);
+const archivedOnly = (list: Project[]) => list.filter((p) => p.archivedAt);
+
+/** 쓰는 프로젝트만. 사이드바 · 팔레트 · 알림 · 대화 · 실행 목록이 여기서 함께 걸러진다. 보관한 것까지 봐야 하면 useAllProjects 를 쓴다. */
 export function useProjects() {
+	return useQuery({ queryKey: qk.projects, queryFn: api.projects, select: activeOnly });
+}
+
+export function useAllProjects() {
 	return useQuery({ queryKey: qk.projects, queryFn: api.projects });
+}
+
+export function useArchivedProjects() {
+	return useQuery({ queryKey: qk.projects, queryFn: api.projects, select: archivedOnly });
 }
 
 /** 앱 대화의 가상 프로젝트. 경로는 앱 데이터 폴더라 바뀌지 않는다. 권한 칸은 저장할 때 캐시를 바꾼다. */
@@ -118,8 +132,28 @@ export function useDeliverables(pid: string | null) {
 	return useQuery({ queryKey: qk.deliverables(pid ?? ""), queryFn: () => api.deliverables(pid!), enabled: !!pid });
 }
 
+/** 표지는 판이 바뀌면 키가 달라진다. 그리는 데 오래 걸릴 수 있어 한 번 얻으면 다시 묻지 않는다. */
+export function useThumb(pid: string, did: string, v: Pick<Version, "n" | "size" | "path"> | undefined, enabled: boolean) {
+	return useQuery({
+		queryKey: ["thumb", pid, did, v?.n, v?.size, v?.path] as const,
+		queryFn: () => api.deliverableThumb(pid, did, v!.n),
+		enabled: enabled && !!v,
+		staleTime: Infinity,
+		retry: false,
+	});
+}
+
 export function useKb(pid: string | null) {
 	return useQuery({ queryKey: qk.kb(pid ?? ""), queryFn: () => api.kbStatus(pid!), enabled: !!pid });
+}
+
+/** DB 자료와 받은 스냅숏. 받는 일은 앱이 켤 때 · 이슈 완료 때도 하므로 산출물 사건이 오면 다시 읽는다(events.ts). */
+export function useDbSources(pid: string | null) {
+	return useQuery({ queryKey: qk.dbSources(pid ?? ""), queryFn: () => api.dbSources(pid!), enabled: !!pid });
+}
+
+export function useMemory(pid: string | null) {
+	return useQuery({ queryKey: qk.memory(pid ?? ""), queryFn: () => api.memory(pid!), enabled: !!pid });
 }
 
 export function useGlossary(pid: string | null) {

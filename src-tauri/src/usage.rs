@@ -56,7 +56,7 @@ pub struct SpendLine {
 	pub at: i64,
 	/// 프로젝트 id. 앱 전체의 호출이면 비어 있다.
 	pub project: String,
-	/// plan · implement · revert · chat · document · title · card · rerank · judge · learn
+	/// plan · implement · revert · chat · document · title · card · rerank · judge · learn · memory
 	pub kind: String,
 	pub model: String,
 	pub tokens: Tokens,

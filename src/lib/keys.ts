@@ -108,6 +108,17 @@ function register(def: RefObject<KeyDef>) {
 	return () => useKeys.setState((s) => ({ entries: s.entries.filter((e) => e.token !== token) }));
 }
 
+/**
+ * 대화 입력칸 안에서만 먹는 키. 입력칸이 스스로 받아 등록하지 않으므로, 단축키 표는 입력칸이 화면에 있을 때 이 줄을 더한다.
+ * 터미널 claude 와 같은 자리에 둔다.
+ */
+export const COMPOSER_KEYS: { label: string; keys: string }[] = [
+	{ label: "입력칸: 지난 질문 불러오기", keys: "↑ ↓" },
+	{ label: "입력칸: 슬래시 명령 · 스킬 고르기", keys: "/" },
+	{ label: "입력칸: 프로젝트 파일 넣기", keys: "@" },
+	{ label: "입력칸: 실행 중 중지", keys: "Esc 두 번" },
+];
+
 /** 두 번 눌러야 하는 키 · 카드 단추가 기다리는 시간. */
 export const CONFIRM_MS = 1500;
 

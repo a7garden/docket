@@ -1,40 +1,27 @@
 import { useRef, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ImagePlus, StickyNote } from "lucide-react";
-import { toast } from "sonner";
 import { AttachmentThumbs, DropOverlay } from "@/components/AttachmentThumbs";
 import { MarkdownEditor, type EditorHandle } from "@/components/MarkdownEditor";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
 import { Switch } from "@/components/ui/switch";
-import { api, errorText } from "@/lib/api";
 import { useDropZone } from "@/lib/drop";
-import { attachmentRef, delayText, joinPath, newId } from "@/lib/format";
+import { delayText, joinPath } from "@/lib/format";
 import { useKey } from "@/lib/keys";
-import { useAppInfo, useSettings } from "@/lib/queries";
 import type { Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { RunPicker } from "../settings/RunPicker";
+import { useDraftIssue } from "./useDraftIssue";
 
 /**
  * 보드 맨 위의 포스트잇. 접혀 있다가 누르거나 Ctrl+N 으로 펼친다.
- * 붙이기 전에 넣은 이미지는 미리 정한 이슈 id 의 폴더로 바로 저장된다. 그래야 메모 본문에 그림 링크를 끼울 수 있다.
+ * 첨부 · 붙이기는 빠른 메모 창과 함께 쓰는 useDraftIssue 가 맡는다.
  */
 export function Composer({ project }: { project: Project }) {
-	const { data: settings } = useSettings();
-	const { data: info } = useAppInfo();
 	const [open, setOpen] = useState(false);
-	const [note, setNote] = useState("");
-	const [draftId, setDraftId] = useState(newId);
-	const [auto, setAuto] = useState<boolean | null>(null);
-	const [model, setModel] = useState("");
-	const [effort, setEffort] = useState("");
-	const [attachments, setAttachments] = useState<string[]>([]);
-	const [busy, setBusy] = useState(false);
 	const editor = useRef<EditorHandle>(null);
-	const autoOn = auto ?? settings?.autoPlan ?? true;
-
-	const draftDir = info ? joinPath(info.dataRoot, "projects", project.id, "issues", draftId) : "";
+	const d = useDraftIssue(project.id, editor);
+	const { settings, note, setNote, draftDir, autoOn, setAuto, model, setModel, effort, setEffort, attachments, busy } = d;
 
 	useKey({
 		id: "board.compose",
@@ -49,57 +36,14 @@ export function Composer({ project }: { project: Project }) {
 	});
 
 	const addFiles = async (paths: string[]) => {
-		try {
-			const names = await api.attachmentImport(project.id, draftId, paths);
-			setAttachments((a) => [...a, ...names]);
-			setOpen(true);
-			setTimeout(() => names.forEach((n) => editor.current?.insert(attachmentRef(n))), 30);
-		} catch (e) {
-			toast.error(errorText(e));
-		}
+		if (await d.addFiles(paths)) setOpen(true);
 	};
 	const [dropRef, over] = useDropZone<HTMLDivElement>(addFiles);
 
-	const pasteImage = async (file: File) => {
-		try {
-			const bytes = new Uint8Array(await file.arrayBuffer());
-			const name = await api.attachmentSave(project.id, draftId, bytes, file.type.split("/")[1] ?? "png");
-			setAttachments((a) => [...a, name]);
-			return attachmentRef(name);
-		} catch (e) {
-			toast.error(errorText(e));
-			return null;
-		}
-	};
-
-	const pickImages = async () => {
-		const picked = await openDialog({ multiple: true, title: "첨부할 파일" });
-		if (Array.isArray(picked) && picked.length) await addFiles(picked);
-	};
-
-	const removeAttachment = async (name: string) => {
-		await api.attachmentDelete(project.id, draftId, name).catch(() => {});
-		setAttachments((a) => a.filter((x) => x !== name));
-		setNote((n) => n.split(attachmentRef(name)).join("").replace(/\n{3,}/g, "\n\n"));
-	};
+	const { pickFiles: pickImages, removeAttachment, pasteImage } = d;
 
 	const submit = async () => {
-		if (!note.trim() || busy) return;
-		setBusy(true);
-		try {
-			await api.issueCreate(project.id, draftId, note, autoOn, model, effort);
-			setNote("");
-			setAttachments([]);
-			setDraftId(newId());
-			setAuto(null);
-			setModel("");
-			setEffort("");
-			setOpen(false);
-		} catch (e) {
-			toast.error(errorText(e));
-		} finally {
-			setBusy(false);
-		}
+		if (await d.submit()) setOpen(false);
 	};
 
 	if (!open) {

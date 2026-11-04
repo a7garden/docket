@@ -119,7 +119,7 @@ pub fn load(root: &Path, s: &Settings) -> Vec<PluginView> {
 
 fn core_view(root: &Path, m: Manifest, s: &Settings, seen: &mut HashSet<String>) -> PluginView {
 	let exe_path = m.contributes.terminal.as_ref().and_then(|t| terminal::resolve_exe(&t.exe));
-	let problem = manifest::check(&m, false, exe_path.is_some(), seen);
+	let problem = manifest::check_core(&m, exe_path.is_some(), seen);
 	let warning = match &m.contributes.terminal {
 		Some(t) if problem.is_empty() => terminal::warning(t),
 		_ => String::new(),
@@ -310,7 +310,12 @@ pub fn invoke(app: &AppHandle, id: &str, command: &str, place: &str, target: Tar
 		return msg(format!("「{}」 에 그런 메뉴가 없습니다: {command}", v.manifest.name));
 	}
 	let data = data_dir(&store.root, id);
-	match call(app, &v, "on_command", json!({ "command": command, "where": place }), &target).and_then(|out| api::reply(&out, &v.manifest.permissions)) {
+	let out = if v.core {
+		core::command(&store, id, command, &target.project_id)
+	} else {
+		call(app, &v, "on_command", json!({ "command": command, "where": place }), &target).and_then(|out| api::reply(&out, &v.manifest.permissions))
+	};
+	match out {
 		Ok(r) => Ok(r),
 		Err(e) => {
 			log(&data, "command", command, false, &e);
@@ -359,26 +364,26 @@ mod tests {
 
 		let s = Settings { enabled_plugins: vec!["a-broken".into(), "b-term".into(), "c-menu".into()], ..Default::default() };
 		let list = load(&r, &s);
-		assert_eq!(list.len(), 4, "코어 herdr 가 맨 앞에 붙는다");
-		assert!(list[0].core);
-		assert!(list[1].problem.starts_with("정의를 읽지 못했습니다"));
-		assert!(list[2].legacy && list[2].missing.is_empty(), "옛 정의는 허락한 것으로 본다");
-		assert_eq!(list[3].problem, "");
-		assert_eq!(list[3].missing, vec!["notify"], "허락하기 전에는 부르지 않는다");
-		assert!(!list[3].usable());
+		assert_eq!(list.len(), 5, "코어 herdr · 릴리즈가 맨 앞에 붙는다");
+		assert!(list[0].core && list[1].core);
+		assert!(list[2].problem.starts_with("정의를 읽지 못했습니다"));
+		assert!(list[3].legacy && list[3].missing.is_empty(), "옛 정의는 허락한 것으로 본다");
+		assert_eq!(list[4].problem, "");
+		assert_eq!(list[4].missing, vec!["notify"], "허락하기 전에는 부르지 않는다");
+		assert!(!list[4].usable());
 
 		// 읽지 못한 옛 정의를 켜 두었으면 터미널 자리에서 문제를 알린다.
 		assert!(terminal(&r, &s).unwrap_err().to_string().contains("정의를 읽지 못했습니다"));
 
 		// 허락한 뒤 권한을 늘리면 다시 빠진다.
 		let s = Settings { plugin_grants: [("c-menu".to_string(), vec!["notify".to_string()])].into(), ..s };
-		assert!(load(&r, &s)[3].usable());
+		assert!(load(&r, &s)[4].usable());
 		fs::write(
 			d.join("c-menu").join(MANIFEST),
 			r#"{ "id": "c-menu", "apiVersion": 1, "main": "plugin.wasm", "permissions": ["notify", "process:cmd"], "contributes": { "menus": [{ "where": "issue", "command": "x", "label": "엑스" }] } }"#,
 		)
 		.unwrap();
-		assert_eq!(load(&r, &s)[3].missing, vec!["process:cmd"]);
+		assert_eq!(load(&r, &s)[4].missing, vec!["process:cmd"]);
 		fs::remove_dir_all(&r).unwrap();
 	}
 
@@ -386,7 +391,8 @@ mod tests {
 	fn core_plugin_is_listed_first_without_files_and_wins_its_id() {
 		let r = root();
 		let list = load(&r, &Settings::default());
-		assert_eq!(list.len(), 1, "디스크가 비어도 코어는 있다");
+		assert_eq!(list.len(), 2, "디스크가 비어도 코어는 있다");
+		assert!(list[1].core && list[1].problem.is_empty(), "릴리즈는 코드 없이 메뉴를 둔다: {}", list[1].problem);
 		let h = &list[0];
 		assert!(h.core && !h.legacy && h.file.is_empty() && h.missing.is_empty(), "코어는 파일 · 허락이 없다");
 		assert!(!h.enabled);
@@ -403,7 +409,7 @@ mod tests {
 		fs::write(dir(&r).join("herdr.json"), r#"{ "exe": "herdr", "launch": ["--x"] }"#).unwrap();
 		let list = load(&r, &s);
 		assert!(list[0].core);
-		assert!(list[1].problem.contains("같은 id(herdr)"), "{}", list[1].problem);
+		assert!(list[2].problem.contains("같은 id(herdr)"), "{}", list[2].problem);
 		fs::remove_dir_all(&r).unwrap();
 	}
 

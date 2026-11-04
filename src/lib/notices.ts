@@ -3,7 +3,7 @@ import { useQueries } from "@tanstack/react-query";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { api } from "./api";
-import { focusOnly, qk, useProjects, useTalks } from "./queries";
+import { focusOnly, qk, useAllProjects, useProjects, useTalks } from "./queries";
 import { needsDecision } from "./status";
 import type { Target } from "./store";
 import { type Deliverable, GLOBAL_PID, type Issue, type Project, type RunRecord } from "./types";
@@ -187,7 +187,8 @@ export function useNoticeCounts(): (projectId: string) => NoticeCount {
  * `useNotices()` 는 사이드바 · 프로젝트 머리도 부르므로, 거기 두면 같은 정리가 부르는 곳마다 돈다.
  */
 export function usePruneSeen() {
-	const { data: projects = [] } = useProjects();
+	// 보관한 프로젝트까지 본다. 빼면 그 읽음 표시가 지워져, 되살릴 때 지난 답이 모두 새 알림으로 뜬다.
+	const { data: projects = [] } = useAllProjects();
 	const qs = useQueries({
 		queries: [
 			...projects.flatMap((p) => [

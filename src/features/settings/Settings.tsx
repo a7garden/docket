@@ -1,7 +1,7 @@
 /*
  * 설정 화면.
  * - 목차 SECTIONS · 구획별 항목 이름 SETTING_ROWS(Ctrl+K 로 찾는다) · 화면 Settings (왼쪽 목차 + 본문 두 단)
- * - 구획: Claude · 자동 계획 · 지식베이스 · 산출물 · 플러그인(Plugins.tsx) · 알림 · 화면 · 업데이트(Updates.tsx) · 저장 위치
+ * - 구획: Claude · 자동 계획 · 지식베이스 · 산출물 · 플러그인(Plugins.tsx) · 알림 · 빠른 메모 · 트레이(QuickKey.tsx) · 화면 · 업데이트(Updates.tsx) · 저장 위치
  * - 틀: Group · Row (Updates.tsx · Plugins.tsx · DocTools.tsx 도 쓴다)
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -22,6 +22,7 @@ import type { Settings as S } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { DocTools } from "./DocTools";
 import { Plugins } from "./Plugins";
+import { QuickKey } from "./QuickKey";
 import { RunPicker } from "./RunPicker";
 import { Updates } from "./Updates";
 
@@ -47,6 +48,7 @@ export const SECTIONS = {
 	deliverables: "산출물",
 	plugins: "플러그인",
 	notify: "알림",
+	quick: "빠른 메모 · 트레이",
 	screen: "화면",
 	updates: "업데이트",
 	storage: "저장 위치",
@@ -65,6 +67,7 @@ export const SETTING_ROWS: Record<SectionId, string[]> = {
 	deliverables: ["파일을 넣으면 작성법 뽑기", "한컴으로 확인", "문서 도구"],
 	plugins: [],
 	notify: ["시스템 알림", "시험 알림"],
+	quick: ["빠른 메모 단축키", "닫기 동작"],
 	screen: ["테마", "보내기 키"],
 	updates: ["지금 판", "자동으로 확인", "새 판", "바뀐 내용"],
 	storage: ["앱 데이터", "Claude 설정 폴더"],
@@ -131,14 +134,18 @@ export function Settings() {
 	}, [ready, pending]);
 
 	const save = async (patch: Partial<S>) => {
-		if (!s) return;
+		if (!s) return false;
 		const next = { ...s, ...patch };
 		setS(next);
 		try {
 			qc.setQueryData(qk.settings, await api.settingsSave(next));
 			if ("claudePath" in patch) void refetchInfo();
+			return true;
 		} catch (e) {
+			// 저장되지 않았다. 화면도 전 값으로 돌린다 — 단축키처럼 Rust 가 받지 않은 값이 남아 보이지 않게.
+			setS(s);
 			toast.error(errorText(e));
+			return false;
 		}
 	};
 
@@ -315,6 +322,29 @@ export function Settings() {
 							<Button variant="outline" onClick={() => void systemNotify("docket 시험 알림", "실행이 끝나면 이렇게 알립니다")}>
 								보내 보기
 							</Button>
+						</Row>
+					</Group>
+
+					<Group id="quick">
+						<QuickKey value={s.quickCaptureKey} onSave={(v) => save({ quickCaptureKey: v })} />
+						<Row label="닫기 동작" hint="트레이로 숨기면 창을 닫아도 단축키를 듣고 돌던 작업을 이어 갑니다. 끝내려면 트레이 아이콘을 오른쪽 클릭해 「끝내기」를 고릅니다." inline>
+							<div className="inline-flex rounded-lg bg-secondary p-0.5">
+								{(
+									[
+										[true, "트레이로 숨기기"],
+										[false, "끝내기"],
+									] as const
+								).map(([v, label]) => (
+									<button
+										key={label}
+										type="button"
+										onClick={() => void save({ closeToTray: v })}
+										className={cn("h-7 rounded-md px-3 text-[12.5px] font-medium text-muted-foreground", s.closeToTray === v && "bg-hover text-foreground shadow-[inset_0_0_0_1px_var(--border-strong)]")}
+									>
+										{label}
+									</button>
+								))}
+							</div>
 						</Row>
 					</Group>
 

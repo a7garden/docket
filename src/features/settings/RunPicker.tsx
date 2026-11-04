@@ -37,6 +37,8 @@ export function RunPicker({
 	size = "sm",
 	className,
 	title,
+	open,
+	onOpenChange,
 }: {
 	model: string;
 	effort: string;
@@ -47,11 +49,14 @@ export function RunPicker({
 	size?: "sm" | "default";
 	className?: string;
 	title?: string;
+	/** 바깥에서 여닫을 때(대화 입력칸의 /model). 주지 않으면 스스로 연다. */
+	open?: boolean;
+	onOpenChange?: (open: boolean) => void;
 }) {
 	const picked = [modelLabel(model), effortLabel(effort)].filter(Boolean);
 	const text = picked.join(" · ") || followLabel;
 	return (
-		<Popover>
+		<Popover open={open} onOpenChange={onOpenChange}>
 			<PopoverTrigger asChild>
 				<button
 					type="button"

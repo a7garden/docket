@@ -1,10 +1,16 @@
 import { invoke as rawInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import type {
 	AppInfo,
+	DbFetchResult,
+	DbSource,
+	DbSourceView,
 	Deliverable,
 	DocTools,
 	DeliverablePatch,
 	DeliverableSettings,
+	FolderImport,
+	PathKinds,
+	Thumb,
 	GlossaryEntry,
 	GlossaryView,
 	ChatMode,
@@ -12,6 +18,8 @@ import type {
 	KbHit,
 	KbSection,
 	KbView,
+	MemoryKind,
+	MemoryView,
 	PluginInspect,
 	PluginList,
 	PluginPlace,
@@ -25,6 +33,7 @@ import type {
 	RunEvent,
 	SessionInfo,
 	Settings,
+	SlashItem,
 	Spend,
 	Suggestion,
 	TextFile,
@@ -86,6 +95,10 @@ export const api = {
 	spend: (days: number) => invoke<Spend>("spend_summary", { days }),
 	settingsGet: () => invoke<Settings>("settings_get"),
 	settingsSave: (settings: Settings) => invoke<Settings>("settings_save", { settings }),
+	/** 시작할 때 빠른 메모 단축키를 등록하지 못한 까닭. 비어 있으면 듣고 있다. */
+	quickKeyError: () => invoke<string>("quick_key_error"),
+	/** 앱을 끝낸다. 주 창 · 빠른 창 · 트레이를 모두 닫는다. */
+	appQuit: () => invoke<void>("app_quit"),
 	open: (path: string) => invoke<void>("path_open", { path }),
 	reveal: (path: string) => invoke<void>("path_reveal", { path }),
 	plugins: () => invoke<PluginList>("plugins_list"),
@@ -104,6 +117,7 @@ export const api = {
 	projectSave: (project: Project) => invoke<Project>("project_save", { project }),
 	deliverableSettingsSave: (projectId: string, settings: DeliverableSettings) => invoke<Project>("deliverable_settings_save", { projectId, settings }),
 	projectRemove: (id: string, deleteData: boolean) => invoke<void>("project_remove", { id, deleteData }),
+	projectArchive: (id: string, archived: boolean) => invoke<Project>("project_archive", { id, archived }),
 	projectAllow: (projectId: string, rules: string[]) => invoke<Project>("project_allow", { projectId, rules }),
 	permissionsView: (projectId: string) => invoke<RuleSet[]>("permissions_view", { projectId }),
 	permissionsSuggest: (projectId: string) => invoke<Suggestion[]>("permissions_suggest", { projectId }),
@@ -149,6 +163,11 @@ export const api = {
 	issueMerge: (projectId: string, issueId: string) => invoke<Issue>("issue_merge", { projectId, issueId }),
 	issueChat: (projectId: string, issueId: string, text: string, mode: ChatMode, images: string[] = []) =>
 		invoke<Issue>("issue_chat", { projectId, issueId, text, mode, images }),
+	/** 대화가 기다리는 승인 · 되묻기에 답한다. updatedInput 은 AskUserQuestion 의 답을 담은 입력이다. remember 는 「이 대화 내내 허락」. */
+	issueChatAnswer: (projectId: string, issueId: string, requestId: string, allow: boolean, opts: { updatedInput?: unknown; remember?: boolean; message?: string } = {}) =>
+		invoke<Issue>("issue_chat_answer", { projectId, issueId, requestId, allow, updatedInput: opts.updatedInput ?? null, remember: opts.remember ?? false, message: opts.message ?? null }),
+	slashCommands: (projectId: string) => invoke<SlashItem[]>("slash_commands", { projectId }),
+	projectFiles: (projectId: string, query: string) => invoke<string[]>("project_files", { projectId, query }),
 	/** keepFiles 는 고치려고 입력칸으로 되돌릴 때 첨부를 남긴다. */
 	issueQueueRemove: (projectId: string, issueId: string, queueId: string, keepFiles = false) =>
 		invoke<Issue>("issue_queue_remove", { projectId, issueId, queueId, keepFiles }),
@@ -181,6 +200,10 @@ export const api = {
 	deliverables: (projectId: string) => invoke<Deliverable[]>("deliverables_list", { projectId }),
 	deliverableImport: (projectId: string, paths: string[], deliverableId?: string) =>
 		invoke<Deliverable[]>("deliverable_import", { projectId, paths, deliverableId: deliverableId ?? null }),
+	pathsSplit: (paths: string[]) => invoke<PathKinds>("paths_split", { paths }),
+	deliverableImportFolder: (projectId: string, paths: string[]) => invoke<FolderImport>("deliverable_import_folder", { projectId, paths }),
+	deliverableMoveShelf: (projectId: string, deliverableId: string, subdir: string) => invoke<Deliverable>("deliverable_move_shelf", { projectId, deliverableId, subdir }),
+	deliverableThumb: (projectId: string, deliverableId: string, n: number) => invoke<Thumb>("deliverable_thumb", { projectId, deliverableId, n }),
 	deliverableCreate: (projectId: string, title: string) => invoke<Deliverable>("deliverable_create", { projectId, title }),
 	deliverableRefsAdd: (projectId: string, deliverableId: string, paths: string[]) =>
 		invoke<Deliverable>("deliverable_refs_add", { projectId, deliverableId, paths }),
@@ -205,8 +228,15 @@ export const api = {
 	deliverableStop: (projectId: string, deliverableId: string) =>
 		invoke<void>("deliverable_stop", { projectId, deliverableId }),
 	/** 반영 대기 이슈 가운데 고른 것을 한 번에 반영한 새 판을 쓴다. 10건까지 */
+	/** issueIds 는 반영 대기의 id 다 — 이슈 id 와 `db:<자료 id>` 가 섞여 온다. */
 	deliverableCatchUp: (projectId: string, deliverableId: string, issueIds: string[]) =>
 		invoke<Deliverable>("deliverable_catch_up", { projectId, deliverableId, issueIds }),
+	dbSources: (projectId: string) => invoke<DbSourceView[]>("db_sources_list", { projectId }),
+	dbSourcesSave: (projectId: string, sources: DbSource[]) => invoke<DbSourceView[]>("db_sources_save", { projectId, sources }),
+	/** 지금 받는다. 바뀌었으면 앱이 트리거로 고른 산출물을 판정한다. */
+	dbSourceFetch: (projectId: string, sourceId: string) => invoke<DbFetchResult>("db_source_fetch", { projectId, sourceId }),
+	dbSnapshotCompare: (projectId: string, sourceId: string, from: string, to: string) =>
+		invoke<string>("db_snapshot_compare", { projectId, sourceId, from, to }),
 	/** keep 이면 검토 표지만 지우고, 아니면 그 판을 휴지통으로 옮긴다 */
 	deliverableVersionReview: (projectId: string, deliverableId: string, n: number, keep: boolean) =>
 		invoke<Deliverable>("deliverable_version_review", { projectId, deliverableId, n, keep }),
@@ -233,6 +263,18 @@ export const api = {
 	kbSearch: (projectId: string, query: string) => invoke<KbHit[]>("kb_search", { projectId, query }),
 	kbCards: (projectId: string, path: string) => invoke<KbSection[]>("kb_cards", { projectId, path }),
 
+	memory: (projectId: string) => invoke<MemoryView>("memory_get", { projectId }),
+	memorySaveSettings: (projectId: string, enabled: boolean) => invoke<MemoryView>("memory_save_settings", { projectId, memory: { enabled } }),
+	/** 파일 · 폴더를 소화 줄에 세우고 그 수를 돌려준다. 복사하지 않는다. */
+	memoryDigest: (projectId: string, paths: string[]) => invoke<number>("memory_digest", { projectId, paths }),
+	memoryStop: (projectId: string) => invoke<boolean>("memory_stop", { projectId }),
+	memoryAdd: (projectId: string, kind: MemoryKind, text: string) => invoke<MemoryView>("memory_add", { projectId, kind, text }),
+	memoryEdit: (projectId: string, id: string, kind: MemoryKind, text: string) => invoke<MemoryView>("memory_edit", { projectId, id, kind, text }),
+	memoryDelete: (projectId: string, id: string) => invoke<MemoryView>("memory_delete", { projectId, id }),
+	/** 승인 대기를 넣거나 밀린 항목을 되돌린다. */
+	memoryApprove: (projectId: string, id: string) => invoke<MemoryView>("memory_approve", { projectId, id }),
+	memoryRestore: (projectId: string, digestId: string, index: number) => invoke<MemoryView>("memory_restore", { projectId, digestId, index }),
+
 	glossary: (projectId: string) => invoke<GlossaryView>("glossary_get", { projectId }),
 	/** 표 전체를 바꾼다. updatedAt 은 읽어 둔 값 — 그 사이 다른 곳에서 저장했으면 거절된다. */
 	glossarySaveEntries: (projectId: string, entries: GlossaryEntry[], updatedAt: number) =>
@@ -254,6 +296,8 @@ export const api = {
 	resourceCreate: (kind: ResourceKind, scope: "global" | "project", projectId: string | null, name: string, description: string) =>
 		invoke<string>("resource_create", { kind, scope, projectId, name, description }),
 	resourceDelete: (path: string) => invoke<string>("resource_delete", { path }),
+	/** 전역 CLAUDE.md · rules 의 파일을 docket 실행에 싣거나 뺀다. key 는 ~/.claude 기준 경로다. */
+	claudeRunInclude: (key: string, include: boolean) => invoke<Settings>("claude_run_include", { key, include }),
 };
 
 /** Rust 쪽 오류는 문장 하나로 온다. */

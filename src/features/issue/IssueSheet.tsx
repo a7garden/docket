@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, CornerDownRight, MoreHorizontal, RotateCcw, Undo2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, CornerDownRight, MoreHorizontal, Plus, RotateCcw, Undo2, X } from "lucide-react";
 import { toast } from "sonner";
 import { DropdownActions, useActionCommands } from "@/components/ActionMenu";
 import { Chip } from "@/components/bits";
@@ -80,6 +80,8 @@ export function IssueSheet({ project }: { project: Project }) {
 					const from = document.activeElement as HTMLElement | null;
 					if (!inTyping(from)) return;
 					e.preventDefault();
+					// 대화 입력칸이 Esc 를 쓰는 동안(실행 중 두 번 눌러 중지 · 자동완성 닫기)에는 칸에 남는다.
+					if (from?.hasAttribute("data-esc-own")) return;
 					const sheet = from?.closest<HTMLElement>('[role="dialog"]');
 					setTimeout(() => {
 						const now = document.activeElement as HTMLElement | null;
@@ -305,19 +307,35 @@ type Ask = { kind: "replan" | "rework" | "follow"; text: string } | null;
 const ASK_TEXT = {
 	replan: { placeholder: "계획에서 바꿀 것이나 Claude 가 물은 것에 대한 답", send: "다시 계획" },
 	rework: { placeholder: "구현 결과에서 고칠 것", send: "수정 요청" },
-	follow: { placeholder: "이 메모에서 이어서 할 일. 새 메모로 보드에 올라가고, 계획할 때 이 메모의 요약을 함께 넘깁니다", send: "후속 메모 만들기" },
+	follow: { placeholder: "이 메모에서 이어서 할 일", send: "후속 메모 만들기" },
 };
 
-/** 후속 메모 입력칸의 처음 글. 구현 결과의 「이어서 할 일」을 목록으로 넣어 둔다 — 지우거나 고쳐서 보내면 된다. */
-function followDraft(issue: Issue) {
-	const items = issue.result?.followups ?? [];
-	return items.map((f) => `- ${f}`).join("\n");
+/** 구현 결과의 「이어서 할 일」 단추. 누른 항목만 입력칸에 잇는다. 이미 넣은 항목은 숨긴다. */
+function FollowupPicks({ items, text, onPick }: { items: string[]; text: string; onPick: (item: string) => void }) {
+	const left = items.filter((f) => !text.includes(f));
+	if (left.length === 0) return null;
+	return (
+		<div className="flex flex-wrap gap-1.5">
+			{left.map((f) => (
+				<button
+					key={f}
+					type="button"
+					title={f}
+					onClick={() => onPick(f)}
+					className="flex max-w-full items-center gap-1 rounded-full border border-border px-3 py-1 text-[12.5px] text-muted-foreground transition-colors outline-none hover:border-border-strong hover:bg-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+				>
+					<Plus className="size-3.5 shrink-0" />
+					<span className="truncate">{f}</span>
+				</button>
+			))}
+		</div>
+	);
 }
 
 /** 「후속 메모」 단추. 결과 확인 · 완료 · 보류 칸에 둔다 — 그 전 단계는 이 메모를 고치면 된다. */
-function FollowButton({ issue, disabled, onAsk }: { issue: Issue; disabled: boolean; onAsk: (a: Ask) => void }) {
+function FollowButton({ disabled, onAsk }: { disabled: boolean; onAsk: (a: Ask) => void }) {
 	return (
-		<Button variant="outline" disabled={disabled} title="이 메모에서 이어지는 새 메모를 만듭니다. 이 메모는 그대로 둡니다." {...keyAnchor("issue.follow")} onClick={() => onAsk({ kind: "follow", text: followDraft(issue) })}>
+		<Button variant="outline" disabled={disabled} title="이 메모에서 이어지는 새 메모를 만듭니다. 이 메모는 그대로 둡니다." {...keyAnchor("issue.follow")} onClick={() => onAsk({ kind: "follow", text: "" })}>
 			<CornerDownRight />
 			후속 메모
 		</Button>
@@ -441,7 +459,7 @@ function useIssueFlow(issue: Issue, answers: Answers, tab: Tab, setTab: (t: Tab)
 		combo: "Alt+F",
 		label: "후속 메모 쓰기",
 		enabled: idle && (issue.status === "review" || issue.status === "done" || issue.status === "dropped"),
-		run: () => opening({ kind: "follow", text: followDraft(issue) }),
+		run: () => opening({ kind: "follow", text: "" }),
 	});
 	useKey({
 		...action,
@@ -508,6 +526,7 @@ function ActionBar({ issue, flow }: { issue: Issue; flow: ReturnType<typeof useI
 		</label>
 	);
 	const sendKey = useSendKey();
+	const askInput = useRef<HTMLTextAreaElement>(null);
 
 	const bar ="flex items-center gap-2 border-t border-border px-6 py-3.5";
 
@@ -528,6 +547,7 @@ function ActionBar({ issue, flow }: { issue: Issue; flow: ReturnType<typeof useI
 		return (
 			<div className="flex flex-col gap-2.5 border-t border-border px-6 py-4">
 				<Textarea
+					ref={askInput}
 					autoFocus
 					value={ask.text}
 					onChange={(e) => setAsk({ ...ask, text: e.target.value })}
@@ -538,6 +558,16 @@ function ActionBar({ issue, flow }: { issue: Issue; flow: ReturnType<typeof useI
 					placeholder={ASK_TEXT[ask.kind].placeholder + sendKey.hint}
 					className="min-h-24 resize-none bg-transparent text-[13.5px] leading-relaxed"
 				/>
+				{ask.kind === "follow" && (
+					<FollowupPicks
+						items={issue.result?.followups ?? []}
+						text={ask.text}
+						onPick={(f) => {
+							setAsk({ ...ask, text: ask.text.trim() ? `${ask.text.trimEnd()}\n- ${f}` : `- ${f}` });
+							askInput.current?.focus();
+						}}
+					/>
+				)}
 				<div className="flex items-center justify-end gap-2">
 					{ask.kind === "rework" && allowOnce}
 					<div className="flex-1" />
@@ -612,7 +642,7 @@ function ActionBar({ issue, flow }: { issue: Issue; flow: ReturnType<typeof useI
 				<div className={bar}>
 					<RevertButton issue={issue} disabled={busy} />
 					<div className="flex-1" />
-					<FollowButton issue={issue} disabled={busy} onAsk={setAsk} />
+					<FollowButton disabled={busy} onAsk={setAsk} />
 					<KeyTip id="issue.ask">
 						<Button variant="outline" disabled={busy} onClick={() => setAsk({ kind: "rework", text: "" })} {...keyAnchor("issue.ask")}>
 							수정 요청
@@ -638,7 +668,7 @@ function ActionBar({ issue, flow }: { issue: Issue; flow: ReturnType<typeof useI
 				<div className={bar}>
 					{issue.changes.length > 0 && <RevertButton issue={issue} disabled={busy} />}
 					<div className="flex-1" />
-					<FollowButton issue={issue} disabled={busy} onAsk={setAsk} />
+					<FollowButton disabled={busy} onAsk={setAsk} />
 					<Button variant="outline" disabled={busy} onClick={() => void go(() => api.issueReopen(p, id))}>
 						<RotateCcw />
 						다시 열기

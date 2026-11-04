@@ -27,6 +27,7 @@ import { qk, useGlossary } from "@/lib/queries";
 import { useUi } from "@/lib/store";
 import type { Deliverable, DeliverablePatch, Project, RefFile } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { triggerText } from "./AutoTab";
 import { docFormat, FileIcon } from "./Deliverables";
 import { TermChip, useTermSelection, VocabEditor } from "./VocabEditor";
 
@@ -71,8 +72,16 @@ export function RecipeTab({ project, d, onAuto }: { project: Project; d: Deliver
 	}, [naming, d.title, nextN, project.id, project.naming]);
 
 	const save = (patch: Partial<DeliverablePatch>) => {
-		const full: DeliverablePatch = { title: d.title, note: d.note, guide, naming, subdir, autoUpdate: d.autoUpdate, ...patch };
+		// 하위 폴더는 여기서 저장하지 않는다. 바꾸면 최신 판 파일도 함께 옮겨야 해서 moveShelf 만 고친다.
+		const full: DeliverablePatch = { title: d.title, note: d.note, guide, naming, subdir: d.subdir, ...patch };
 		api.deliverableUpdate(project.id, d.id, full).catch((e) => toast.error(errorText(e)));
+	};
+	const moveShelf = () => {
+		if (subdir === d.subdir) return;
+		api.deliverableMoveShelf(project.id, d.id, subdir).catch((e) => {
+			setSubdir(d.subdir);
+			toast.error(errorText(e));
+		});
 	};
 
 	const addRefs = async (paths: string[]) => {
@@ -281,9 +290,9 @@ export function RecipeTab({ project, d, onAuto }: { project: Project; d: Deliver
 				)}
 			</Block>
 
-			{/* 자동 갱신 스위치 · 기록은 「자동 관리」 탭이 맡는다. 예전 자리를 찾는 사람을 위해 길잡이 한 줄만 둔다 */}
+			{/* 트리거 · 기록은 「자동 관리」 탭이 맡는다. 예전 자리를 찾는 사람을 위해 길잡이 한 줄만 둔다 */}
 			<div className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-[13px]">
-				<span className="min-w-0 flex-1 break-keep text-muted-foreground">코드가 바뀌면 자동 갱신 · {d.autoUpdate ? "켜짐" : "꺼짐"}</span>
+				<span className="min-w-0 flex-1 break-keep text-muted-foreground">자동 갱신 · {triggerText(d, project) || "수동"}</span>
 				<Button size="sm" variant="ghost" onClick={onAuto}>
 					자동 관리 탭에서 바꾸기
 				</Button>
@@ -325,7 +334,7 @@ export function RecipeTab({ project, d, onAuto }: { project: Project; d: Deliver
 						<Input
 							value={subdir}
 							onChange={(e) => setSubdir(e.target.value)}
-							onBlur={() => subdir !== d.subdir && save({ subdir })}
+							onBlur={moveShelf}
 							placeholder="예: API_명세서"
 							className="h-8 text-[13px]"
 						/>

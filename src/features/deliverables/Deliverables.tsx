@@ -2,8 +2,8 @@
  * 산출물 목록 화면.
  *
  * 목차
- * 1. Deliverables — 머리 단추 · 「전체 / 손볼 것」 거르기 · 목록 · 끌어 놓아 가져오기
- * 2. Row — 목록 한 줄 (상태 · 그 까닭 · 작성 · 뽑기 상태 · 우클릭 메뉴)
+ * 1. Deliverables — 머리 단추 · 「전체 / 손볼 것」 거르기 · 책장 · 목록 전환 · 끌어 놓아 가져오기 (책장은 Bookshelf.tsx)
+ * 2. useDeliverableMenu · Row — 우클릭 메뉴 · 목록 한 줄 (상태 · 그 까닭 · 작성 · 뽑기 상태)
  * 3. RulesDialog — 규칙 모아 보기 (산출물마다 이름 규칙 · 형식 · 템플릿 · 어휘 · 작성법)
  * 4. SettingsDialog — 산출물 설정 (산출물 폴더 · 기본 파일 이름 규칙 · 지난 판 폴더)
  * 5. NewDialog · GenerateDialog — 새 산출물 · 새 판 쓰기
@@ -11,7 +11,7 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { BookA, ExternalLink, File, FileImage, FileSpreadsheet, FileText, FileType2, ListChecks, Loader2, PanelRight, Plus, Presentation, Settings2, Square, StickyNote, Upload } from "lucide-react";
+import { BookA, Database, ExternalLink, File, FileImage, FileSpreadsheet, FileText, FileType2, FolderInput, LayoutGrid, List, ListChecks, Loader2, PanelRight, Plus, Presentation, Settings2, Square, StickyNote, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { type ActionList, attempt, ContextActions } from "@/components/ActionMenu";
 import { Chip, Empty, Label } from "@/components/bits";
@@ -27,7 +27,9 @@ import { qk, useDeliverables, useGlossary, useIssues } from "@/lib/queries";
 import { useLive, useUi } from "@/lib/store";
 import type { Deliverable, DeliverableSettings, Project } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { needsCare, stateOf } from "./AutoTab";
+import { needsCare, stateOf, triggerText } from "./AutoTab";
+import { DbSourcesDialog } from "./DbSources";
+import { Bookshelf } from "./Bookshelf";
 import { DeliverableSheet, useDeliverableActions, versionPath } from "./DeliverableSheet";
 
 /** 결과 파일 형식. 정한 형식 → 템플릿 확장자 → md 순이다(runner 의 doc_file_prompt 와 같은 순서). */
@@ -57,18 +59,39 @@ export function Deliverables({ project }: { project: Project }) {
 	const [creating, setCreating] = useState(false);
 	const [rules, setRules] = useState(false);
 	const [settings, setSettings] = useState(false);
+	const [dbOpen, setDbOpen] = useState(false);
 	// 「손볼 것」만 보기. 실패 · 검토 필요 · 반영 대기가 있는 산출물만 남긴다.
 	const [careOnly, setCareOnly] = useState(false);
 	const care = list.filter(needsCare);
 	const shown = careOnly ? care : list;
-	const pendingIssues = new Set(list.flatMap((d) => d.pending.map((p) => p.id))).size;
+	const pendingCount = new Set(list.flatMap((d) => d.pending.map((p) => p.id))).size;
 
+	const layout = useUi((s) => s.deliverableLayout);
+	const setLayout = useUi((s) => s.setDeliverableLayout);
+	const [importing, setImporting] = useState(false);
+
+	const importFolders = async (folders: string[]) => {
+		const r = await api.deliverableImportFolder(project.id, folders);
+		const parts = [`${r.imported}개를 가져왔습니다`];
+		if (r.skipped) parts.push(`이미 있어 건너뜀 ${r.skipped}`);
+		if (r.failed) parts.push(`실패 ${r.failed}`);
+		if (r.failed) toast.error(parts.join(" · "), { description: r.errors.join("\n") });
+		else toast(parts.join(" · "));
+	};
+	// 놓은 것이 파일이면 파일 하나씩, 폴더면 하위 구조대로 책장에 들인다.
 	const importPaths = async (paths: string[]) => {
+		setImporting(true);
 		try {
-			const added = await api.deliverableImport(project.id, paths);
-			toast(`${added.length}개를 산출물로 가져왔습니다`);
+			const { files, folders } = await api.pathsSplit(paths);
+			if (files.length) {
+				const added = await api.deliverableImport(project.id, files);
+				toast(`${added.length}개를 산출물로 가져왔습니다`);
+			}
+			if (folders.length) await importFolders(folders);
 		} catch (e) {
 			toast.error(errorText(e));
+		} finally {
+			setImporting(false);
 		}
 	};
 	const [dropRef, over] = useDropZone<HTMLDivElement>(importPaths);
@@ -89,11 +112,31 @@ export function Deliverables({ project }: { project: Project }) {
 					<Upload />
 					파일 가져오기
 				</Button>
-				<span className="ml-2 text-[12.5px] text-subtle">파일을 끌어다 놓아도 됩니다</span>
+				<Button
+					variant="outline"
+					disabled={importing}
+					title="하위 폴더 구조대로 책장을 만듭니다. 파일 하나가 산출물 하나가 되고, 작성법은 뽑지 않습니다."
+					onClick={async () => {
+						const dir = await openDialog({ directory: true, title: "산출물로 가져올 폴더", defaultPath: project.deliverablesDir || project.path });
+						if (typeof dir === "string") await importPaths([dir]);
+					}}
+				>
+					{importing ? <Loader2 className="animate-spin" /> : <FolderInput />}
+					{importing ? "가져오는 중" : "폴더 가져오기"}
+				</Button>
+				<span className="ml-2 text-[12.5px] text-subtle">파일 · 폴더를 끌어다 놓아도 됩니다</span>
 				<div className="flex-1" />
 				<Button variant="ghost" disabled={list.length === 0} onClick={() => setRules(true)}>
 					<ListChecks />
 					규칙 모아 보기
+				</Button>
+				<Button
+					variant="ghost"
+					title={`산출물의 DB 트리거가 따를 DB 구조를 앱이 받는 명령${project.dbSources?.length ? ` · ${project.dbSources.length}개` : ""}`}
+					onClick={() => setDbOpen(true)}
+				>
+					<Database />
+					DB 자료
 				</Button>
 				<Button variant="outline" title={`판 파일을 두는 폴더: ${project.deliverablesDir || "앱 데이터 폴더"}`} onClick={() => setSettings(true)}>
 					<Settings2 />
@@ -109,7 +152,17 @@ export function Deliverables({ project }: { project: Project }) {
 					<FilterPill on={careOnly} onClick={() => setCareOnly(true)}>
 						손볼 것 <span className="tabular">{care.length}</span>
 					</FilterPill>
-					{pendingIssues > 0 && <span className="ml-2 text-subtle">반영 대기 이슈 {pendingIssues}건</span>}
+					{pendingCount > 0 && <span className="ml-2 text-subtle">반영 대기 변경 {pendingCount}건</span>}
+					<div className="ml-auto flex items-center gap-1">
+						<FilterPill on={layout === "shelf"} onClick={() => setLayout("shelf")}>
+							<LayoutGrid className="size-3.5" />
+							책장
+						</FilterPill>
+						<FilterPill on={layout === "list"} onClick={() => setLayout("list")}>
+							<List className="size-3.5" />
+							목록
+						</FilterPill>
+					</div>
 				</div>
 			)}
 
@@ -122,6 +175,8 @@ export function Deliverables({ project }: { project: Project }) {
 						<br />
 						새 산출물을 만들고 템플릿 · 참고 자료를 넣으면 Claude 가 그 형식대로 씁니다.
 					</Empty>
+				) : layout === "shelf" ? (
+					<Bookshelf project={project} list={shown} issues={issues} />
 				) : (
 					<div className="surface overflow-hidden rounded-md">
 						<div className="grid grid-cols-[minmax(0,1fr)_72px_104px_88px] items-center gap-4 border-b border-border px-4 py-2 text-[12px] font-semibold text-subtle">
@@ -181,6 +236,7 @@ export function Deliverables({ project }: { project: Project }) {
 				}}
 			/>
 			<SettingsDialog project={project} open={settings} onOpenChange={setSettings} />
+			<DbSourcesDialog project={project} open={dbOpen} onOpenChange={setDbOpen} />
 			<DeliverableSheet project={project} />
 		</div>
 	);
@@ -202,14 +258,9 @@ function FilterPill({ on, onClick, children }: { on: boolean; onClick: () => voi
 	);
 }
 
-function Row({ project, d, issueNumber, onOpen, onIssue }: { project: Project; d: Deliverable; issueNumber?: number; onOpen: () => void; onIssue: () => void }) {
+/** 목록 줄과 책장 카드의 우클릭 메뉴. 확인 창은 줄 · 카드 밖에 둔다 — 안에 두면 창의 단추를 누른 것이 onClick 까지 올라가 상세 창이 열린다. */
+export function useDeliverableMenu(project: Project, d: Deliverable, issueNumber: number | undefined, onOpen: () => void, onIssue: () => void) {
 	const last = d.versions[d.versions.length - 1];
-	const activity = useLive((s) => (d.job ? s.byTarget[d.id]?.activity : undefined));
-	const sub = last ? [last.file, bytes(last.size)] : ["아직 판 없음"];
-	if (d.refs.length) sub.push(`템플릿 · 자료 ${d.refs.length}`);
-	if (d.skill.trim()) sub.push(d.vocab.length ? `작성법 · 어휘 ${d.vocab.length}` : "작성법");
-	if (d.autoUpdate) sub.push(d.autoLast ? `자동 갱신 ${d.autoLast}` : "자동 갱신");
-	const state = stateOf(d);
 	const { items, dialogs } = useDeliverableActions(project, d);
 	const menu: ActionList = [
 		{ label: "열기", icon: <PanelRight />, onSelect: onOpen },
@@ -231,6 +282,19 @@ function Row({ project, d, issueNumber, onOpen, onIssue }: { project: Project; d
 		"sep",
 		...items,
 	];
+	return { menu, dialogs };
+}
+
+function Row({ project, d, issueNumber, onOpen, onIssue }: { project: Project; d: Deliverable; issueNumber?: number; onOpen: () => void; onIssue: () => void }) {
+	const last = d.versions[d.versions.length - 1];
+	const activity = useLive((s) => (d.job ? s.byTarget[d.id]?.activity : undefined));
+	const sub = last ? [last.file, bytes(last.size)] : ["아직 판 없음"];
+	if (d.refs.length) sub.push(`템플릿 · 자료 ${d.refs.length}`);
+	if (d.skill.trim()) sub.push(d.vocab.length ? `작성법 · 어휘 ${d.vocab.length}` : "작성법");
+	const trig = triggerText(d, project);
+	if (trig) sub.push(d.autoLast ? `자동 갱신(${trig}) ${d.autoLast}` : `자동 갱신(${trig})`);
+	const state = stateOf(d);
+	const { menu, dialogs } = useDeliverableMenu(project, d, issueNumber, onOpen, onIssue);
 	const row = (
 		<div
 			role="button"
@@ -278,7 +342,6 @@ function Row({ project, d, issueNumber, onOpen, onIssue }: { project: Project; d
 			<span className="text-right text-[12.5px] text-subtle">{relTime(d.updatedAt)}</span>
 		</div>
 	);
-	// 확인 창은 줄 밖에 둔다. 줄 안에 두면 창의 단추를 누른 것이 줄의 onClick 까지 올라가 상세 창이 열린다.
 	return (
 		<>
 			<ContextActions items={menu}>{row}</ContextActions>

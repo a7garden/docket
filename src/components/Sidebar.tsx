@@ -1,13 +1,14 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { BookMarked, FolderPlus, MessagesSquare, Settings2 } from "lucide-react";
+import { Archive, BookMarked, FolderPlus, MessagesSquare, Settings2 } from "lucide-react";
 import { toast } from "sonner";
+import { ArchivedProjects } from "@/features/project/ArchivedProjects";
 import { projectActions } from "@/features/project/ProjectHeader";
 import { api, errorText } from "@/lib/api";
 import { keyAnchor, useCommands } from "@/lib/keys";
 import { useNoticeCounts } from "@/lib/notices";
-import { focusOnly, qk, useAllTalks, usePluginMenus, useProjects } from "@/lib/queries";
+import { focusOnly, qk, useAllTalks, useArchivedProjects, usePluginMenus, useProjects } from "@/lib/queries";
 import { roveItem, useRovingList } from "@/lib/rovingList";
 import { useUi } from "@/lib/store";
 import { GLOBAL_PID, type Issue, type Project } from "@/lib/types";
@@ -44,7 +45,9 @@ export function Sidebar({ rail = false }: { rail?: boolean }) {
 	const { app: appTalks, byProject } = useAllTalks(projects);
 	const counts = useNoticeCounts();
 	const rove = useRovingList();
-	useCommands([{ label: "프로젝트 폴더 추가", onSelect: () => void pickProject(qc) }]);
+	const { data: archived = [] } = useArchivedProjects();
+	const [showArchived, setShowArchived] = useState(false);
+	useCommands([{ label: "프로젝트 폴더 추가", onSelect: () => void pickProject(qc) }, ...(archived.length ? [{ label: "보관한 프로젝트", onSelect: () => setShowArchived(true) }] : [])]);
 
 	return (
 		<aside data-region="sidebar" {...rove} className={cn("flex shrink-0 flex-col border-r border-border bg-sidebar p-2", rail ? "w-14" : "w-56")}>
@@ -71,14 +74,16 @@ export function Sidebar({ rail = false }: { rail?: boolean }) {
 						rail={rail}
 						issues={lists[i]?.data ?? []}
 						notices={counts(p.id).total - counts(p.id).talks}
-						active={p.id === projectId && (view === "board" || view === "deliverables" || view === "knowledge" || view === "glossary")}
+						active={p.id === projectId && (view === "board" || view === "deliverables" || view === "knowledge" || view === "glossary" || view === "memory")}
 						onClick={() => {
 							setProject(p.id);
-							if (view !== "deliverables" && view !== "knowledge" && view !== "glossary") setView("board");
+							if (view !== "deliverables" && view !== "knowledge" && view !== "glossary" && view !== "memory") setView("board");
 						}}
 					/>
 				))}
 			</nav>
+			{archived.length > 0 && <NavItem icon={<Archive />} label={`보관한 프로젝트 ${archived.length}`} active={false} onClick={() => setShowArchived(true)} rail={rail} />}
+			<ArchivedProjects open={showArchived} onOpenChange={setShowArchived} />
 			<div className="mt-2 flex flex-col gap-0.5 border-t border-border pt-2">
 				{/* 프로젝트에 매이지 않는 자리끼리 묶는다. 프로젝트가 하나도 없어도 열린다. 대화는 앱 대화와 프로젝트별 대화를 모아 보는 유일한 자리라, 숫자도 모든 대화의 읽지 않은 답을 센다 — 프로젝트 줄은 대화를 뺀다. */}
 				<NavItem
@@ -140,6 +145,7 @@ function ProjectItem({
 	onClick: () => void;
 }) {
 	const menus = usePluginMenus("project");
+	const qc = useQueryClient();
 	const running = issues.some((i) => i.run);
 	const item = (
 		<button
@@ -164,7 +170,7 @@ function ProjectItem({
 		</button>
 	);
 	return (
-		<ContextActions items={[...projectActions(project, true), "sep", ...pluginActions(menus, { projectId: project.id })]}>
+		<ContextActions items={[...projectActions(project, qc, true), "sep", ...pluginActions(menus, { projectId: project.id })]}>
 			<RailTip rail={rail} label={project.name}>
 				{item}
 			</RailTip>
