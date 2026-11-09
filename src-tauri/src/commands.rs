@@ -341,7 +341,7 @@ pub fn talk_create(app: AppHandle, project_id: String, talk_id: String) -> Resul
 	Ok(v)
 }
 
-/// 앱 대화가 도는 가상의 프로젝트(앱 데이터 폴더 · 권한 칸). 프로젝트 목록에는 없어 따로 받는다.
+/// 일반 대화가 도는 가상의 프로젝트(빈 작업 폴더 · 권한 칸). 프로젝트 목록에는 없어 따로 받는다.
 #[tauri::command]
 pub fn app_project(store: State<Store>) -> Result<Project> {
 	store.global_project()

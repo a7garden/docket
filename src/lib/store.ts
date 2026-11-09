@@ -6,7 +6,7 @@ import type { ChatMode, RunEnvelope, RunEvent } from "./types";
 
 export type View = "board" | "deliverables" | "talks" | "knowledge" | "glossary" | "memory" | "claude" | "settings";
 
-/** 대화 하나를 가리키는 칸. 앱 대화는 projectId 가 GLOBAL_PID 다. */
+/** 대화 하나를 가리키는 칸. 일반 대화는 projectId 가 GLOBAL_PID 다. */
 export interface TalkRef {
 	projectId: string;
 	id: string;
@@ -38,7 +38,7 @@ interface Ui {
 	shelfFolded: Record<string, boolean>;
 	setDeliverableLayout: (l: "shelf" | "list") => void;
 	setShelfFold: (key: string, folded: boolean) => void;
-	/** 「대화」 화면에서 연 대화. 앱 대화 · 다른 프로젝트 대화를 열어도 사이드바의 현재 프로젝트는 그대로 둔다. */
+	/** 「대화」 화면에서 연 대화. 일반 대화 · 다른 프로젝트 대화를 열어도 사이드바의 현재 프로젝트는 그대로 둔다. */
 	talk: TalkRef | null;
 	/** 「대화」 화면에서 접고 편 묶음(앱 · 프로젝트 id). 값이 없으면 묶음마다 기본값을 따른다. 앱을 끌 때까지만 기억한다. */
 	talkFolded: Record<string, boolean>;
@@ -49,7 +49,7 @@ interface Ui {
 	chatModes: Record<string, ChatMode>;
 	/** 마지막에 쓴 모드. 새 대화가 이 모드로 시작한다. */
 	lastChatMode: ChatMode | null;
-	/** 프로젝트(앱 대화는 GLOBAL_PID)마다 아직 저장하지 않은 새 대화의 id. 첫 질문을 보낼 때 저장한다. 앱을 끌 때까지만 기억한다. */
+	/** 프로젝트(일반 대화는 GLOBAL_PID)마다 아직 저장하지 않은 새 대화의 id. 첫 질문을 보낼 때 저장한다. 앱을 끌 때까지만 기억한다. */
 	newTalks: Record<string, string>;
 	/** Claude 설정에서 보는 프로젝트. null 이면 전역. 사이드바의 현재 프로젝트와 따로 움직인다 — 설정을 둘러보고 보드로 돌아와도 보던 프로젝트가 그대로 있게. */
 	claudeProjectId: string | null;

@@ -589,7 +589,7 @@ fn stage_mark(text: &str) -> (String, Option<String>) {
 }
 
 /// 프로젝트 대화에서 사용자가 작업 메모로 남기라고 했을 때 Claude 가 답에 내는 블록의 여는 줄과 닫는 줄. 여는 줄 뒤에 제목이 온다.
-/// 앱 대화는 어느 보드에 남길지 `[메모:등록@<프로젝트 이름>]` 으로 적는다. 프로젝트 대화는 `@` 없이 자기 보드에 남긴다.
+/// 일반 대화는 어느 보드에 남길지 `[메모:등록@<프로젝트 이름>]` 으로 적는다. 프로젝트 대화는 `@` 없이 자기 보드에 남긴다.
 const MEMO_MARK: &str = "[메모:등록]";
 const MEMO_GLOBAL_MARK: &str = "[메모:등록@<프로젝트 이름>]";
 const MEMO_OPEN: &str = "[메모:등록";
@@ -1847,14 +1847,13 @@ fn issue_prompt(job: &Job, v: &IssueView, resumed: bool) -> String {
 			if resumed {
 				return format!("{text}{mode}\n");
 			}
-			// 앱 대화는 저장소가 없다. 저장소 규칙(RULES) 대신 앱 데이터 안내를 싣는다. 자리는 실행이 채운다(global_talk::CONTEXT_SLOT).
+			// 일반 대화는 저장소도 주제도 없다. 터미널 claude 처럼 사용자가 쓴 글을 앞에 그대로 두고, 앱이 그리는 그림 규칙과 메모 남기는 법만 붙인다.
+			// 2026.11.09 : 앱 데이터 안내 · 플러그인 문서를 뺐다. 실으면 무엇을 물어도 이 앱 이야기로 끌려갔다.
+			// 메모를 남길 보드는 사용자가 고르므로 프로젝트 이름은 남긴다. 자리는 실행이 채운다(global_talk::CONTEXT_SLOT).
 			if app_talk {
 				let memo = MEMO_RULE.replace(MEMO_MARK, MEMO_GLOBAL_MARK).replace("보드에 새 메모를", "그 프로젝트의 보드에 새 메모를")
-					+ "\n- 앱 대화는 어느 프로젝트의 보드에 남길지 여는 줄의 `@` 뒤에 아래 「등록한 프로젝트」의 이름을 그대로 적는다. 이름이 맞지 않으면 등록되지 않는다.";
-				return format!(
-					"사용자가 이 앱(docket) 자체 — 플러그인 · 설정 · 기록 — 에 대해 묻는다. 지금 폴더는 이 앱의 데이터 폴더다.\n\n{}\n\n## 사용자\n{text}{mode}\n\n{memo}\n\n{VISUAL_RULE}\n",
-					crate::global_talk::CONTEXT_SLOT
-				);
+					+ "\n- 어느 프로젝트의 보드에 남길지 여는 줄의 `@` 뒤에 아래 「등록한 프로젝트」의 이름을 그대로 적는다. 이름이 맞지 않으면 등록되지 않는다.";
+				return format!("{text}{mode}\n\n---\n\n{memo}\n\n{}\n\n{VISUAL_RULE}\n", crate::global_talk::CONTEXT_SLOT);
 			}
 			if v.issue.talk {
 				return format!(
@@ -2528,9 +2527,9 @@ pub fn send_queued(app: &AppHandle, pid: &str, iid: &str, extra: Option<QueuedCh
 
 fn start_issue(app: &AppHandle, pid: &str, iid: &str, job: Job) -> Result<IssueView> {
 	let store = app.state::<Store>();
-	// 앱 대화는 묻고 답하기만 한다. 계획 · 구현 · 되돌리기는 저장소가 있는 보드의 일이다.
+	// 일반 대화는 묻고 답하기만 한다. 계획 · 구현 · 되돌리기는 저장소가 있는 보드의 일이다.
 	if pid == GLOBAL_PID && !matches!(job, Job::Chat { .. }) {
-		return msg("앱 대화에서는 대화만 할 수 있습니다");
+		return msg("일반 대화에서는 대화만 할 수 있습니다");
 	}
 	// 이슈를 실행 중으로 바꾸기 전에 읽는다. 바꾼 뒤에 실패하면 이슈가 실행 중인 채로 남는다.
 	let project = store.project(pid)?;
@@ -2835,7 +2834,7 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 		let q = crate::glossary::expand_query(&gl_list, &q);
 		kb_hits = crate::kb::find(app, &project, &settings, &q, "").await;
 	}
-	// 기억은 어휘 사전처럼 되돌리기에는 붙이지 않는다. 앱 대화는 프로젝트가 아니라 기억이 없다.
+	// 기억은 어휘 사전처럼 되돌리기에는 붙이지 않는다. 일반 대화는 프로젝트가 아니라 기억이 없다.
 	let memory_list = if project.memory.enabled && kind != RunKind::Revert && pid != GLOBAL_PID {
 		let q = match job {
 			Job::Chat { text, .. } => text.clone(),
@@ -2855,13 +2854,6 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 	// 찍기 도구는 저장할 폴더가 없으면 실패한다(msedge --screenshot 등). 프롬프트가 가리키는 폴더를 미리 만든다.
 	if matches!(kind, RunKind::Implement | RunKind::Chat) {
 		let _ = std::fs::create_dir_all(Path::new(&view.dir).join("shots"));
-	}
-	// 앱 대화는 앱 데이터 전체를 고칠 수 있다. 고칠 수 있게 보낸 차례 전에 설정을 남겨 잘못 고쳐도 되돌릴 수 있게 한다.
-	if pid == GLOBAL_PID {
-		crate::global_talk::prepare(&store);
-		if matches!(job, Job::Chat { mode, .. } if mode.can_edit()) {
-			crate::global_talk::backup(&store, run_id);
-		}
 	}
 	// 함께 도는 구현이 잡은 파일을 고쳤으면 실행은 그대로 두고 흐름에 한 번씩 남긴다. 결과 확인 때 사람이 본다.
 	let mut overlapped: HashSet<String> = HashSet::new();
@@ -3118,7 +3110,7 @@ async fn run_issue_job(app: &AppHandle, pid: &str, iid: &str, job: &Job, run_id:
 
 /// 프로젝트 대화가 낸 메모 블록을 보드의 새 메모로 만든다. 자동 계획은 보드 작성칸으로 쓴 메모와 같이 설정을 따른다.
 /// 무엇을 등록했는지(실패했으면 까닭)를 대화의 흐름에 남긴다. 대화 화면은 그 기록으로 「메모 #N」 줄을 그린다.
-/// 앱 대화의 메모는 블록에 적힌 프로젝트 이름으로 보드를 고르고, 기록 글 앞에 `@<pid>` 를 붙여 화면이 그 보드를 열게 한다.
+/// 일반 대화의 메모는 블록에 적힌 프로젝트 이름으로 보드를 고르고, 기록 글 앞에 `@<pid>` 를 붙여 화면이 그 보드를 열게 한다.
 fn register_memos(app: &AppHandle, pid: &str, tid: &str, memos: &[MemoBlock], auto_plan: bool) -> Result<()> {
 	let store = app.state::<Store>();
 	let mode = new_title_mode(&store.settings()?);
@@ -3157,7 +3149,7 @@ fn register_memos(app: &AppHandle, pid: &str, tid: &str, memos: &[MemoBlock], au
 	Ok(())
 }
 
-/// 앱 대화의 메모 블록이 가리킨 프로젝트. 이름(대소문자 무시)이 딱 하나 맞아야 한다 — 짐작해 엉뚱한 보드에 남기지 않는다.
+/// 일반 대화의 메모 블록이 가리킨 프로젝트. 이름(대소문자 무시)이 딱 하나 맞아야 한다 — 짐작해 엉뚱한 보드에 남기지 않는다.
 fn memo_target<'a>(projects: &'a [Project], name: &str) -> std::result::Result<&'a Project, String> {
 	let names = || projects.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(" · ");
 	if name.is_empty() {
@@ -3206,7 +3198,7 @@ pub fn document_job(app: &AppHandle, pid: &str, did: Option<String>, request: St
 	let JobOrigin { issue_id, catch_up, db, db_catch_up } = origin;
 	let issue_id = issue_id.as_str();
 	if pid == GLOBAL_PID {
-		return msg("앱 대화에는 산출물이 없습니다");
+		return msg("일반 대화에는 산출물이 없습니다");
 	}
 	let store = app.state::<Store>();
 	let did = match did {
@@ -3766,7 +3758,7 @@ pub fn spawn_titler(app: AppHandle) {
 			let Ok(projects) = store.active_projects() else { continue };
 			let now = now_ms();
 			let runner = app.state::<Runner>();
-			// 앱 대화도 프로젝트 대화처럼 첫 답 뒤에 제목을 짓는다. 앱 대화 폴더에는 보드 이슈가 없다.
+			// 일반 대화도 프로젝트 대화처럼 첫 답 뒤에 제목을 짓는다. 일반 대화 폴더에는 보드 이슈가 없다.
 			for pid in projects.into_iter().map(|p| p.id).chain([GLOBAL_PID.to_string()]) {
 				let Ok(mut list) = store.list_issues(&pid) else { continue };
 				list.extend(store.list_talks(&pid).unwrap_or_default());

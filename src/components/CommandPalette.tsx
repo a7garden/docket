@@ -54,8 +54,8 @@ interface Source {
 	docs: Deliverable[];
 }
 
-/** 앱 대화의 자리. 항목 아래 줄에 「앱」으로 보인다. */
-const APP_SOURCE = { id: GLOBAL_PID, name: "앱", path: "" } as Project;
+/** 일반 대화의 자리. 항목 아래 줄에 「일반」으로 보인다. */
+const APP_SOURCE = { id: GLOBAL_PID, name: "일반", path: "" } as Project;
 
 const openIssue = (i: Issue) => useUi.getState().openTarget({ projectId: i.projectId, target: "issue", id: i.id });
 const openTalk = (t: Issue) => useUi.getState().openTarget({ projectId: t.projectId, target: "issue", id: t.id, talk: true });
@@ -143,9 +143,9 @@ function searchItems(all: Source[], app: Source, q: string): Item[] {
 		}
 		add({ key: `v:${p.id}:talks`, group: "화면", label: `${p.name} › 대화`, text: `${p.name} 대화`, score: 0, at: 0, go: () => goTalks(p.id) });
 	}
-	// 앱 대화는 프로젝트가 아니다. 프로젝트 · 탭 항목 없이 대화만 넣는다.
+	// 일반 대화는 프로젝트가 아니다. 프로젝트 · 탭 항목 없이 대화만 넣는다.
 	for (const t of app.talks) add(talkItem("대화", t, app.project));
-	add({ key: "v:talks", group: "화면", label: "대화", text: "대화 앱 대화 모든 대화", score: 0, at: 0, go: () => useUi.getState().setView("talks") });
+	add({ key: "v:talks", group: "화면", label: "대화", text: "대화 일반 대화 모든 대화", score: 0, at: 0, go: () => useUi.getState().setView("talks") });
 	add({ key: "v:claude", group: "화면", label: "Claude 설정", score: 0, at: 0, go: () => useUi.getState().setView("claude") });
 	add({ key: "v:settings", group: "화면", label: "설정", score: 0, at: 0, go: () => useUi.getState().setView("settings") });
 	for (const id of SECTION_IDS) {

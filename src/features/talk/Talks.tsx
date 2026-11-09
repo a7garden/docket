@@ -19,7 +19,6 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/compon
 import { Input } from "@/components/ui/input";
 import { ChatIntro, ChatStarters, isBlankChat } from "@/features/issue/ChatEmpty";
 import { ChatComposer, ChatTab, type Draft, NO_DRAFT, SessionBar, useTranscript } from "@/features/issue/ChatTab";
-import { canEdit, useChatMode } from "@/lib/chatMode";
 import { AppTalkSettings } from "@/features/project/ProjectHeader";
 import { api, errorText } from "@/lib/api";
 import { relTime } from "@/lib/format";
@@ -90,13 +89,13 @@ export function TalkSlot({ talk, projectPath }: { talk: Issue; projectPath: stri
 	);
 }
 
-/** 대화가 도는 자리. 앱 대화는 앱 데이터 폴더에서 돌고 무엇이든 고칠 수 있어, 늘 눈에 띄게 둔다. */
+/** 대화가 도는 자리. 일반 대화는 어느 프로젝트에도 묶이지 않았다는 것을 보인다. */
 export function TalkTag({ talk }: { talk: Issue }) {
 	const { data: projects = [] } = useProjects();
 	if (talk.projectId === GLOBAL_PID) {
 		return (
-			<span title="앱 데이터 폴더에서 돕니다" className="shrink-0 rounded-sm border border-border px-1.5 text-[11px] text-muted-foreground">
-				앱
+			<span title="어느 프로젝트에도 묶이지 않은 대화" className="shrink-0 rounded-sm border border-border px-1.5 text-[11px] text-muted-foreground">
+				일반
 			</span>
 		);
 	}
@@ -128,7 +127,6 @@ function FromIssue({ talk }: { talk: Issue }) {
 export function TalkPane({ talk, projectPath, compact = false }: { talk: Issue; projectPath: string; compact?: boolean }) {
 	const draft = useUi((s) => s.talkDrafts[talk.id]) ?? NO_DRAFT;
 	const setDraft = useUi((s) => s.setDraft);
-	const mode = useChatMode(talk);
 	const qc = useQueryClient();
 	const unsaved = useIsNewTalk(talk);
 	// 첫 질문을 보낼 때 대화를 만든다. 사건을 기다리지 않고 목록에 먼저 넣어야 그 사이 대화가 목록에서 빠져 최근 대화로 튀지 않는다.
@@ -181,11 +179,6 @@ export function TalkPane({ talk, projectPath, compact = false }: { talk: Issue; 
 				) : (
 					<div data-scroll className={cn("min-h-0 flex-1 overflow-y-auto py-5", pad)}>
 						<ChatTab issue={talk} projectPath={projectPath} />
-					</div>
-				)}
-				{talk.projectId === GLOBAL_PID && canEdit(mode) && (
-					<div className={cn("border-brand/30 bg-brand/10 py-1.5 text-[12px] break-keep text-brand-text", blank ? "mx-auto w-full max-w-3xl rounded-md border px-3" : cn("border-t", pad))}>
-						설정 · 이슈 기록까지 고칠 수 있습니다 · 보내기 전에 설정 파일을 백업합니다
 					</div>
 				)}
 				<ChatComposer issue={talk} draft={draft} onDraft={onDraft} beforeSend={unsaved ? save : undefined} compact={compact} hero={blank} />
@@ -263,9 +256,9 @@ export function useTalkActions(talk: Issue, docked = false): { items: ActionList
 	const items: ActionList = [
 		!docked && { label: "옆에 띄우기", icon: <PanelRight />, onSelect: () => useUi.getState().dockTalk({ projectId: talk.projectId, id: talk.id }) },
 		{ label: "대화 폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.reveal(talk.dir)) },
-		// 앱 대화는 프로젝트 설정이 없다. 명령 허용 · 막을 목록과 앱 데이터 폴더를 대화 메뉴에서 연다.
-		isApp && !!app && { label: "앱 대화 권한", icon: <ShieldCheck />, onSelect: () => setPerm(true) },
-		isApp && !!app && { label: "앱 데이터 폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.open(app.path)) },
+		// 일반 대화는 프로젝트 설정이 없다. 명령 허용 · 막을 목록과 실행 폴더를 대화 메뉴에서 연다.
+		isApp && !!app && { label: "일반 대화 권한", icon: <ShieldCheck />, onSelect: () => setPerm(true) },
+		isApp && !!app && { label: "작업 폴더 열기", icon: <FolderOpen />, onSelect: () => void attempt(() => api.open(app.path)) },
 		"sep",
 		{ label: "지우기", icon: <Trash2 />, destructive: true, disabled: !!talk.run, onSelect: () => setConfirm(true) },
 	];

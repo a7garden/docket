@@ -6,7 +6,7 @@ pub fn now_ms() -> i64 {
 	chrono::Utc::now().timestamp_millis()
 }
 
-/// 프로젝트에 묶이지 않은 대화(화면 이름 「앱 대화」)의 예약 프로젝트 id. 진짜 프로젝트 id 는 16진수 12자라 겹치지 않는다.
+/// 프로젝트에 묶이지 않은 대화(화면 이름 「일반 대화」)의 예약 프로젝트 id. 진짜 프로젝트 id 는 16진수 12자라 겹치지 않는다.
 /// projects.json 에 넣지 않고 Store::project 가 가상의 프로젝트로 돌려준다 — 보내기 · 대기열 · 첨부 · 알림을 프로젝트 대화와 함께 쓰려는 것이다.
 pub const GLOBAL_PID: &str = "global";
 

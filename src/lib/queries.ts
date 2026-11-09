@@ -88,12 +88,12 @@ export function useArchivedProjects() {
 	return useQuery({ queryKey: qk.projects, queryFn: api.projects, select: archivedOnly });
 }
 
-/** 앱 대화의 가상 프로젝트. 경로는 앱 데이터 폴더라 바뀌지 않는다. 권한 칸은 저장할 때 캐시를 바꾼다. */
+/** 일반 대화의 가상 프로젝트. 경로는 앱 데이터 안 작업 폴더라 바뀌지 않는다. 권한 칸은 저장할 때 캐시를 바꾼다. */
 export function useAppProject() {
 	return useQuery({ queryKey: qk.appProject, queryFn: api.appProject, staleTime: Infinity });
 }
 
-/** 앱 대화와 모든 프로젝트 대화. 대화 화면 목록 · 옆 칸 · 사이드바가 함께 쓴다 — Ctrl+K 와 같은 쿼리 키라 캐시를 나눠 쓴다. */
+/** 일반 대화와 모든 프로젝트 대화. 대화 화면 목록 · 옆 칸 · 사이드바가 함께 쓴다 — Ctrl+K 와 같은 쿼리 키라 캐시를 나눠 쓴다. */
 export function useAllTalks(projects: Project[]) {
 	const app = useTalks(GLOBAL_PID);
 	const lists = useQueries({ queries: projects.map((p) => ({ queryKey: qk.talks(p.id), queryFn: () => api.talks(p.id), ...focusOnly(p.id) })) });

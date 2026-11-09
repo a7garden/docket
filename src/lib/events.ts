@@ -37,7 +37,7 @@ export function useDocketEvents() {
 					? (ui.dock.open && ui.dock.talk?.id === payload.id) ||
 						(ui.view === "talks" && ui.talk?.id === payload.id)
 					: ui.issueId === payload.id;
-				const name = payload.talk ? `${payload.projectId === GLOBAL_PID ? "앱 대화" : "대화"} · ${payload.title || "새 대화"}` : `#${payload.number} ${payload.title}`;
+				const name = payload.talk ? `${payload.projectId === GLOBAL_PID ? "일반 대화" : "대화"} · ${payload.title || "새 대화"}` : `#${payload.number} ${payload.title}`;
 				// Claude 가 허락 · 답을 기다리기 시작했다. 답할 때까지 실행이 멈춰 있으니, 보고 있지 않으면 알린다.
 				const asks = payload.run?.asks ?? [];
 				if (asks.length > (prev?.run?.asks?.length ?? 0)) {

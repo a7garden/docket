@@ -136,8 +136,8 @@ export function useNotices(): Notice[] {
 		talks: talks[n]?.data ?? [],
 		docs: docs[n]?.data ?? [],
 	}));
-	// 앱 대화는 프로젝트가 없다. 알림 줄이 쓰는 이름만 채운 칸을 둔다 — 셈은 GLOBAL_PID 로 묶여 어느 프로젝트 숫자에도 더해지지 않고 알림함과 사이드바 「대화」의 숫자에만 보인다.
-	all.push({ project: { id: GLOBAL_PID, name: "앱" } as Project, issues: [], talks: appTalks, docs: [] });
+	// 일반 대화는 프로젝트가 없다. 알림 줄이 쓰는 이름만 채운 칸을 둔다 — 셈은 GLOBAL_PID 로 묶여 어느 프로젝트 숫자에도 더해지지 않고 알림함과 사이드바 「대화」의 숫자에만 보인다.
+	all.push({ project: { id: GLOBAL_PID, name: "일반" } as Project, issues: [], talks: appTalks, docs: [] });
 
 	const out: Notice[] = [];
 	const unread = (id: string, at: number) => at > 0 && at > Math.max(seen[id] ?? 0, since);
@@ -145,7 +145,7 @@ export function useNotices(): Notice[] {
 		for (const t of talks) {
 			const at = lastEnded(t.runs);
 			const n = unread(t.id, at) && issueNotice(t);
-			const kind = project.id === GLOBAL_PID ? "앱 대화" : "대화";
+			const kind = project.id === GLOBAL_PID ? "일반 대화" : "대화";
 			if (n) out.push({ key: `t:${t.id}`, project, view: "talks", projectId: project.id, target: "issue", id: t.id, talk: true, title: `${kind} · ${t.title || "새 대화"}`, at, ...n });
 		}
 		for (const i of issues) {

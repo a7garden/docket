@@ -331,8 +331,7 @@ export function RemoveProject({ project, onCancel, onRemoved }: { project: Proje
 }
 
 /**
- * 앱 대화의 권한. 앱 대화는 앱 데이터 폴더에서 돌아 이름 · 경로 · 워크트리 · 함께 여는 폴더가 뜻이 없고, 명령 허용 · 막을 목록만 둔다.
- * 플러그인 빌드 명령(npm · extism-js)을 여기 허용해 두면 묻지 않고 돈다.
+ * 일반 대화의 권한. 일반 대화는 앱이 만든 빈 작업 폴더에서 돌아 이름 · 경로 · 워크트리 · 함께 여는 폴더가 뜻이 없고, 명령 허용 · 막을 목록만 둔다.
  */
 export function AppTalkSettings({ project, open, onOpenChange }: { project: Project; open: boolean; onOpenChange: (o: boolean) => void }) {
 	const qc = useQueryClient();
@@ -360,7 +359,7 @@ export function AppTalkSettings({ project, open, onOpenChange }: { project: Proj
 		<Dialog open={open} onOpenChange={onOpenChange}>
 			<DialogContent className="pop max-h-[88vh] gap-5 overflow-y-auto p-6 sm:max-w-lg">
 				<DialogHeader>
-					<DialogTitle>앱 대화 권한</DialogTitle>
+					<DialogTitle>일반 대화 권한</DialogTitle>
 					<DialogDescription className="mono truncate text-[12px]">{project.path}</DialogDescription>
 				</DialogHeader>
 				<div className="flex flex-col gap-1.5">
@@ -368,7 +367,7 @@ export function AppTalkSettings({ project, open, onOpenChange }: { project: Proj
 					<Textarea
 						value={tools}
 						onChange={(e) => setTools(e.target.value)}
-						placeholder={"한 줄에 하나\nBash(npm run build:*)\nBash(extism-js:*)"}
+						placeholder={"한 줄에 하나\nWebFetch\nBash(python:*)"}
 						className="mono min-h-24 resize-none bg-transparent text-[12.5px]"
 					/>
 				</div>

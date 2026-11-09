@@ -136,7 +136,7 @@ export const api = {
 	talkCreate: (projectId: string, talkId: string) => invoke<Issue>("talk_create", { projectId, talkId }),
 	/** 메모의 대화를 같은 프로젝트의 대화로 갈라 낸다. 메모는 그대로 남는다. */
 	talkPromote: (projectId: string, issueId: string, talkId: string) => invoke<Issue>("talk_promote", { projectId, issueId, talkId }),
-	/** 앱 대화가 도는 가상의 프로젝트(앱 데이터 폴더 · 권한 칸). 프로젝트 목록에는 없다. */
+	/** 일반 대화가 도는 가상의 프로젝트(빈 작업 폴더 · 권한 칸). 프로젝트 목록에는 없다. */
 	appProject: () => invoke<Project>("app_project"),
 	issueSaveNote:(projectId: string, issueId: string, note: string) =>
 		invoke<Issue>("issue_save_note", { projectId, issueId, note }),

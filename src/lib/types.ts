@@ -652,7 +652,7 @@ export interface IssueRef {
 	title: string;
 }
 
-/** 앱 대화(프로젝트에 묶이지 않은 대화)의 예약 프로젝트 id. 서버 model.rs 의 GLOBAL_PID 와 같다. */
+/** 일반 대화(프로젝트에 묶이지 않은 대화)의 예약 프로젝트 id. 서버 model.rs 의 GLOBAL_PID 와 같다. */
 export const GLOBAL_PID = "global";
 
 export interface Worktree {

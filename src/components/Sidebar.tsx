@@ -85,7 +85,7 @@ export function Sidebar({ rail = false }: { rail?: boolean }) {
 			{archived.length > 0 && <NavItem icon={<Archive />} label={`보관한 프로젝트 ${archived.length}`} active={false} onClick={() => setShowArchived(true)} rail={rail} />}
 			<ArchivedProjects open={showArchived} onOpenChange={setShowArchived} />
 			<div className="mt-2 flex flex-col gap-0.5 border-t border-border pt-2">
-				{/* 프로젝트에 매이지 않는 자리끼리 묶는다. 프로젝트가 하나도 없어도 열린다. 대화는 앱 대화와 프로젝트별 대화를 모아 보는 유일한 자리라, 숫자도 모든 대화의 읽지 않은 답을 센다 — 프로젝트 줄은 대화를 뺀다. */}
+				{/* 프로젝트에 매이지 않는 자리끼리 묶는다. 프로젝트가 하나도 없어도 열린다. 대화는 일반 대화와 프로젝트별 대화를 모아 보는 유일한 자리라, 숫자도 모든 대화의 읽지 않은 답을 센다 — 프로젝트 줄은 대화를 뺀다. */}
 				<NavItem
 					icon={<MessagesSquare />}
 					label="대화"

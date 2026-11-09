@@ -524,14 +524,14 @@ export const talks: Issue[] = [
 	}),
 ];
 
-/** 앱 대화. 프로젝트에 묶이지 않고 앱 데이터 폴더에서 돈다. 둘째 차례에서 calc 보드에 메모 #12 를 남겼다. */
+/** 일반 대화. 프로젝트에 묶이지 않고 앱 데이터 안 빈 작업 폴더에서 돈다. 둘째 차례에서 calc 보드에 메모 #12 를 남겼다. */
 export const appTalks: Issue[] = [
 	base("g0000000002", 0, {
 		projectId: "global",
 		talk: true,
-		title: "슬랙 알림 플러그인 만들기",
+		title: "슬랙 웹후크로 알림 보내기",
 		sessionId: "7a9b-app-0002",
-		runs: [talkRun("r-app-1", now - 6 * min, "구현이 끝나면 슬랙으로 알리는 플러그인을 만들어 줘"), talkRun("r-app-2", now - 3 * min, "calc 보드에 알림 주소 칸을 더하는 메모로 남겨 줘")],
+		runs: [talkRun("r-app-1", now - 6 * min, "빌드가 끝나면 슬랙으로 알리는 법을 알려 줘"), talkRun("r-app-2", now - 3 * min, "calc 보드에 알림 주소 칸을 더하는 메모로 남겨 줘")],
 		history: [
 			{ at: now - 7 * min, kind: "created", text: "" },
 			{ at: now - 3 * min + 30_000, kind: "memo", text: `@${P} #12 알림 주소 칸 더하기` },
@@ -542,8 +542,8 @@ export const appTalks: Issue[] = [
 	base("g0000000001", 0, { projectId: "global", talk: true, title: "herdr 탭 이름 규칙", sessionId: "7a9b-app-0001", runs: [talkRun("r-app-0", now - 30 * 3600_000, "herdr 탭 이름은 어디서 정해?")], updatedAt: now - 30 * 3600_000, dir: `${DATA}\\global\\issues\\g0000000001` }),
 ];
 
-/** 앱 대화가 도는 가상의 프로젝트 */
-export const appProject: Project = { ...projects[0], id: "global", name: "앱", path: DATA, allowedTools: ["Bash(npm run build:*)"], extraDirs: [], kb: KB_OFF, glossary: GL_OFF };
+/** 일반 대화가 도는 가상의 프로젝트 */
+export const appProject: Project = { ...projects[0], id: "global", name: "일반", path: `${DATA}\\global\\work`, allowedTools: ["WebFetch"], extraDirs: [], kb: KB_OFF, glossary: GL_OFF };
 
 export const liveEvents: Record<string, RunEvent[]> = {
 	t0000000005: [

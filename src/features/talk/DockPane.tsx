@@ -16,7 +16,7 @@ import { TalkPane, TalkTag, useTalkActions } from "./Talks";
 /**
  * 옆 칸 대화. 본문 옆의 레이아웃 칸이라 보드 · 산출물 · 설정을 쓰는 동안 그대로 남는다.
  * 이슈 · 산출물 상세 창은 본문 칸 안에서만 열려 이 칸을 가리지 않는다(useSheetBesideDock).
- * 띄울 수 있는 것은 앱 대화와 프로젝트 대화다. 메모의 대화는 「대화로 이어 가기」로 갈라 낸 뒤 띄운다.
+ * 띄울 수 있는 것은 일반 대화와 프로젝트 대화다. 메모의 대화는 「대화로 이어 가기」로 갈라 낸 뒤 띄운다.
  */
 export function DockPane() {
 	const dock = useUi((s) => s.dock);
@@ -117,12 +117,12 @@ function DockTalkCommands({ talk }: { talk: Issue }) {
 	return dialogs;
 }
 
-/** 머리의 제목이 곧 대화 고르기다. 대화 화면 목록과 같이 앱 · 프로젝트별로 묶어 보인다. */
+/** 머리의 제목이 곧 대화 고르기다. 대화 화면 목록과 같이 일반 · 프로젝트별로 묶어 보인다. */
 function TalkPicker({ talk }: { talk: Issue | undefined }) {
 	const { data: projects = [] } = useProjects();
 	const { app, byProject } = useAllTalks(projects);
 	const dockTalk = useUi((s) => s.dockTalk);
-	const groups = [{ key: GLOBAL_PID, label: "앱", talks: app }, ...byProject.filter((g) => g.talks.length).map((g) => ({ key: g.project.id, label: g.project.name, talks: g.talks }))];
+	const groups = [{ key: GLOBAL_PID, label: "일반", talks: app }, ...byProject.filter((g) => g.talks.length).map((g) => ({ key: g.project.id, label: g.project.name, talks: g.talks }))];
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger asChild>

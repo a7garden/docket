@@ -10,8 +10,8 @@
 //!   projects/<pid>/kb/                 지식베이스 · catalog.json · inbox/ · text/ (kb.rs)
 //!   projects/<pid>/glossary.json       어휘 사전 용어 목록 (glossary.rs)
 //!   projects/<pid>/memory.json         기억 항목 · 소화 기록 (memory.rs)
-//!   global/issues/<id>/                   앱 대화 (프로젝트 id 자리에 GLOBAL_PID · global_talk.rs)
-//!   global/project.json · work/ · backup/ 앱 대화의 권한 칸 · 작업 폴더 · 고칠 수 있게 보낸 차례 전의 설정 사본
+//!   global/issues/<id>/                   일반 대화 (프로젝트 id 자리에 GLOBAL_PID · global_talk.rs)
+//!   global/project.json · work/       일반 대화의 권한 칸 · 실행 폴더 (backup/ 은 2026.11.09 전 앱 대화가 남긴 설정 사본)
 //!   trash/<시각>-<이름>/                  지운 것은 여기로 옮긴다
 //!   plugins/<id>/plugin.json · <main>.wasm  플러그인 (설치하거나 사용자가 쓴다 · plugin_host) · 옛 정의 plugins/<id>.json
 //!   plugins-data/<id>/                    플러그인의 설정 칸 값 · 저장소 · 기록 (plugin_host)
@@ -321,19 +321,23 @@ impl Store {
 		Ok(out)
 	}
 
-	/// 앱 대화의 권한 칸(허용 · 막을 명령)만 저장한다. 이름 · 경로는 늘 정해져 있어 두지 않는다.
+	/// 일반 대화의 권한 칸(허용 · 막을 명령)만 저장한다. 이름 · 경로는 늘 정해져 있어 두지 않는다.
 	fn global_project_path(&self) -> PathBuf {
 		self.root.join("global").join("project.json")
 	}
 
-	/// 앱 대화가 도는 가상의 프로젝트. 폴더는 앱 데이터 폴더 자체이고 projects.json 에는 없다 — 보드 · 번호 · 사이드바에 섞이지 않는다.
+	/// 일반 대화가 도는 가상의 프로젝트. projects.json 에는 없다 — 보드 · 번호 · 사이드바에 섞이지 않는다.
 	/// 지식베이스 · 어휘 사전 · 워크트리 · 함께 여는 폴더는 기본값(끔 · 비움)이라 실행이 저절로 건너뛴다.
+	/// 2026.11.09 : 앱 데이터 폴더 → 빈 작업 폴더 global/work/. 앱 데이터에서 돌면 Claude 가 대화마다 앱 파일을 프로젝트로 알고 읽었다.
+	/// 폴더는 여기서 만든다 — 실행 · 「작업 폴더 열기」 · 권한 창이 모두 이 경로를 쓰고, 없으면 claude 가 뜨지 않는다.
 	pub fn global_project(&self) -> Result<Project> {
 		let saved: Project = read_json(&self.global_project_path())?;
+		let work = self.root.join("global").join("work");
+		let _ = std::fs::create_dir_all(&work);
 		Ok(Project {
 			id: GLOBAL_PID.into(),
-			name: "앱".into(),
-			path: self.root.to_string_lossy().to_string(),
+			name: "일반".into(),
+			path: work.to_string_lossy().to_string(),
 			allowed_tools: saved.allowed_tools,
 			denied_tools: saved.denied_tools,
 			plan_vcs_read: false,
@@ -411,7 +415,7 @@ impl Store {
 	/// 산출물 설정 · 지식베이스 · 어휘 사전은 각 화면이 따로 저장한다 — 여기서 덮으면 이 창이 들고 있던 옛 값이 그 화면의 변경을 지운다.
 	pub fn save_project(&self, input: &Project) -> Result<Project> {
 		let _g = self.guard();
-		// 앱 대화는 권한 칸만 받는다. 이름 · 경로 · 워크트리 · 함께 여는 폴더는 뜻이 없다.
+		// 일반 대화는 권한 칸만 받는다. 이름 · 경로 · 워크트리 · 함께 여는 폴더는 뜻이 없다.
 		if input.id == GLOBAL_PID {
 			return self.save_global_project(&input.allowed_tools, &input.denied_tools);
 		}
@@ -1501,7 +1505,7 @@ impl Store {
 
 	/// 앱이 닫혀 끊긴 실행을 정리한다. 남겨 두면 그 이슈가 영원히 「실행 중」으로 보인다.
 	pub fn recover_interrupted(&self) -> Result<()> {
-		// 앱 대화도 끊길 수 있다. 앱 대화 폴더에는 산출물이 없어 아래 산출물 정리는 비어 지나간다.
+		// 일반 대화도 끊길 수 있다. 일반 대화 폴더에는 산출물이 없어 아래 산출물 정리는 비어 지나간다.
 		let mut projects = self.projects()?;
 		projects.push(self.global_project()?);
 		for p in projects {

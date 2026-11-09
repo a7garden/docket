@@ -1,5 +1,5 @@
 import { useUi } from "./store";
-import { type ChatMode, GLOBAL_PID, type Issue, type RunRecord } from "./types";
+import { type ChatMode, type Issue, type RunRecord } from "./types";
 
 interface ChatModeInfo {
 	value: ChatMode;
@@ -28,12 +28,12 @@ export function chatModeInfo(mode: ChatMode) {
 export const canEdit = (mode: ChatMode) => mode === "ask" || mode === "auto" || mode === "bypass";
 
 /**
- * 처음 쓰는 대화의 모드. 프로젝트 대화는 터미널 claude 처럼 묻고 고치는 수동 승인으로, 앱 대화는 앱 데이터를 고치므로 읽기 전용으로,
+ * 처음 쓰는 대화의 모드. 프로젝트 · 일반 대화는 터미널 claude 처럼 묻고 고치는 수동 승인으로,
  * 메모 대화는 고치라고 할 때 바로 고치도록 자동 승인으로 시작한다.
+ * 2026.11.09 : 일반 대화도 수동 승인. 앱 데이터 폴더에서 돌던 때는 앱 파일을 지키려고 읽기 전용이었다.
  */
 export function defaultChatMode(issue: Issue): ChatMode {
-	if (!issue.talk) return "auto";
-	return issue.projectId === GLOBAL_PID ? "read" : "ask";
+	return issue.talk ? "ask" : "auto";
 }
 
 /** 그 차례가 돈 모드. 모드가 생기기 전의 기록은 권한 이름으로 안다. */

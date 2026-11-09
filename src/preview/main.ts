@@ -1,6 +1,6 @@
 // 미리보기: Tauri 없이 브라우저에서 화면을 띄운다. 가짜 데이터로 명령에 답하고 실행 사건을 흉내 낸다.
 // 쓰는 곳: preview.html (vite 개발 서버에서만 열린다). ?theme=light 로 밝은 테마, ?empty=1 로 첫 화면.
-// ?dock=<대화 id>[&dockSide=left] 로 그 대화를 옆 칸에 띄운 채 연다(앱 대화는 g 로 시작한다). ?issue=<id> 로 메모 상세 창을 연다.
+// ?dock=<대화 id>[&dockSide=left] 로 그 대화를 옆 칸에 띄운 채 연다(일반 대화는 g 로 시작한다). ?issue=<id> 로 메모 상세 창을 연다.
 // ?window=quick 으로 빠른 메모 창을 연다. 실제 창 크기(460×300)로 보려면 브라우저 창을 그만큼 줄인다.
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import * as fx from "./fixtures";
@@ -161,7 +161,7 @@ if (q.get("talk")) {
 		}, 700);
 }
 
-// ?newTalk=<프로젝트 id> 로 저장 전 대화의 시작 화면을 연 채 띄운다(앱 대화는 global). 대화 목록이 차 있어도 볼 수 있다.
+// ?newTalk=<프로젝트 id> 로 저장 전 대화의 시작 화면을 연 채 띄운다(일반 대화는 global). 대화 목록이 차 있어도 볼 수 있다.
 if (q.get("newTalk")) {
 	const { useUi } = await import("@/lib/store");
 	useUi.getState().openNewTalk(q.get("newTalk")!);

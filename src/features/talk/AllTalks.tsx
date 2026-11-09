@@ -12,8 +12,8 @@ import { GLOBAL_PID, type Issue, type Project } from "@/lib/types";
 import { TalkRow, TalkSlot, useTalkKeys } from "./Talks";
 
 /**
- * 사이드바 아래 묶음의 「대화」. 앱 대화와 프로젝트별 대화를 보는 하나뿐인 화면이다.
- * 앱 대화와 현재 프로젝트 묶음이 펼쳐져 있다. 다른 프로젝트 묶음은 접혀 있다가 필요할 때 편다.
+ * 사이드바 아래 묶음의 「대화」. 일반 대화와 프로젝트별 대화를 보는 하나뿐인 화면이다.
+ * 일반 대화와 현재 프로젝트 묶음이 펼쳐져 있다. 다른 프로젝트 묶음은 접혀 있다가 필요할 때 편다.
  * 프로젝트 대화를 열어도 사이드바의 현재 프로젝트는 그대로다. 프로젝트가 하나도 없어도 열린다.
  */
 export function AllTalks() {
@@ -32,9 +32,9 @@ export function AllTalks() {
 	const home = projects.find((p) => p.id === projectId);
 	// 「새 대화」 · Ctrl+N 이 만들 자리. 지금 보는 대화와 같은 자리이고, 연 대화가 없으면 현재 프로젝트다.
 	const target = talk?.projectId ?? home?.id ?? GLOBAL_PID;
-	const targetName = target === GLOBAL_PID ? "앱" : (projects.find((p) => p.id === target)?.name ?? "");
+	const targetName = target === GLOBAL_PID ? "일반" : (projects.find((p) => p.id === target)?.name ?? "");
 
-	// 연 대화가 여기 없으면(처음 · 지운 뒤) 현재 프로젝트의 가장 최근 대화를, 없으면 가장 최근 앱 대화를 연다.
+	// 연 대화가 여기 없으면(처음 · 지운 뒤) 현재 프로젝트의 가장 최근 대화를, 없으면 가장 최근 일반 대화를 연다.
 	// 그것도 없으면 저장 전 대화의 시작 화면을 연다. 프로젝트 목록을 받기 전에는 현재 프로젝트를 몰라 기다린다.
 	const fallback = byProject.find((g) => g.project.id === home?.id)?.talks[0] ?? appTalks[0];
 	useEffect(() => {
@@ -69,7 +69,7 @@ export function AllTalks() {
 						<NewTalk projects={projects} target={target} targetName={targetName} onCreate={create} />
 					</div>
 					<nav {...rove} className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2">
-						<TalkGroup groupKey={GLOBAL_PID} label="앱" hint="어느 프로젝트에도 묶이지 않고 이 앱의 플러그인 · 설정 · 기록을 다루는 대화" talks={appTalks} sel={sel} />
+						<TalkGroup groupKey={GLOBAL_PID} label="일반" hint="어느 프로젝트에도 묶이지 않은 대화" talks={appTalks} sel={sel} />
 						{byProject
 							.filter((g) => g.talks.length > 0)
 							.map((g) => (
@@ -101,7 +101,7 @@ function NewTalk({ projects, target, targetName, onCreate }: { projects: Project
 					</Button>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="end" className="pop w-56">
-					<DropdownMenuItem onSelect={() => onCreate(GLOBAL_PID)}>앱 대화</DropdownMenuItem>
+					<DropdownMenuItem onSelect={() => onCreate(GLOBAL_PID)}>일반 대화</DropdownMenuItem>
 					{projects.length > 0 && (
 						<>
 							<DropdownMenuSeparator />

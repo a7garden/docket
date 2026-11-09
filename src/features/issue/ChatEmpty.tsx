@@ -21,10 +21,11 @@ const PROJECT_STARTERS: Starter[] = [
 	{ label: "최근 바뀐 것 요약", prompt: "최근 커밋에서 바뀐 것을 요약해 줘." },
 ];
 
-const APP_STARTERS: Starter[] = [
-	{ label: "플러그인 만드는 법", prompt: "이 앱의 플러그인은 어떻게 만들어?" },
-	{ label: "설정 살펴보기", prompt: "지금 설정을 살펴보고 눈여겨볼 것을 알려 줘." },
-	{ label: "최근 기록 요약", prompt: "최근 대화와 실행 기록을 요약해 줘." },
+/** 일반 대화는 주제가 없다. 저장소 없이 바로 답할 수 있는 흔한 쓰임만 둔다. */
+const GENERAL_STARTERS: Starter[] = [
+	{ label: "글 다듬기", prompt: "아래 글을 읽기 쉽게 다듬어 줘.\n\n" },
+	{ label: "개념 설명", prompt: "다음을 예시와 함께 쉽게 설명해 줘: " },
+	{ label: "아이디어 정리", prompt: "다음 아이디어를 장단점과 함께 정리해 줘: " },
 ];
 
 const ISSUE_STARTERS: Starter[] = [
@@ -35,7 +36,7 @@ const ISSUE_STARTERS: Starter[] = [
 
 function startersOf(issue: Issue) {
 	if (!issue.talk) return ISSUE_STARTERS;
-	return issue.projectId === GLOBAL_PID ? APP_STARTERS : PROJECT_STARTERS;
+	return issue.projectId === GLOBAL_PID ? GENERAL_STARTERS : PROJECT_STARTERS;
 }
 
 /** 시작 화면의 제목과 설명. 어느 저장소 · 메모를 두고 묻는지 바로 알게 한다. */
@@ -45,7 +46,7 @@ export function ChatIntro({ issue, compact = false }: { issue: Issue; compact?: 
 	const [title, desc] = !issue.talk
 		? ["이 메모로 무엇부터 할까요?", `아래에 적으면 메모${issue.plan ? " · 계획" : ""}을 읽고 새 세션을 엽니다. 묻기만 할 수도, 바로 고치게 할 수도 있고 고친 파일은 변경 탭에 쌓입니다.`]
 		: issue.projectId === GLOBAL_PID
-			? ["이 앱에 대해 무엇을 물어볼까요?", "어느 프로젝트에도 묶이지 않고 플러그인 · 설정 · 기록을 다룹니다."]
+			? ["무엇이든 물어보세요", "어느 프로젝트에도 묶이지 않은 대화입니다. 「작업 메모로 남겨 줘」라고 하면 이름을 댄 프로젝트의 보드에 메모를 만듭니다."]
 			: [`${name ?? "이 저장소"} 에 대해 무엇을 물어볼까요?`, "Claude 가 코드를 읽고 답합니다. 묻다가 「작업 메모로 등록해 줘」라고 하면 보드에 메모를 만듭니다."];
 	return (
 		<div className="mx-auto flex w-full max-w-3xl flex-col gap-1.5 text-center break-keep">

@@ -373,7 +373,7 @@ function ChatTurn({ issue, root, run, memos }: { issue: Issue; root: string; run
 
 /**
  * 대화가 보드에 만든 메모 한 건. 기록 글은 `#번호 제목`, 실패했으면 `실패 · 까닭` 이다.
- * 앱 대화는 다른 프로젝트의 보드에 남기므로 `@<프로젝트 id> #번호 제목` 꼴이다. 그때는 어느 보드인지 앞에 보인다.
+ * 일반 대화는 다른 프로젝트의 보드에 남기므로 `@<프로젝트 id> #번호 제목` 꼴이다. 그때는 어느 보드인지 앞에 보인다.
  */
 function MemoLine({ projectId, entry }: { projectId: string; entry: HistoryEntry }) {
 	const m = /^@(\S+) (.*)$/s.exec(entry.text);
