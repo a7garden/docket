@@ -25,9 +25,14 @@ use crate::store::{Store, settle};
 
 /* ---------- 결과 형식 ---------- */
 
-const PLAN_SCHEMA: &str = r#"{"type":"object","properties":{"title":{"type":"string"},"summary":{"type":"string"},"plan":{"type":"string"},"steps":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"detail":{"type":"string"},"files":{"type":"array","items":{"type":"string"}}},"required":["title","detail","files"]}},"files":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"change":{"type":"string"}},"required":["path","change"]}},"risks":{"type":"array","items":{"type":"string"}},"questions":{"type":"array","items":{"type":"object","properties":{"header":{"type":"string"},"question":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"description":{"type":"string"},"recommended":{"type":"boolean"}},"required":["label","description"]}},"multi":{"type":"boolean"}},"required":["header","question","options"]}}},"required":["title","summary","plan","steps","files","risks","questions"]}"#;
-
-const IMPL_SCHEMA: &str = r#"{"type":"object","properties":{"summary":{"type":"string"},"changed":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"what":{"type":"string"}},"required":["path","what"]}},"verification":{"type":"string"},"followups":{"type":"array","items":{"type":"string"}},"screenshots":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"caption":{"type":"string"}},"required":["path","caption"]}}},"required":["summary","changed","verification"]}"#;
+/// 계획 · 구현 · 수정 · 되돌리기가 함께 쓰는 결과 형식. 계획 칸(title · plan · steps · files · risks · questions)과
+/// 구현 칸(changed · verification · followups · screenshots)을 한 스키마에 담고, 무엇을 채울지는 프롬프트(PLAN_FORMAT · IMPL_FORMAT)가 정한다.
+/// 2026.11.10 : 계획 · 구현 스키마를 하나로 합쳤다. --json-schema 는 StructuredOutput 도구의 정의로 실려, 스키마가 바뀌면 도구 목록이 바뀌고
+///   이어 붙인 세션의 캐시를 하나도 읽지 못한다 — 계획 → 구현으로 넘어갈 때마다 앞 문맥 12만~38만 토큰을 새로 썼다
+///   (CLI 2.1.316 실측: 계획 스키마로 연 세션을 구현 스키마로 잇자 read=0).
+///   칸은 모두 필수로 두고 쓰지 않는 칸은 빈 값으로 받는다. summary 만 필수로 두었더니 Haiku 가 changed 를 summary 글 안에
+///   `</summary><parameter …>` 꼴로 흘린 결과가 검증을 통과했다. 필수 칸이 빠지면 CLI 가 다시 내게 해 그런 결과를 걸러 낸다.
+const RUN_SCHEMA: &str = r#"{"type":"object","properties":{"title":{"type":"string"},"summary":{"type":"string"},"plan":{"type":"string"},"steps":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"detail":{"type":"string"},"files":{"type":"array","items":{"type":"string"}}},"required":["title","detail","files"]}},"files":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"change":{"type":"string"}},"required":["path","change"]}},"risks":{"type":"array","items":{"type":"string"}},"questions":{"type":"array","items":{"type":"object","properties":{"header":{"type":"string"},"question":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"description":{"type":"string"},"recommended":{"type":"boolean"}},"required":["label","description"]}},"multi":{"type":"boolean"}},"required":["header","question","options"]}},"changed":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"what":{"type":"string"}},"required":["path","what"]}},"verification":{"type":"string"},"followups":{"type":"array","items":{"type":"string"}},"screenshots":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"caption":{"type":"string"}},"required":["path","caption"]}}},"required":["title","summary","plan","steps","files","risks","questions","changed","verification","followups","screenshots"]}"#;
 
 /// skip · reason 은 자동 갱신이 「반영할 것이 없다」고 답하는 칸이다. 요청이 그렇게 시킬 때만 쓴다.
 const FILE_SCHEMA: &str = r#"{"type":"object","properties":{"title":{"type":"string"},"summary":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"skip":{"type":"boolean"},"reason":{"type":"string"}},"required":["title","summary","files"]}"#;
@@ -49,7 +54,18 @@ const DENY_FOREIGN_DOC_SKILLS: &[&str] = &[
 	"Skill(anti-slop)",
 ];
 
-const READ_ONLY_TOOLS: &str = "Read,Grep,Glob";
+/// 계획 · 구현 · 대화 · 산출물 실행이 모두 여는 도구. 실행 종류마다 다르게 열지 않는다 — 읽기 전용은 아래 READ_DENY 가 맡는다.
+/// 2026.11.10 : 계획은 Read · Grep · Glob 만, 구현은 CLI 기본 도구 전부(28~32개)를 열었다. 도구 목록은 요청의 맨 앞이라
+///   목록이 바뀌면 이어 붙인 세션이 앞 문맥을 통째로 새로 쓴다(CLI 2.1.316 실측: 3개로 연 세션을 30개로 잇자 read=0 · write=30,483).
+///   목록을 고정하자 권한 모드 · 허용 · 거부 목록이 달라도 캐시를 이어 읽었다(read=25,234).
+///   Cron · 원격 실행 · 알림 · 워크트리 · 다중 에이전트 같은 대화형 도구는 뺐다. 이 앱의 실행에서 쓸 일이 없고 차례마다 정의가 실린다.
+const RUN_TOOLS: &str = "Task,Bash,PowerShell,Read,Edit,Write,Glob,Grep,NotebookEdit,LSP,Skill,ToolSearch,WebFetch,WebSearch";
+
+/// 계획 · 읽기 대화의 편집을 막는 거부 규칙. 거부는 허용보다 앞서 사용자 전역 허용 목록에 Edit 가 있어도 막힌다.
+/// 맨 이름(`Edit`)이나 `PowerShell(*)` 처럼 모두를 뜻하는 규칙은 도구를 목록에서 빼 버려 RUN_TOOLS 를 고정한 뜻이 없어진다.
+/// 2026.11.10 실측(CLI 2.1.316): `Edit(//**)` 는 도구를 남긴 채 작업 폴더 · --add-dir 폴더의 Edit 와 새 파일 Write 를 모두 막았다.
+/// 명령(Bash · PowerShell)은 허용 목록에 없으면 묻고, 계획은 물을 곳이 없어 거부된다.
+const READ_DENY: &[&str] = &["Edit(//**)", "Write(//**)", "NotebookEdit(//**)"];
 
 /// 계획 · 읽기 대화에 여는 버전 관리 조회 명령. 상태를 바꾸는 하위 명령은 넣지 않는다 (전역 지침의 SVN 읽기 전용 목록과 같다).
 const VCS_READ: &[&str] = &[
@@ -265,8 +281,6 @@ pub fn suggest_rules(tool: &str, input: &Value, root: &str) -> Vec<String> {
 
 /// 한 실행의 권한. 인자를 짜는 곳과 실행 기록을 남기는 곳이 같은 값을 쓰도록 여기서만 정한다.
 struct Perms {
-	/// 쓸 수 있는 도구를 이것으로 묶는다. None 이면 CLI 기본 도구 전부
-	tools: Option<String>,
 	/// 늘 적는다. 적지 않으면 사용자 전역 설정의 기본 모드(auto 등)를 따라 열어 두지 않은 명령까지 통과할 수 있다.
 	mode: &'static str,
 	allow: Vec<String>,
@@ -275,12 +289,14 @@ struct Perms {
 }
 
 fn read_perms(p: &Project) -> Perms {
-	let (tools, allow, label) = if p.plan_vcs_read {
-		(format!("{READ_ONLY_TOOLS},Bash"), VCS_READ.iter().map(|s| s.to_string()).collect(), "읽기 · 이력 조회")
+	let (allow, label) = if p.plan_vcs_read {
+		(VCS_READ.iter().map(|s| s.to_string()).collect(), "읽기 · 이력 조회")
 	} else {
-		(READ_ONLY_TOOLS.to_string(), Vec::new(), "읽기 전용")
+		(Vec::new(), "읽기 전용")
 	};
-	Perms { tools: Some(tools), mode: "default", allow, deny: p.denied_tools.clone(), label: label.into() }
+	let mut deny = p.denied_tools.clone();
+	deny.extend(READ_DENY.iter().map(|s| s.to_string()));
+	Perms { mode: "default", allow, deny, label: label.into() }
 }
 
 fn edit_perms(p: &Project, all: bool, once: bool) -> Perms {
@@ -291,7 +307,7 @@ fn edit_perms(p: &Project, all: bool, once: bool) -> Perms {
 		(true, false) => "모두 허용",
 		_ => "편집 · 허용 목록",
 	};
-	Perms { tools: None, mode: "acceptEdits", allow, deny: p.denied_tools.clone(), label: label.into() }
+	Perms { mode: "acceptEdits", allow, deny: p.denied_tools.clone(), label: label.into() }
 }
 
 fn job_perms(job: &Job, p: &Project) -> Perms {
@@ -301,7 +317,7 @@ fn job_perms(job: &Job, p: &Project) -> Perms {
 		// 대화는 입력칸의 선택만 따른다. 프로젝트의 구현 권한은 구현 · 수정의 것이다.
 		Job::Chat { mode: ChatMode::Read, .. } => read_perms(p),
 		// 수동 승인: 모든 도구를 열고 default 모드로 돈다. 허용 목록 밖은 CLI 가 묻고, 앱이 그 물음을 화면 카드로 받는다(exec_with).
-		Job::Chat { mode: ChatMode::Ask, .. } => Perms { tools: None, mode: "default", allow: p.allowed_tools.clone(), deny: p.denied_tools.clone(), label: "수동 승인".into() },
+		Job::Chat { mode: ChatMode::Ask, .. } => Perms { mode: "default", allow: p.allowed_tools.clone(), deny: p.denied_tools.clone(), label: "수동 승인".into() },
 		Job::Chat { mode: ChatMode::Auto, .. } => Perms { label: "자동 승인".into(), ..edit_perms(p, false, false) },
 		Job::Chat { mode: ChatMode::Bypass, .. } => {
 			let mut perms = Perms { label: "권한 무시".into(), ..edit_perms(p, true, false) };
@@ -350,9 +366,7 @@ fn run_settings(deny: &[&str]) -> Value {
 /// --allowedTools 는 값을 여럿 받으므로 뒤에 곧바로 다른 플래그가 와야 한다. 거부 목록은 --settings 로 건다.
 /// 사용자 전역 · 저장소 설정의 규칙도 CLI 가 함께 읽어 합친다.
 fn perm_args(a: &mut Vec<String>, perms: &Perms, extra_deny: &[&str]) {
-	if let Some(t) = &perms.tools {
-		a.extend(["--tools".into(), t.clone()]);
-	}
+	a.extend(["--tools".into(), RUN_TOOLS.into()]);
 	a.extend(["--permission-mode".into(), perms.mode.into()]);
 	if !perms.allow.is_empty() {
 		a.push("--allowedTools".into());
@@ -1664,6 +1678,7 @@ const PLAN_FORMAT: &str = "\
   header(12자 안팎의 꼬리표) · question(물음표로 끝나는 한 문장) · options(고를 답 2~4개. label 은 짧게, description 은 고르면 무엇이 달라지는지) · multi(여럿을 함께 고를 수 있으면 true).
   권하는 답이 있으면 그 하나에만 recommended 를 true 로 단다. 사용자가 선택지 밖의 답을 직접 적을 수 있으니 「기타」 선택지는 넣지 않는다.
 
+구현 결과 칸은 빈 값으로 둔다 — changed · followups · screenshots 는 빈 배열, verification 은 빈 글.
 메모가 모호하면 코드에서 가장 그럴듯한 해석을 고르고 그 가정을 plan 에 적는다.";
 
 /// 화면은 마크다운의 ```html · ```svg 블록을 미리 보기로 그린다. 사용자가 글만 읽고 화면 설계를 판단하기 어려워서다.
@@ -1746,7 +1761,7 @@ fn issue_prompt(job: &Job, v: &IssueView, resumed: bool) -> String {
 	match job {
 		Job::Plan { feedback: None } => format!(
 			"아래 메모는 사용자가 포스트잇처럼 적어 둔 개발 이슈다. 이 저장소의 코드를 읽고 구현 계획을 세워라. \
-			이번 단계에서는 파일을 고치지 않는다 (읽기 도구만 열려 있다).\n\n{}\n{PLAN_FORMAT}\n\n{VISUAL_RULE}\n\n{RULES}\n",
+			이번 단계에서는 파일을 고치지 않는다 (편집 · 명령은 막혀 있다).\n\n{}\n{PLAN_FORMAT}\n\n{VISUAL_RULE}\n\n{RULES}\n",
 			note_block(v)
 		),
 		Job::Plan { feedback: Some(f) } if resumed => format!(
@@ -1931,7 +1946,8 @@ const IMPL_FORMAT: &str = "\
 - changed: 바꾼 파일(저장소 기준 상대 경로)과 바꾼 내용 한 줄
 - verification: 무엇으로 확인했는지. 돌리지 못한 확인은 못 했다고 적는다. 권한이 없어 막힌 명령은 무엇이 왜 필요했는지 적는다.
 - followups: 사용자가 이어서 할 일. 없으면 빈 배열.
-- screenshots: 찍은 결과 화면. 화면이 바뀌지 않았거나 찍지 못했으면 빈 배열.";
+- screenshots: 찍은 결과 화면. 화면이 바뀌지 않았거나 찍지 못했으면 빈 배열.
+계획 칸은 빈 값으로 둔다 — title · plan 은 빈 글, steps · files · risks · questions 는 빈 배열.";
 
 /// 산출물 정보 · 작성 지침 · 템플릿 · 요청 · 지금 판을 묶는다. 마크다운으로 받든 파일로 받든 같은 재료를 넘긴다.
 fn doc_material(v: &DeliverableView, request: &str, current: Option<&str>) -> String {
@@ -2116,10 +2132,10 @@ fn job_args(job: &Job, s: &Settings, p: &Project, issue: &Issue, add_dir: &Path,
 	let guard = chat_guard(job, add_dir);
 	perm_args(&mut a, &job_perms(job, p), &guard.iter().map(String::as_str).collect::<Vec<_>>());
 	match job {
-		Job::Plan { .. } => a.extend(["--json-schema".into(), PLAN_SCHEMA.into()]),
-		// 대화는 결과 형식을 정하지 않는다. 답은 글로 받는다.
+		// 대화는 결과 형식을 정하지 않는다. 답은 글로 받는다. 그래서 계획 · 구현과 대화가 번갈아 도는 세션은 그 경계에서 캐시를 새로 쓴다
+		// (StructuredOutput 도구가 생기고 빠진다). 같은 세션의 계획 → 구현이 훨씬 잦아 그쪽을 맞췄다(2026.11.10).
 		// 표준 입출력으로 묻고 답한다(exec_with): 프롬프트는 stream-json 한 줄, 승인 요청은 control_request 로 온다. 답 글은 조각으로 흘려 받는다.
-		// 읽기 전용은 읽기 도구만 열어 물을 것이 없다 — 예전처럼 묻지 않고 막는다.
+		// 읽기 전용은 편집이 거부 규칙(READ_DENY)으로 막혀 물을 것이 없다 — 예전처럼 묻지 않고 막는다.
 		Job::Chat { mode, .. } => {
 			a.extend(["--input-format".into(), "stream-json".into(), "--include-partial-messages".into()]);
 			if *mode != ChatMode::Read
@@ -2128,7 +2144,7 @@ fn job_args(job: &Job, s: &Settings, p: &Project, issue: &Issue, add_dir: &Path,
 					a.extend(["--permission-prompt-tool".into(), "stdio".into()]);
 				}
 		}
-		_ => a.extend(["--json-schema".into(), IMPL_SCHEMA.into()]),
+		_ => a.extend(["--json-schema".into(), RUN_SCHEMA.into()]),
 	}
 	if let Some(sid) = resume {
 		a.extend(["--resume".into(), sid.to_string()]);
@@ -3270,7 +3286,7 @@ fn doc_args(s: &Settings, p: &Project, data_dir: &Path, out: &Path, plugin: Opti
 	dirs.extend(plugin);
 	dirs.extend(extra.iter().map(PathBuf::as_path));
 	let mut a = base_args(s, pick_model(s, "", RunKind::Document), pick_effort(s, "", RunKind::Document), &dirs);
-	let perms = Perms { tools: None, mode: "acceptEdits", allow: vec!["Bash".into(), "Skill".into()], deny: p.denied_tools.clone(), label: String::new() };
+	let perms = Perms { mode: "acceptEdits", allow: vec!["Bash".into(), "Skill".into()], deny: p.denied_tools.clone(), label: String::new() };
 	let extra_deny: Vec<String> = extra.iter().flat_map(|d| ["Edit", "Write"].map(|t| format!("{t}({})", abs_rule_glob(d)))).collect();
 	let deny: Vec<&str> = DENY_REPO_EDITS.iter().chain(DENY_FOREIGN_DOC_SKILLS).copied().chain(extra_deny.iter().map(String::as_str)).collect();
 	perm_args(&mut a, &perms, &deny);
@@ -3942,7 +3958,8 @@ mod tests {
 
 		let read = args(ChatMode::Read);
 		assert_eq!(at(&read, "--permission-mode").as_deref(), Some("default"));
-		assert!(at(&read, "--tools").unwrap().starts_with("Read,Grep,Glob"));
+		assert_eq!(at(&read, "--tools").as_deref(), Some(RUN_TOOLS));
+		assert!(settings(&read).contains("Edit(//**)") && settings(&read).contains("Write(//**)"), "읽기 대화의 편집을 막지 않았다");
 		assert!(!settings(&read).contains("issue.json"));
 		// 읽기 전용은 물을 것이 없다 — 묻지 않고 막는다. 프롬프트는 stream-json 으로 넣고 답 글은 조각으로 받는다.
 		assert_eq!(at(&read, "--permission-prompts").as_deref(), Some("none"));
@@ -3950,7 +3967,8 @@ mod tests {
 		assert!(read.iter().any(|x| x == "--include-partial-messages"));
 		// 수동 승인: 모든 도구를 열고 default 모드로 돌며, 물음은 표준 입출력으로 화면에 온다. 프로젝트 허용 목록은 묻지 않는다.
 		let ask = args(ChatMode::Ask);
-		assert!(at(&ask, "--tools").is_none(), "수동 승인이 도구를 묶었다");
+		assert_eq!(at(&ask, "--tools").as_deref(), Some(RUN_TOOLS), "대화 모드마다 도구 목록이 달라 캐시가 깨진다");
+		assert!(!settings(&ask).contains("Edit(//**)"), "수동 승인이 편집을 막았다");
 		assert_eq!(at(&ask, "--permission-mode").as_deref(), Some("default"));
 		assert_eq!(at(&ask, "--permission-prompts").as_deref(), Some("host"));
 		assert_eq!(at(&ask, "--permission-prompt-tool").as_deref(), Some("stdio"));
@@ -4104,7 +4122,7 @@ mod tests {
 		let plan = job_args(&Job::Plan { feedback: None }, &s, &p, &i, dir, None);
 		let at = |a: &[String], k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
 		assert_eq!(at(&plan, "--permission-mode").as_deref(), Some("default"));
-		assert_eq!(at(&plan, "--tools").as_deref(), Some("Read,Grep,Glob,Bash"));
+		assert!(at(&plan, "--settings").unwrap().contains("Edit(//**)"), "계획의 편집을 막지 않았다");
 		assert!(plan.iter().any(|x| x == "Bash(svn log:*)") && !plan.iter().any(|x| x == "Bash(npm test:*)"), "계획에 구현용 허용 목록이 섞였다");
 		assert!(at(&plan, "--settings").unwrap().contains("git push"), "기본 거부 목록이 걸리지 않았다");
 
@@ -4116,6 +4134,32 @@ mod tests {
 			assert!(!a.iter().any(|x| x.contains("dangerously")), "위험 플래그를 썼다: {a:?}");
 		}
 		assert_eq!(job_perms(&Job::Implement { instruction: None, allow_all: true }, &p).label, "모두 허용 · 이번만");
+		assert!(!at(&once, "--settings").unwrap().contains("Edit(//**)"), "구현의 편집을 막았다");
+	}
+
+	/// 같은 세션을 잇는 실행은 도구 목록과 결과 형식이 같아야 캐시를 이어 읽는다. 어느 하나가 달라도 앞 문맥을 통째로 새로 쓴다.
+	#[test]
+	fn session_runs_share_tools_and_schema() {
+		let p = Project { plan_vcs_read: true, ..Default::default() };
+		let (s, i, dir) = (Settings::default(), Issue::default(), Path::new("x"));
+		let at = |a: &[String], k: &str| a.iter().position(|x| x == k).map(|i| a[i + 1].clone());
+		let jobs = [
+			Job::Plan { feedback: None },
+			Job::Plan { feedback: Some("f".into()) },
+			Job::Implement { instruction: None, allow_all: false },
+			Job::Implement { instruction: None, allow_all: true },
+			Job::Rework { feedback: "f".into(), allow_all: false },
+			Job::Revert,
+		];
+		for job in &jobs {
+			let a = job_args(job, &s, &p, &i, dir, Some("sid"));
+			assert_eq!(at(&a, "--tools").as_deref(), Some(RUN_TOOLS));
+			assert_eq!(at(&a, "--json-schema").as_deref(), Some(RUN_SCHEMA));
+		}
+		for mode in [ChatMode::Read, ChatMode::Ask, ChatMode::Auto, ChatMode::Bypass] {
+			let a = job_args(&Job::Chat { text: "t".into(), mode, images: vec![] }, &s, &p, &i, dir, Some("sid"));
+			assert_eq!(at(&a, "--tools").as_deref(), Some(RUN_TOOLS));
+		}
 	}
 
 	fn at_settings(a: &[String]) -> String {
@@ -4365,7 +4409,7 @@ mod tests {
 		assert!(p.questions[0].options.is_empty());
 		assert_eq!(p.questions[1].header, "범위");
 		assert!(p.questions[1].options[0].recommended);
-		let schema: Value = serde_json::from_str(PLAN_SCHEMA).unwrap();
+		let schema: Value = serde_json::from_str(RUN_SCHEMA).unwrap();
 		assert!(schema["properties"]["steps"].is_object());
 	}
 
@@ -4432,7 +4476,8 @@ mod tests {
 			kind: "test",
 		};
 		let (mut said, mut tools) = (String::new(), Vec::new());
-		let o = exec(spec, &ctl, |ev, _| match ev {
+		// 대화는 프롬프트를 stream-json 한 줄로 받는다(0.2.12~). exec 로 넣으면 CLI 가 입력 줄을 읽지 못한다.
+		let o = exec_with(spec, Some(ChatMode::Read), &ctl, |ev, _| match ev {
 			RunEvent::Text { text } => said.push_str(text),
 			RunEvent::Tool { name, .. } => tools.push(name.clone()),
 			_ => {}
